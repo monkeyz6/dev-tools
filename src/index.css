@@ -1,0 +1,95 @@
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap');
+@import url('https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600&display=swap');
+@import 'tailwindcss';
+
+*, *::before, *::after { box-sizing: border-box; }
+
+html, body, #root {
+  height: 100%;
+  margin: 0;
+  padding: 0;
+  font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+:root {
+  --sidebar-w: 224px;
+}
+
+/* Scrollbar */
+::-webkit-scrollbar { width: 5px; height: 5px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb { background: rgba(128,128,128,0.18); border-radius: 99px; }
+::-webkit-scrollbar-thumb:hover { background: rgba(128,128,128,0.35); }
+
+/* Remove number input spinners */
+input[type='number']::-webkit-inner-spin-button,
+input[type='number']::-webkit-outer-spin-button { -webkit-appearance: none; margin: 0; }
+input[type='number'] { -moz-appearance: textfield; }
+
+/* JSON syntax highlight */
+.json-key   { color: var(--jKey); font-weight: 500; }
+.json-str   { color: var(--jStr); }
+.json-num   { color: var(--jNum); }
+.json-bool  { color: var(--jBool); }
+.json-null  { color: var(--jNull); }
+
+/* Transition prefers */
+@media (prefers-reduced-motion: reduce) {
+  * { transition-duration: 0.01ms !important; animation-duration: 0.01ms !important; }
+}
+
+/* Spring-like transitions */
+.spring { transition: all 0.22s cubic-bezier(0.34, 1.56, 0.64, 1); }
+.ease-out-fast { transition: all 0.18s cubic-bezier(0.25, 0.46, 0.45, 0.94); }
+
+/* Glassmorphism — 半透明毛玻璃材质（色值由主题变量推导，深浅主题自动适配） */
+.glass,
+.glass-sidebar {
+  --glass-alpha: 72%;
+  -webkit-backdrop-filter: blur(14px) saturate(160%);
+  backdrop-filter: blur(14px) saturate(160%);
+}
+.glass {
+  background: color-mix(in srgb, var(--bg) var(--glass-alpha), transparent);
+  /* backdrop-filter 会创建层叠上下文，困住内部下拉的 z-index；
+     提升整个玻璃条，使下拉能覆盖其下的滚动内容/面板 */
+  position: relative;
+  z-index: 10;
+}
+.glass-sidebar { background: color-mix(in srgb, var(--sidebar) var(--glass-alpha), transparent); }
+
+/* 不支持 backdrop-filter 时回退实色 */
+@supports not (backdrop-filter: blur(1px)) {
+  .glass { background: var(--bg); }
+  .glass-sidebar { background: var(--sidebar); }
+}
+
+/* 减少透明度：去除模糊、提高不透明度 */
+@media (prefers-reduced-transparency: reduce) {
+  .glass, .glass-sidebar { --glass-alpha: 100%; backdrop-filter: none; -webkit-backdrop-filter: none; }
+}
+
+/* 增强对比度：玻璃面更实、边框更深 */
+@media (prefers-contrast: more) {
+  .glass, .glass-sidebar { --glass-alpha: 94%; }
+}
+
+/* 主题切换平滑过渡（仅切换瞬间生效，避免常驻全局 transition 开销） */
+.theme-x, .theme-x * {
+  transition: background-color 0.25s ease, color 0.25s ease, border-color 0.25s ease, box-shadow 0.25s ease !important;
+}
+
+/* Diff lines */
+.diff-add { background: var(--addBg) !important; }
+.diff-add .line-content { color: var(--addText) !important; }
+.diff-rm  { background: var(--rmBg) !important; }
+.diff-rm  .line-content { color: var(--rmText) !important; }
+
+/* Focus rings */
+:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; border-radius: 4px; }
+textarea:focus-visible { outline: none; }
+
+/* Selection */
+::selection { background: var(--accentSub); color: var(--text); }
