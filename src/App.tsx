@@ -595,7 +595,7 @@ function Badge({ children, color }: { children: React.ReactNode; color?: 'ok' | 
     : color === 'warn' ? { background: 'var(--warnBg)', color: 'var(--warn)' }
     : { background: 'var(--s2)', color: 'var(--t2)' }
   return (
-    <span className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full text-xs font-semibold" style={s}>
+    <span className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full text-xs font-semibold whitespace-nowrap" style={s}>
       {children}
     </span>
   )
@@ -1650,6 +1650,8 @@ interface BatchReport {
   endTime: number
   durationMs: number
   apiType: ApiType
+  endpoint: string
+  bodyText: string
   models: string[]
   n: number
   c: number
@@ -1705,6 +1707,25 @@ function buildRequestBody(bodyText: string, model: string): Record<string, unkno
   }
   const obj = JSON.parse(bodyText) as Record<string, unknown>
   return { ...obj, model }
+}
+
+// 单引号内的单引号需要转义成 '\''，保证生成的 curl 命令在 shell 里语法安全
+function shellSingleQuote(s: string): string {
+  return `'${s.replace(/'/g, `'\\''`)}'`
+}
+function buildCurlCommand(report: { apiType: ApiType; endpoint: string }, bodyObj: unknown, apiKey: string): string {
+  const headers: string[] = ['-H ' + shellSingleQuote('content-type: application/json')]
+  if (report.apiType === 'anthropic') {
+    headers.push('-H ' + shellSingleQuote(`x-api-key: ${apiKey || 'YOUR_API_KEY'}`))
+    headers.push('-H ' + shellSingleQuote('anthropic-version: 2023-06-01'))
+  } else {
+    headers.push('-H ' + shellSingleQuote(`Authorization: Bearer ${apiKey || 'YOUR_API_KEY'}`))
+  }
+  return [
+    `curl -X POST ${shellSingleQuote(report.endpoint)} \\`,
+    ...headers.map(h => `  ${h} \\`),
+    `  -d ${shellSingleQuote(JSON.stringify(bodyObj))}`,
+  ].join('\n')
 }
 
 // ── Token / model 提取（非流式）──
@@ -1931,8 +1952,9 @@ function reportToCsv(report: BatchReport): string {
   return '﻿' + rows.map(r => r.map(v => '"' + String(v).replace(/"/g, '""') + '"').join(',')).join('\r\n')
 }
 
-// ── 持久化：配置（除 API Key 外）与历史报告（最多 20 条）──
+// ── 持久化：配置、加密后的 API Key、历史报告（最多 20 条）──
 const LLM_CFG_KEY = 'llmbatch-config'
+const LLM_KEY_STORAGE_KEY = 'llmbatch-key'
 const LLM_HIST_KEY = 'llmbatch-history'
 const LLM_HIST_MAX = 20
 
@@ -1958,6 +1980,51 @@ function saveLlmCfg(cfg: LlmBatchCfgStored) {
   if (typeof window === 'undefined') return
   try { localStorage.setItem(LLM_CFG_KEY, JSON.stringify(cfg)) } catch { /* ignore */ }
 }
+
+// API Key 用 AES-GCM 加密后再落盘，避免它以明文形式直接躺在 localStorage 里被一眼看到
+// 或被简单脚本正则扫描出来。注意：这是纯前端工具，没有服务端，加密密钥必然内嵌在代码里，
+// 无法防御能在本页面执行任意 JS 的攻击者（如恶意浏览器扩展/XSS）——它只是「不落盘明文」，不是真正的机密保护。
+const LLM_KEY_PASSPHRASE = 'dev-toolkit-llmbatch-v1'
+function llmCryptoAvailable(): boolean {
+  return typeof window !== 'undefined' && typeof crypto !== 'undefined' && !!crypto.subtle
+}
+let llmCryptoKeyPromise: Promise<CryptoKey> | null = null
+function deriveLlmCryptoKey(): Promise<CryptoKey> {
+  if (!llmCryptoKeyPromise) {
+    llmCryptoKeyPromise = crypto.subtle.digest('SHA-256', new TextEncoder().encode(LLM_KEY_PASSPHRASE))
+      .then(hash => crypto.subtle.importKey('raw', hash, 'AES-GCM', false, ['encrypt', 'decrypt']))
+  }
+  return llmCryptoKeyPromise
+}
+function llmBufToBase64(buf: ArrayBuffer): string {
+  let bin = ''
+  new Uint8Array(buf).forEach(b => { bin += String.fromCharCode(b) })
+  return btoa(bin)
+}
+function llmBase64ToBuf(b64: string): ArrayBuffer {
+  const bin = atob(b64)
+  const arr = new Uint8Array(bin.length)
+  for (let i = 0; i < bin.length; i++) arr[i] = bin.charCodeAt(i)
+  return arr.buffer
+}
+async function encryptLlmApiKey(plain: string): Promise<string> {
+  if (!plain || !llmCryptoAvailable()) return ''
+  const key = await deriveLlmCryptoKey()
+  const iv = crypto.getRandomValues(new Uint8Array(12))
+  const cipherBuf = await crypto.subtle.encrypt({ name: 'AES-GCM', iv }, key, new TextEncoder().encode(plain))
+  return llmBufToBase64(iv.buffer) + '.' + llmBufToBase64(cipherBuf)
+}
+async function decryptLlmApiKey(stored: string): Promise<string> {
+  if (!stored || !llmCryptoAvailable()) return ''
+  try {
+    const [ivB64, cipherB64] = stored.split('.')
+    if (!ivB64 || !cipherB64) return ''
+    const key = await deriveLlmCryptoKey()
+    const plainBuf = await crypto.subtle.decrypt({ name: 'AES-GCM', iv: new Uint8Array(llmBase64ToBuf(ivB64)) }, key, llmBase64ToBuf(cipherB64))
+    return new TextDecoder().decode(plainBuf)
+  } catch { return '' }
+}
+
 function loadLlmHistory(): BatchReport[] {
   if (typeof window === 'undefined') return []
   try {
@@ -1995,8 +2062,67 @@ const DEFAULT_LLM_BODY = `{
   "messages": [{"role": "user", "content": "Say hello."}]
 }`
 
+// 表格里的长文本单元格（模型名等）：单行截断 + 原生 title 提示，鼠标悬浮可见完整内容
+function TruncatedCell({ text, maxWidth = 160, color }: { text: string; maxWidth?: number; color?: string }) {
+  return (
+    <span className="inline-block overflow-hidden align-bottom" style={{ maxWidth, color, whiteSpace: 'nowrap', textOverflow: 'ellipsis' }} title={text}>
+      {text}
+    </span>
+  )
+}
+
+// Token 分布柱状图（输出 Token 波动始终展示；输入 Token 仅在跨请求不一致时展示，直观呈现差异）
+function LlmTokenChart({ model, results, field, title }: {
+  model: string; results: BatchResult[]; field: 'inputTokens' | 'outputTokens'; title: string
+}) {
+  const rs = results.filter(r => r.model === model).sort((a, b) => a.localIdx - b.localIdx)
+  const okVals = rs.filter(r => r.status === 'ok' && r[field] != null).map(r => r[field] as number)
+  const st = llmStatsOf(okVals)
+  const maxVal = okVals.length ? Math.max(...okVals) : 1
+  const placeholder = Math.max(1, maxVal * 0.08)
+  const chartData = rs.map(r => ({
+    label: '#' + r.localIdx,
+    value: r.status === 'ok' && r[field] != null ? (r[field] as number) : placeholder,
+    ok: r.status === 'ok' && r[field] != null,
+    display: r.status === 'ok' ? String(r[field] ?? '-') : '失败',
+  }))
+  return (
+    <div className="rounded-2xl p-4" style={{ background: 'var(--bg)', border: '1px solid var(--border)', boxShadow: 'var(--shadow)' }}>
+      <b className="text-sm" style={{ color: 'var(--text)' }}>[{model}] {title}</b>
+      <div style={{ height: 220, marginTop: 8 }}>
+        <ResponsiveContainer width="100%" height="100%">
+          <BarChart data={chartData} margin={{ top: 22, right: 8, left: 0, bottom: 0 }}>
+            <CartesianGrid stroke="var(--border)" vertical={false} />
+            <XAxis dataKey="label" tick={{ fill: 'var(--t2)', fontSize: 11 }} axisLine={{ stroke: 'var(--border)' }} tickLine={false} />
+            <YAxis tick={{ fill: 'var(--t2)', fontSize: 11 }} axisLine={false} tickLine={false} width={36} allowDecimals={false} />
+            <Tooltip
+              cursor={{ fill: 'var(--s1)' }}
+              contentStyle={{ background: 'var(--bg)', border: '1px solid var(--border)', borderRadius: 10, fontSize: 12 }}
+              labelStyle={{ color: 'var(--t2)' }}
+              formatter={(_value: unknown, _name: unknown, item: any) => [item?.payload?.ok ? item.payload.display + ' tok' : '请求失败', title]}
+            />
+            {st && <ReferenceLine y={st.mean} stroke="var(--t3)" strokeDasharray="4 3" />}
+            <Bar dataKey="value" radius={[4, 4, 0, 0]}>
+              {chartData.map((d, i) => <Cell key={i} fill={d.ok ? 'var(--accent)' : 'var(--t3)'} />)}
+              <LabelList dataKey="display" position="top" style={{ fill: 'var(--text)', fontSize: 11 }} />
+            </Bar>
+          </BarChart>
+        </ResponsiveContainer>
+      </div>
+      <div className="text-xs mt-1" style={{ color: 'var(--t2)' }}>
+        均值 {st ? st.mean.toFixed(1) : '—'} ｜ 最大 {st ? st.max : '—'} ｜ 最小 {st ? st.min : '—'} ｜ 标准差（总体）{st ? st.std.toFixed(2) : '—'}
+      </div>
+    </div>
+  )
+}
+
 // ── 报告渲染（当前报告 / 历史「查看」共用）──
-function LlmBatchReportView({ report }: { report: BatchReport }) {
+function LlmBatchReportView({ report, apiKey }: { report: BatchReport; apiKey: string }) {
+  const [viewingModel, setViewingModel] = useState<string | null>(null)
+  const viewingBodyObj = useMemo(() => {
+    if (viewingModel == null) return null
+    try { return buildRequestBody(report.bodyText, viewingModel) } catch { return null }
+  }, [viewingModel, report.bodyText])
   const consistency = useMemo(() => {
     const map: Record<string, { uniq: number[]; counts: Record<number, number>; consistent: boolean; value: number | null }> = {}
     for (const m of report.models) {
@@ -2076,7 +2202,7 @@ function LlmBatchReportView({ report }: { report: BatchReport }) {
                 const c = consistency[m]
                 return (
                   <tr key={m} style={{ borderTop: '1px solid var(--border)' }}>
-                    <td className="px-4 py-2 font-mono text-xs" style={{ color: 'var(--accent)' }}>{m}</td>
+                    <td className="px-4 py-2 font-mono text-xs"><TruncatedCell text={m} color="var(--accent)" maxWidth={260} /></td>
                     <td className="px-4 py-2 tabular-nums">{c?.value ?? (c?.uniq.length ? '不一致' : '—')}</td>
                   </tr>
                 )
@@ -2085,8 +2211,15 @@ function LlmBatchReportView({ report }: { report: BatchReport }) {
           </table>
         </div>
         {crossModelDiff != null && crossModelDiff > 0 && (
-          <div className="rounded-xl px-4 py-2.5 text-sm" style={{ background: 'var(--warnBg)', color: 'var(--warn)' }}>
+          <div className="rounded-xl px-4 py-2.5 text-sm mb-2.5" style={{ background: 'var(--warnBg)', color: 'var(--warn)' }}>
             ⚠ 不同模型对同一请求体的 Token 计算存在差异（可能是分词器不同所致），最大相差 {crossModelDiff} tokens
+          </div>
+        )}
+        {report.models.filter(m => consistency[m] && !consistency[m].consistent && consistency[m].uniq.length > 0).length > 0 && (
+          <div className="flex flex-col gap-4">
+            {report.models.filter(m => consistency[m] && !consistency[m].consistent && consistency[m].uniq.length > 0).map(m => (
+              <LlmTokenChart key={m} model={m} results={report.results} field="inputTokens" title="输入 Token 分布（不一致）" />
+            ))}
           </div>
         )}
       </div>
@@ -2095,47 +2228,9 @@ function LlmBatchReportView({ report }: { report: BatchReport }) {
       <div>
         <h3 className="text-sm font-bold mb-2.5" style={{ color: 'var(--text)' }}>② 输出 Token 波动</h3>
         <div className="flex flex-col gap-4">
-          {report.models.map(m => {
-            const rs = report.results.filter(r => r.model === m).sort((a, b) => a.localIdx - b.localIdx)
-            const okOuts = rs.filter(r => r.status === 'ok' && r.outputTokens != null).map(r => r.outputTokens as number)
-            const st = llmStatsOf(okOuts)
-            const maxVal = okOuts.length ? Math.max(...okOuts) : 1
-            const placeholder = Math.max(1, maxVal * 0.08)
-            const chartData = rs.map(r => ({
-              label: '#' + r.localIdx,
-              value: r.status === 'ok' && r.outputTokens != null ? r.outputTokens : placeholder,
-              ok: r.status === 'ok' && r.outputTokens != null,
-              display: r.status === 'ok' ? String(r.outputTokens ?? '-') : '失败',
-            }))
-            return (
-              <div key={m} className="rounded-2xl p-4" style={{ background: 'var(--bg)', border: '1px solid var(--border)', boxShadow: 'var(--shadow)' }}>
-                <b className="text-sm" style={{ color: 'var(--text)' }}>[{m}] 输出 Token 分布</b>
-                <div style={{ height: 220, marginTop: 8 }}>
-                  <ResponsiveContainer width="100%" height="100%">
-                    <BarChart data={chartData} margin={{ top: 22, right: 8, left: 0, bottom: 0 }}>
-                      <CartesianGrid stroke="var(--border)" vertical={false} />
-                      <XAxis dataKey="label" tick={{ fill: 'var(--t2)', fontSize: 11 }} axisLine={{ stroke: 'var(--border)' }} tickLine={false} />
-                      <YAxis tick={{ fill: 'var(--t2)', fontSize: 11 }} axisLine={false} tickLine={false} width={36} allowDecimals={false} />
-                      <Tooltip
-                        cursor={{ fill: 'var(--s1)' }}
-                        contentStyle={{ background: 'var(--bg)', border: '1px solid var(--border)', borderRadius: 10, fontSize: 12 }}
-                        labelStyle={{ color: 'var(--t2)' }}
-                        formatter={(_value: unknown, _name: unknown, item: any) => [item?.payload?.ok ? item.payload.display + ' tok' : '请求失败', '输出 Token']}
-                      />
-                      {st && <ReferenceLine y={st.mean} stroke="var(--t3)" strokeDasharray="4 3" />}
-                      <Bar dataKey="value" radius={[4, 4, 0, 0]}>
-                        {chartData.map((d, i) => <Cell key={i} fill={d.ok ? 'var(--accent)' : 'var(--t3)'} />)}
-                        <LabelList dataKey="display" position="top" style={{ fill: 'var(--text)', fontSize: 11 }} />
-                      </Bar>
-                    </BarChart>
-                  </ResponsiveContainer>
-                </div>
-                <div className="text-xs mt-1" style={{ color: 'var(--t2)' }}>
-                  均值 {st ? st.mean.toFixed(1) : '—'} ｜ 最大 {st ? st.max : '—'} ｜ 最小 {st ? st.min : '—'} ｜ 标准差（总体）{st ? st.std.toFixed(2) : '—'}
-                </div>
-              </div>
-            )
-          })}
+          {report.models.map(m => (
+            <LlmTokenChart key={m} model={m} results={report.results} field="outputTokens" title="输出 Token 分布" />
+          ))}
         </div>
       </div>
 
@@ -2149,7 +2244,7 @@ function LlmBatchReportView({ report }: { report: BatchReport }) {
             <table className="w-full text-sm min-w-[820px]">
               <thead style={{ background: 'var(--s1)' }}>
                 <tr className="text-xs" style={{ color: 'var(--t2)' }}>
-                  {['模型', '总请求', '成功', '失败', '输入Token总量', '输入Token均值', '输出Token总量', '输出Token均值', '输出Token最大', '输出Token最小'].map(h => (
+                  {['模型', '总请求', '成功', '失败', '输入Token总量', '输入Token均值', '输出Token总量', '输出Token均值', '输出Token最大', '输出Token最小', '操作'].map(h => (
                     <th key={h} className="text-left px-4 py-2.5 font-semibold whitespace-nowrap">{h}</th>
                   ))}
                 </tr>
@@ -2163,7 +2258,7 @@ function LlmBatchReportView({ report }: { report: BatchReport }) {
                   const so = llmStatsOf(okOut)
                   return (
                     <tr key={m} style={{ borderTop: '1px solid var(--border)' }}>
-                      <td className="px-4 py-2 font-mono text-xs" style={{ color: 'var(--accent)' }}>{m}</td>
+                      <td className="px-4 py-2 font-mono text-xs"><TruncatedCell text={m} color="var(--accent)" maxWidth={180} /></td>
                       <td className="px-4 py-2 tabular-nums">{rs.length}</td>
                       <td className="px-4 py-2 tabular-nums" style={{ color: 'var(--ok)' }}>{rs.filter(r => r.status === 'ok').length}</td>
                       <td className="px-4 py-2 tabular-nums" style={{ color: 'var(--err)' }}>{rs.filter(r => r.status === 'error').length}</td>
@@ -2173,6 +2268,9 @@ function LlmBatchReportView({ report }: { report: BatchReport }) {
                       <td className="px-4 py-2 tabular-nums">{so ? so.mean.toFixed(1) : '—'}</td>
                       <td className="px-4 py-2 tabular-nums">{so ? so.max : '—'}</td>
                       <td className="px-4 py-2 tabular-nums">{so ? so.min : '—'}</td>
+                      <td className="px-4 py-2 whitespace-nowrap">
+                        <Btn small variant="ghost" onClick={() => setViewingModel(m)}>请求体 / cURL</Btn>
+                      </td>
                     </tr>
                   )
                 })}
@@ -2200,11 +2298,16 @@ function LlmBatchReportView({ report }: { report: BatchReport }) {
                   <tr key={r.seq} style={{ borderTop: '1px solid var(--border)' }}
                     onMouseEnter={e => { (e.currentTarget as HTMLTableRowElement).style.background = 'var(--s1)' }}
                     onMouseLeave={e => { (e.currentTarget as HTMLTableRowElement).style.background = 'transparent' }}>
-                    <td className="px-4 py-2 tabular-nums">#{r.seq}</td>
-                    <td className="px-4 py-2 font-mono text-xs" style={{ color: 'var(--accent)' }}>{r.model}</td>
-                    <td className="px-4 py-2">{r.status === 'ok' ? <Badge color="ok">✓ 成功</Badge> : <Badge color="err">✗ 失败</Badge>}</td>
+                    <td className="px-4 py-2 tabular-nums whitespace-nowrap">#{r.seq}</td>
+                    <td className="px-4 py-2 font-mono text-xs"><TruncatedCell text={r.model} color="var(--accent)" maxWidth={140} /></td>
+                    <td className="px-4 py-2 whitespace-nowrap">{r.status === 'ok' ? <Badge color="ok">✓ 成功</Badge> : <Badge color="err">✗ 失败</Badge>}</td>
                     <td className="px-4 py-2 text-xs" style={{ color: r.returnedModel && r.returnedModel !== r.model ? 'var(--err)' : 'var(--t2)' }}>
-                      {r.returnedModel ?? '—'}{r.returnedModel && r.returnedModel !== r.model ? ' ≠' : ''}
+                      {r.returnedModel != null ? (
+                        <span className="inline-flex items-center gap-1">
+                          <TruncatedCell text={r.returnedModel} maxWidth={140} />
+                          {r.returnedModel !== r.model && <span className="flex-shrink-0">≠</span>}
+                        </span>
+                      ) : '—'}
                     </td>
                     <td className="px-4 py-2 tabular-nums">{r.inputTokens ?? '—'}</td>
                     <td className="px-4 py-2 tabular-nums">{r.outputTokens ?? '—'}</td>
@@ -2219,15 +2322,49 @@ function LlmBatchReportView({ report }: { report: BatchReport }) {
           </div>
         </div>
       </div>
+
+      {/* 查看请求体 / 复制 cURL */}
+      {viewingModel != null && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-6" style={{ background: 'rgba(0,0,0,0.5)' }} onClick={() => setViewingModel(null)}>
+          <div className="rounded-2xl p-5 w-full flex flex-col" style={{ background: 'var(--bg)', border: '1px solid var(--border)', boxShadow: 'var(--shadowMd)', maxWidth: 640, maxHeight: '82vh' }} onClick={e => e.stopPropagation()}>
+            <div className="flex items-center justify-between mb-3 flex-shrink-0">
+              <b className="text-sm" style={{ color: 'var(--text)' }}>[{viewingModel}] 请求体 / cURL</b>
+              <Btn small variant="ghost" onClick={() => setViewingModel(null)}>✕ 关闭</Btn>
+            </div>
+            <div className="overflow-y-auto flex flex-col gap-4">
+              <div>
+                <div className="flex items-center justify-between mb-1.5">
+                  <Label>请求体 JSON</Label>
+                  {viewingBodyObj != null && <CopyBtn text={JSON.stringify(viewingBodyObj, null, 2)} />}
+                </div>
+                <pre className="rounded-xl p-3 text-xs overflow-auto" style={{ background: 'var(--code)', border: '1px solid var(--inputBorder)', fontFamily: '"JetBrains Mono", monospace', lineHeight: 1.7, maxHeight: '30vh' }}>
+                  {viewingBodyObj != null ? JSON.stringify(viewingBodyObj, null, 2) : '（请求体解析失败）'}
+                </pre>
+              </div>
+              <div>
+                <div className="flex items-center justify-between mb-1.5">
+                  <Label>cURL 命令</Label>
+                  {viewingBodyObj != null && <CopyBtn text={buildCurlCommand(report, viewingBodyObj, apiKey)} />}
+                </div>
+                <pre className="rounded-xl p-3 text-xs overflow-auto whitespace-pre-wrap" style={{ background: 'var(--code)', border: '1px solid var(--inputBorder)', fontFamily: '"JetBrains Mono", monospace', lineHeight: 1.7, maxHeight: '30vh', wordBreak: 'break-all' }}>
+                  {viewingBodyObj != null ? buildCurlCommand(report, viewingBodyObj, apiKey) : '（请求体解析失败）'}
+                </pre>
+                <p className="text-xs mt-1.5" style={{ color: 'var(--warn)' }}>⚠ cURL 命令含明文 API Key，注意妥善保管，不要粘贴到公开场合</p>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   )
 }
 
 function LlmBatchTool() {
-  // ── 配置（持久化，API Key 除外）──
+  // ── 配置（持久化）──
   const [apiType, setApiType] = useState<ApiType>(() => loadLlmCfg().apiType ?? 'anthropic')
   const [baseUrl, setBaseUrl] = useState(() => loadLlmCfg().baseUrl ?? 'https://api.anthropic.com')
-  const [apiKey, setApiKey] = useState('') // 明文凭据，不持久化
+  const [apiKey, setApiKey] = useState('')
+  const [apiKeyLoaded, setApiKeyLoaded] = useState(false) // 解密完成前不落盘，避免用初始空值把已保存的 key 冲掉
   const [timeoutSec, setTimeoutSec] = useState(() => loadLlmCfg().timeout ?? '120')
   const [modelListText, setModelListText] = useState(() => loadLlmCfg().models ?? 'claude-3-5-sonnet-20241022')
   const [nReq, setNReq] = useState(() => loadLlmCfg().n ?? '5')
@@ -2238,6 +2375,23 @@ function LlmBatchTool() {
   useEffect(() => {
     saveLlmCfg({ apiType, baseUrl, timeout: timeoutSec, models: modelListText, n: nReq, c: concurrency, body })
   }, [apiType, baseUrl, timeoutSec, modelListText, nReq, concurrency, body])
+
+  // API Key 加密存储：挂载时异步解密回填一次；此后每次变化都异步加密后写回
+  useEffect(() => {
+    let cancelled = false
+    const raw = typeof window !== 'undefined' ? localStorage.getItem(LLM_KEY_STORAGE_KEY) : null
+    if (!raw) { setApiKeyLoaded(true); return }
+    decryptLlmApiKey(raw).then(v => { if (!cancelled) { if (v) setApiKey(v); setApiKeyLoaded(true) } })
+    return () => { cancelled = true }
+  }, [])
+  useEffect(() => {
+    if (!apiKeyLoaded) return
+    if (!apiKey) { try { localStorage.removeItem(LLM_KEY_STORAGE_KEY) } catch { /* ignore */ }; return }
+    encryptLlmApiKey(apiKey).then(enc => {
+      if (!enc) return
+      try { localStorage.setItem(LLM_KEY_STORAGE_KEY, enc) } catch { /* ignore */ }
+    })
+  }, [apiKey, apiKeyLoaded])
 
   const handleBodyChange = (v: string) => {
     setBody(v)
@@ -2338,7 +2492,7 @@ function LlmBatchTool() {
     const rep: BatchReport = {
       id: 'r' + endTime + '_' + Math.random().toString(36).slice(2, 7),
       startTime, endTime, durationMs: endTime - startTime,
-      apiType, models, n: N, c: C, stopped: wasStopped,
+      apiType, endpoint: cfg.endpoint, bodyText: cfg.bodyText, models, n: N, c: C, stopped: wasStopped,
       total: finalResults.length,
       success: finalResults.filter(r => r.status === 'ok').length,
       fail: finalResults.filter(r => r.status === 'error').length,
@@ -2391,7 +2545,7 @@ function LlmBatchTool() {
           </div>
           <div>
             <Label className="block mb-1.5">API Key</Label>
-            <CustomInput value={apiKey} onChange={setApiKey} placeholder="sk-...（仅存内存，刷新即清空）" type="password" />
+            <CustomInput value={apiKey} onChange={setApiKey} placeholder="sk-...（本地加密存储）" type="password" />
           </div>
           <div>
             <Label className="block mb-1.5">请求超时（秒）</Label>
@@ -2501,7 +2655,7 @@ function LlmBatchTool() {
 
             {pane === 'report' && (
               <div className="p-5">
-                {report ? <LlmBatchReportView report={report} /> : (
+                {report ? <LlmBatchReportView report={report} apiKey={apiKey} /> : (
                   <div className="flex flex-col items-center justify-center py-16" style={{ color: 'var(--t3)' }}>
                     <p className="text-sm">还没有已完成的测试报告。</p>
                   </div>
@@ -2555,7 +2709,7 @@ function LlmBatchTool() {
                     </div>
                     {expandedHistId === rep.id && (
                       <div className="mt-4 pt-4" style={{ borderTop: '1px solid var(--border)' }}>
-                        <LlmBatchReportView report={rep} />
+                        <LlmBatchReportView report={rep} apiKey={apiKey} />
                       </div>
                     )}
                   </div>

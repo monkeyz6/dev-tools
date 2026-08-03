@@ -111,8 +111,30 @@ test.describe('LLM 批量测试', () => {
     await fieldOf(page, '全局并发数 C').locator('input').fill('1') // 串行保证 call 顺序稳定
     await page.getByRole('button', { name: /开始批量请求/ }).click()
 
-    await expect(page.locator('main')).toContainText('输入 Token 一致性校验')
-    await expect(page.locator('main')).toContainText('不一致')
+    const main = page.locator('main')
+    await expect(main).toContainText('输入 Token 一致性校验')
+    await expect(main).toContainText('不一致')
+    // 输入 Token 不一致时才展示对应分布图（一致就没必要画图）
+    await expect(main).toContainText('输入 Token 分布（不一致）')
+  })
+
+  test('模型名过长时单行省略号截断，且可通过 title 悬浮查看完整内容', async ({ page }) => {
+    const longModel = 'deepseek-v4-flash-super-long-model-name-for-truncation-test'
+    await page.route('**/v1/messages', route =>
+      route.fulfill({ status: 200, contentType: 'application/json', body: ANTHROPIC_OK_BODY(longModel, 12, 6) }))
+
+    await goto(page, /LLM 批量测试/)
+    await inputByLabel(page, 'API Key').fill('sk-test')
+    await fieldOf(page, '模型列表').locator('textarea').fill(longModel)
+    await fieldOf(page, '每模型次数 N').locator('input').fill('1')
+    await page.getByRole('button', { name: /开始批量请求/ }).click()
+
+    await expect(page.locator('main')).toContainText('总请求 1')
+    // 单行截断的模型名单元格用 title 属性承载完整文本
+    const truncated = page.locator(`[title="${longModel}"]`).first()
+    await expect(truncated).toBeVisible()
+    await expect(truncated).toHaveCSS('white-space', 'nowrap')
+    await expect(truncated).toHaveCSS('text-overflow', 'ellipsis')
   })
 
   test('返回模型与请求模型不一致时，报告明细标记 ≠（验真）', async ({ page }) => {
@@ -185,5 +207,52 @@ test.describe('LLM 批量测试', () => {
       page.getByRole('button', { name: '导出 CSV' }).click(),
     ])
     expect(download.suggestedFilename()).toMatch(/^report_\d{8}_\d{6}\.csv$/)
+  })
+
+  test('API Key 加密后持久化：reload 后自动回填，localStorage 中不含明文', async ({ page }) => {
+    await goto(page, /LLM 批量测试/)
+    await inputByLabel(page, 'API Key').fill('sk-test-secret-abc123')
+    // 等待加密写入完成（异步 Web Crypto），轮询直到 llmbatch-key 出现
+    await expect.poll(() => page.evaluate(() => localStorage.getItem('llmbatch-key'))).toBeTruthy()
+
+    const stored = await page.evaluate(() => localStorage.getItem('llmbatch-key'))
+    expect(stored).not.toContain('sk-test-secret-abc123') // 落盘的是密文，不是明文
+
+    await page.reload()
+    await page.getByRole('button', { name: /LLM 批量测试/ }).first().click()
+    // 解密回填后，开始按钮应因 apiKey/baseUrl 均非空而可用
+    await expect(page.getByRole('button', { name: /开始批量请求/ })).toBeEnabled()
+    await expect(inputByLabel(page, 'API Key')).toHaveValue('sk-test-secret-abc123')
+  })
+
+  test('清空 API Key 会清除本地加密存储', async ({ page }) => {
+    await goto(page, /LLM 批量测试/)
+    await inputByLabel(page, 'API Key').fill('sk-test-to-clear')
+    await expect.poll(() => page.evaluate(() => localStorage.getItem('llmbatch-key'))).toBeTruthy()
+
+    await inputByLabel(page, 'API Key').fill('')
+    await expect.poll(() => page.evaluate(() => localStorage.getItem('llmbatch-key'))).toBeNull()
+  })
+
+  test('报告支持查看请求体与复制 cURL', async ({ page }) => {
+    await page.route('**/v1/messages', route =>
+      route.fulfill({ status: 200, contentType: 'application/json', body: ANTHROPIC_OK_BODY('claude-3-5-sonnet-20241022', 8, 4) }))
+
+    await goto(page, /LLM 批量测试/)
+    await inputByLabel(page, 'API Key').fill('sk-test-curl')
+    await fieldOf(page, '每模型次数 N').locator('input').fill('1')
+    await page.getByRole('button', { name: /开始批量请求/ }).click()
+    await expect(page.locator('main')).toContainText('总请求 1')
+
+    await page.getByRole('button', { name: '请求体 / cURL' }).click()
+    const main = page.locator('main')
+    await expect(main).toContainText('"model": "claude-3-5-sonnet-20241022"')
+    await expect(main).toContainText('curl -X POST')
+    await expect(main).toContainText('https://api.anthropic.com/v1/messages')
+    await expect(main).toContainText('x-api-key: sk-test-curl')
+    await expect(main).toContainText('cURL 命令含明文 API Key')
+
+    await page.getByRole('button', { name: '✕ 关闭' }).click()
+    await expect(page.getByText('cURL 命令含明文 API Key')).not.toBeVisible()
   })
 })

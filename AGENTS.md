@@ -24,7 +24,7 @@ npm run test:e2e   # 运行 Playwright 端到端测试
 - 运行时：React 19 + Vite 8 + Tailwind CSS v4（`@tailwindcss/vite` 插件）+ recharts（LLM 批量测试的输出 Token 波动图）
 - 样式：Tailwind 工具类 + CSS 变量主题（`--bg`/`--accent` 等，见 `THEMES`），毛玻璃用 `.glass`/`.glass-sidebar`
 - 字体：Inter + JetBrains Mono（Google Fonts 引入），主题数据在 App.tsx
-- 状态持久化：localStorage（主题 `dev-toolkit-theme`、Seedance 汇率/海外 2.5 单价、LLM 批量测试配置 `llmbatch-config` 与历史报告 `llmbatch-history` 等；API Key 类凭据一律只存内存，不落盘）
+- 状态持久化：localStorage（主题 `dev-toolkit-theme`、Seedance 汇率/海外 2.5 单价、LLM 批量测试配置 `llmbatch-config` 与历史报告 `llmbatch-history` 等）。LLM 批量测试的 API Key（`llmbatch-key`）用 Web Crypto（AES-GCM）加密后落盘，读取时解密回填；纯前端工具没有服务端，密钥必然内嵌在代码里，这只是避免明文直接躺在 localStorage 里，不是抵御可执行页面 JS 的攻击者的真正机密保护
 
 ## 代码质量
 
