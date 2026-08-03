@@ -243,7 +243,7 @@ interface PriceTier { id: string; label: string; resolutions: string[]; price: T
 interface ModelDef { name: string; desc: string; tiers: PriceTier[] }
 
 const INTL_25_KEY = 'dreamina-seedance-2-5'
-const DEFAULT_RATE = 7.25
+const DEFAULT_RATE = 7
 
 type SeedCalcResult =
   | { ready: true; totalCN: number; totalUSD: number; unitCN: number; unitUSD: number }
@@ -641,18 +641,18 @@ function Toggle({ value, onChange, label }: { value: boolean; onChange: (v: bool
 }
 
 // Segmented control (replaces inline button groups)
-function SegmentedControl({ value, options, onChange }: {
-  value: string; options: { value: string; label: string }[]; onChange: (v: string) => void
+function SegmentedControl({ value, options, onChange, className = '' }: {
+  value: string; options: { value: string; label: string }[]; onChange: (v: string) => void; className?: string
 }) {
   return (
-    <div className="inline-flex rounded-xl p-1 gap-1" style={{ background: 'var(--s2)', border: '1px solid var(--border)' }}>
+    <div className={`inline-flex rounded-xl p-1 gap-1 ${className}`} style={{ background: 'var(--s2)', border: '1px solid var(--border)' }}>
       {options.map(o => {
         const active = value === o.value
         return (
           <button
             key={o.value}
             onClick={() => onChange(o.value)}
-            className="px-3 py-1.5 text-sm font-medium rounded-lg cursor-pointer border-0 outline-none transition-all duration-150 active:scale-[0.96]"
+            className="flex-1 px-3 py-1.5 text-sm font-medium rounded-lg cursor-pointer border-0 outline-none transition-all duration-150 active:scale-[0.96]"
             style={{
               background: active ? 'var(--bg)' : 'transparent',
               color: active ? 'var(--text)' : 'var(--t2)',
@@ -701,7 +701,7 @@ function MiniNumInput({ value, placeholder, onChange }: {
       onFocus={() => setFocused(true)}
       onBlur={() => setFocused(false)}
       onClick={e => e.stopPropagation()}
-      className="w-20 text-right rounded-lg border-0 outline-none px-2 py-1 text-xs tabular-nums"
+      className="no-spinner w-20 text-right rounded-lg border-0 outline-none px-2 py-1 text-xs tabular-nums"
       style={{
         background: 'var(--inputBg)',
         border: `1px solid ${focused ? 'var(--accent)' : 'var(--inputBorder)'}`,
@@ -738,7 +738,7 @@ function SeedanceTool() {
     }
     return null
   })
-  const [tableOpen, setTableOpen] = useState(true)
+  const [tableOpen, setTableOpen] = useState(false)
 
   useEffect(() => {
     localStorage.setItem('seedance-fx-rate', rate)
@@ -803,53 +803,87 @@ function SeedanceTool() {
       <SectionTitle>Seedance 计费计算器</SectionTitle>
 
       <div className="grid gap-5">
-        {/* 区域 + 模型 */}
-        <div className="grid grid-cols-2 gap-4">
-          <div>
-            <Label className="block mb-2">计费区域</Label>
-            <SegmentedControl
-              value={region}
-              options={[{ value: 'cn', label: '国内' }, { value: 'us', label: '海外' }]}
-              onChange={v => onRegionChange(v as RegionKey)}
-            />
+        {/* 操作区（整块表单卡片） */}
+        <Card>
+          {/* 区域 + 模型 */}
+          <div className="grid grid-cols-2 gap-4">
+            <div>
+              <Label className="block mb-2">计费区域</Label>
+              <SegmentedControl
+                value={region}
+                options={[{ value: 'cn', label: '国内' }, { value: 'us', label: '海外' }]}
+                onChange={v => onRegionChange(v as RegionKey)}
+                className="w-full"
+              />
+            </div>
+            <div>
+              <Label className="block mb-2">模型变体</Label>
+              <CustomSelect value={model} onChange={onModelChange}
+                options={Object.keys(SEEDANCE_PRICING[region]).map(m => ({ value: m, label: m }))} />
+            </div>
           </div>
-          <div>
-            <Label className="block mb-2">模型变体</Label>
-            <CustomSelect value={model} onChange={onModelChange}
-              options={Object.keys(SEEDANCE_PRICING[region]).map(m => ({ value: m, label: m }))} />
-          </div>
-        </div>
 
-        {/* 分辨率 + 是否含视频 */}
-        <div className="grid grid-cols-2 gap-4">
-          <div>
-            <Label className="block mb-2">输出分辨率</Label>
-            <CustomSelect value={resolution} onChange={setResolution}
-              options={availableRes.map(r => ({ value: r, label: r }))} />
+          {/* 分辨率 + 是否含视频 */}
+          <div className="grid grid-cols-2 gap-4">
+            <div>
+              <Label className="block mb-2">输出分辨率</Label>
+              <CustomSelect value={resolution} onChange={setResolution}
+                options={availableRes.map(r => ({ value: r, label: r }))} />
+            </div>
+            <div>
+              <Label className="block mb-2">输入是否包含视频</Label>
+              <CustomSelect value={hasVideo} onChange={setHasVideo}
+                options={[{ value: '是', label: '是' }, { value: '否', label: '否' }]} />
+            </div>
           </div>
-          <div>
-            <Label className="block mb-2">输入是否包含视频</Label>
-            <SegmentedControl
-              value={hasVideo}
-              options={[{ value: '是', label: '是' }, { value: '否', label: '否' }]}
-              onChange={setHasVideo}
-            />
-          </div>
-        </div>
 
-        {/* Token 数 + 汇率 */}
-        <div className="grid grid-cols-2 gap-4">
-          <div>
-            <Label className="block mb-2">Token 数量</Label>
-            <CustomInput type="number" value={tokens} onChange={setTokens} placeholder="200000" mono />
+          {/* Token 数 + 汇率 */}
+          <div className="grid grid-cols-2 gap-4">
+            <div>
+              <Label className="block mb-2">Token 数量</Label>
+              <CustomInput type="number" value={tokens} onChange={setTokens} placeholder="200000" mono />
+            </div>
+            <div>
+              <Label className="block mb-2">汇率 1 USD = ? CNY</Label>
+              <CustomInput type="number" value={rate} onChange={setRate} placeholder="7" mono />
+            </div>
           </div>
-          <div>
-            <Label className="block mb-2">汇率 1 USD = ? CNY</Label>
-            <CustomInput type="number" value={rate} onChange={setRate} placeholder="7.25" mono />
-          </div>
-        </div>
+        </Card>
 
-        {/* 价目表（可折叠） */}
+        {/* 结果 */}
+        {result.ready ? (
+          <div className="rounded-2xl p-6" style={{ background: 'var(--accentSub)', border: '1px solid var(--accentSubHard)' }}>
+            <p className="text-xs font-bold mb-4 uppercase tracking-widest" style={{ color: 'var(--accent)', letterSpacing: '0.08em' }}>预估费用</p>
+            <div className="grid grid-cols-2 gap-8">
+              <div>
+                <div className="text-3xl font-bold" style={{ color: 'var(--text)', letterSpacing: '-0.04em', fontVariantNumeric: 'tabular-nums' }}>
+                  ¥{fmtTotal(result.totalCN)}
+                </div>
+                <div className="text-xs mt-1.5" style={{ color: 'var(--t2)' }}>人民币</div>
+              </div>
+              <div>
+                <div className="text-3xl font-bold" style={{ color: 'var(--text)', letterSpacing: '-0.04em', fontVariantNumeric: 'tabular-nums' }}>
+                  ${fmtTotal(result.totalUSD)}
+                </div>
+                <div className="text-xs mt-1.5" style={{ color: 'var(--t2)' }}>美元</div>
+              </div>
+            </div>
+            <div className="mt-4 text-sm font-medium" style={{ color: 'var(--text)' }}>
+              单价 <span className="tabular-nums">{fmtPrice(result.unitCN, 'cn')}</span> / 百万 Token
+              <span style={{ color: 'var(--t3)' }}>（{fmtPrice(result.unitUSD, 'us')} / 百万 Token）</span>
+            </div>
+            <div className="mt-5 pt-4 text-xs" style={{ borderTop: '1px solid var(--border)', color: 'var(--t3)' }}>
+              {model} · {resolution} · {hasVideo === '是' ? '输入含视频' : '输入不含视频'} · {tokens} tokens · 汇率 1 USD = {rate} CNY
+            </div>
+          </div>
+        ) : (
+          <div className="rounded-2xl p-5 flex items-start gap-3" style={{ background: 'var(--warnBg)', border: '1px solid var(--warn)' }}>
+            <Badge color="warn">无法计算</Badge>
+            <span className="text-sm" style={{ color: 'var(--text)' }}>{result.reason}</span>
+          </div>
+        )}
+
+        {/* 价目表（可折叠，默认收起，放最下面） */}
         <Card style={{ padding: 0, overflow: 'hidden' }}>
           <button onClick={() => setTableOpen(o => !o)}
             className="w-full flex items-center justify-between gap-3 px-4 py-3 border-0 outline-none cursor-pointer"
@@ -907,39 +941,6 @@ function SeedanceTool() {
             </div>
           )}
         </Card>
-
-        {/* 结果 */}
-        {result.ready ? (
-          <div className="rounded-2xl p-6" style={{ background: 'var(--accentSub)', border: '1px solid var(--accentSubHard)' }}>
-            <p className="text-xs font-bold mb-4 uppercase tracking-widest" style={{ color: 'var(--accent)', letterSpacing: '0.08em' }}>预估费用</p>
-            <div className="grid grid-cols-2 gap-8">
-              <div>
-                <div className="text-3xl font-bold" style={{ color: 'var(--text)', letterSpacing: '-0.04em', fontVariantNumeric: 'tabular-nums' }}>
-                  ¥{fmtTotal(result.totalCN)}
-                </div>
-                <div className="text-xs mt-1.5" style={{ color: 'var(--t2)' }}>人民币</div>
-              </div>
-              <div>
-                <div className="text-3xl font-bold" style={{ color: 'var(--text)', letterSpacing: '-0.04em', fontVariantNumeric: 'tabular-nums' }}>
-                  ${fmtTotal(result.totalUSD)}
-                </div>
-                <div className="text-xs mt-1.5" style={{ color: 'var(--t2)' }}>美元</div>
-              </div>
-            </div>
-            <div className="mt-4 text-sm font-medium" style={{ color: 'var(--text)' }}>
-              单价 <span className="tabular-nums">{fmtPrice(result.unitCN, 'cn')}</span> / 百万 Token
-              <span style={{ color: 'var(--t3)' }}>（{fmtPrice(result.unitUSD, 'us')} / 百万 Token）</span>
-            </div>
-            <div className="mt-5 pt-4 text-xs" style={{ borderTop: '1px solid var(--border)', color: 'var(--t3)' }}>
-              {model} · {resolution} · {hasVideo === '是' ? '输入含视频' : '输入不含视频'} · {tokens} tokens · 汇率 1 USD = {rate} CNY
-            </div>
-          </div>
-        ) : (
-          <div className="rounded-2xl p-5 flex items-start gap-3" style={{ background: 'var(--warnBg)', border: '1px solid var(--warn)' }}>
-            <Badge color="warn">无法计算</Badge>
-            <span className="text-sm" style={{ color: 'var(--text)' }}>{result.reason}</span>
-          </div>
-        )}
       </div>
     </div>
   )
@@ -957,9 +958,103 @@ const JSON_EDITOR_STYLE: React.CSSProperties = {
   margin: 0,
 }
 
-function DiffEditor({ value, onChange, placeholder, lineTypes }: {
+/** 计算每行「可折叠区间」：起始行 → 配对结束行（括号配对） */
+function computeFoldRanges(lines: string[]): Map<number, number> {
+  const stack: { line: number }[] = []
+  const ranges = new Map<number, number>()
+  for (let i = 0; i < lines.length; i++) {
+    for (const ch of lines[i]) {
+      if (ch === '{' || ch === '[') stack.push({ line: i })
+      else if (ch === '}' || ch === ']') {
+        const open = stack.pop()
+        if (open && !ranges.has(open.line)) ranges.set(open.line, i)
+      }
+    }
+  }
+  return ranges
+}
+
+/** 折叠后的可见行序号（折叠起始行保留、其子行隐藏） */
+function getVisibleLines(lines: string[], ranges: Map<number, number>, collapsed: Set<number>): number[] {
+  const out: number[] = []
+  for (let i = 0; i < lines.length; i++) {
+    out.push(i)
+    if (collapsed.has(i)) {
+      const end = ranges.get(i)
+      if (end != null) i = end
+    }
+  }
+  return out
+}
+
+/** 查看态：虚拟滚动 + 行号 + 折叠 + diff 高亮（只读） */
+function JsonTreeView({ text, types, onEdit }: {
+  text: string; types?: ('same' | 'add' | 'rm')[]; onEdit: () => void
+}) {
+  const ROW = 20
+  const OVERSCAN = 10
+  const lines = useMemo(() => text.split('\n'), [text])
+  const ranges = useMemo(() => computeFoldRanges(lines), [lines])
+  const [collapsed, setCollapsed] = useState<Set<number>>(new Set())
+  const [scrollTop, setScrollTop] = useState(0)
+  const containerRef = useRef<HTMLDivElement>(null)
+
+  const visible = useMemo(() => getVisibleLines(lines, ranges, collapsed), [lines, ranges, collapsed])
+  const viewportH = containerRef.current?.clientHeight ?? 0
+  const start = Math.max(0, Math.floor(scrollTop / ROW) - OVERSCAN)
+  const end = Math.min(visible.length, Math.ceil((scrollTop + viewportH) / ROW) + OVERSCAN)
+  const slice = visible.slice(start, end)
+
+  const toggle = (line: number) => {
+    setCollapsed(prev => {
+      const next = new Set(prev)
+      if (next.has(line)) next.delete(line); else next.add(line)
+      return next
+    })
+  }
+
+  return (
+    <div className="relative flex-1 min-h-0 overflow-hidden">
+      <div ref={containerRef} onScroll={() => setScrollTop(containerRef.current?.scrollTop ?? 0)}
+        className="absolute inset-0 overflow-auto"
+        style={{ fontFamily: '"JetBrains Mono", monospace', fontSize: '12.5px', lineHeight: '20px', padding: '14px 16px', tabSize: 2 }}>
+        <div style={{ height: visible.length * ROW, position: 'relative' }}>
+          {slice.map(vi => {
+            const i = visible[vi]
+            const t = types?.[i]
+            const bg = t === 'add' ? 'var(--addBg)' : t === 'rm' ? 'var(--rmBg)' : 'transparent'
+            const end = ranges.get(i)
+            const foldable = end != null && end > i
+            const isCollapsed = collapsed.has(i)
+            return (
+              <div key={i} style={{ position: 'absolute', top: vi * ROW, left: 0, right: 0, height: ROW, display: 'flex', alignItems: 'center', background: bg }}>
+                <span className="select-none" style={{ width: 40, flexShrink: 0, textAlign: 'right', paddingRight: 8, color: 'var(--t3)', fontSize: '11px' }}>{i + 1}</span>
+                {foldable ? (
+                  <button onClick={() => toggle(i)} aria-label={isCollapsed ? '展开' : '折叠'}
+                    className="flex-shrink-0 border-0 bg-transparent cursor-pointer outline-none"
+                    style={{ width: 18, height: 18, display: 'flex', alignItems: 'center', justifyContent: 'center', color: 'var(--t2)', padding: 0, fontFamily: 'inherit', fontSize: '10px' }}>
+                    {isCollapsed ? '▸' : '▾'}
+                  </button>
+                ) : <span className="flex-shrink-0" style={{ width: 18 }} />}
+                <span style={{ whiteSpace: 'pre', color: 'var(--text)' }} dangerouslySetInnerHTML={{ __html: highlightJson(lines[i]) || '​' }} />
+              </div>
+            )
+          })}
+        </div>
+      </div>
+      {/* 编辑入口 */}
+      <button onClick={onEdit} className="absolute top-2 right-3"
+        style={{ background: 'var(--bg)', border: '1px solid var(--border)', borderRadius: 999, color: 'var(--t2)', fontSize: 11, padding: '3px 10px', cursor: 'pointer', boxShadow: 'var(--shadow)' }}>
+        ✎ 编辑
+      </button>
+    </div>
+  )
+}
+
+function DiffEditor({ value, onChange, placeholder, lineTypes, onFocus, onBlur, autoFocus }: {
   value: string; onChange: (v: string) => void
   placeholder?: string; lineTypes?: ('same' | 'add' | 'rm')[]
+  onFocus?: () => void; onBlur?: () => void; autoFocus?: boolean
 }) {
   const taRef = useRef<HTMLTextAreaElement>(null)
   const backRef = useRef<HTMLPreElement>(null)
@@ -991,10 +1086,34 @@ function DiffEditor({ value, onChange, placeholder, lineTypes }: {
       </pre>
       <textarea
         ref={taRef} value={value} onChange={e => onChange(e.target.value)} onScroll={sync}
-        spellCheck={false} wrap="off"
+        spellCheck={false} wrap="off" autoFocus={autoFocus}
+        onFocus={onFocus} onBlur={onBlur}
         className="absolute inset-0 w-full h-full resize-none outline-none overflow-auto"
         style={{ ...JSON_EDITOR_STYLE, background: 'transparent', color: 'transparent', caretColor: 'var(--accent)', border: 0, zIndex: 1 }}
       />
+    </div>
+  )
+}
+
+/** 单侧面板：查看态（虚拟滚动折叠树）/ 编辑态（textarea 叠层高亮） */
+function JsonPane({ value, onChange, fmt, types, focus, setFocus, editLock, setEditLock, placeholder, style }: {
+  value: string; onChange: (v: string) => void; fmt: { ok: boolean; text: string }
+  types?: ('same' | 'add' | 'rm')[]; focus: boolean; setFocus: (v: boolean) => void
+  editLock: boolean; setEditLock: (v: boolean) => void; placeholder: string; style?: React.CSSProperties
+}) {
+  // 查看态：未在编辑（未聚焦且未手动锁定编辑）且 JSON 合法且非空
+  const viewMode = !editLock && !focus && fmt.ok && value.trim() !== ''
+  return (
+    <div className="flex-1 min-w-0 flex flex-col overflow-hidden" style={style}>
+      {viewMode ? (
+        <JsonTreeView text={fmt.text} types={types}
+          onEdit={() => { onChange(fmt.text); setEditLock(true) }} />
+      ) : (
+        <DiffEditor value={value} onChange={onChange} placeholder={placeholder} lineTypes={types}
+          onFocus={() => setFocus(true)}
+          onBlur={() => { setFocus(false); setEditLock(false) }}
+          autoFocus={editLock} />
+      )}
     </div>
   )
 }
@@ -1003,14 +1122,21 @@ function JsonTool() {
   const [left, setLeft] = useState('')
   const [right, setRight] = useState('')
   const [showDiff, setShowDiff] = useState(false)
+  const [leftFocus, setLeftFocus] = useState(false)
+  const [rightFocus, setRightFocus] = useState(false)
+  const [leftEdit, setLeftEdit] = useState(false)
+  const [rightEdit, setRightEdit] = useState(false)
+  const [leftW, setLeftW] = useState(50)
+  const containerRef = useRef<HTMLDivElement>(null)
+  const dragRef = useRef<{ startX: number; startW: number } | null>(null)
 
   const leftFmt = useMemo(() => formatJson(left), [left])
   const rightFmt = useMemo(() => formatJson(right), [right])
 
   const diff = useMemo(() => {
-    if (!showDiff || !left.trim() || !right.trim()) return undefined
-    return computeDiff(left.split('\n'), right.split('\n'))
-  }, [showDiff, left, right])
+    if (!showDiff || !leftFmt.ok || !rightFmt.ok) return undefined
+    return computeDiff(leftFmt.text.split('\n'), rightFmt.text.split('\n'))
+  }, [showDiff, leftFmt, rightFmt])
 
   const leftTypes = useMemo(() => diff?.filter(d => d.left !== null).map(d => d.type), [diff])
   const rightTypes = useMemo(() => diff?.filter(d => d.right !== null).map(d => d.type), [diff])
@@ -1023,27 +1149,37 @@ function JsonTool() {
     if (rightFmt.ok) setRight(rightFmt.text)
   }
 
-  const Pane = ({ side, value, onChange, fmt, types, placeholder, style }: {
-    side: string; value: string; onChange: (v: string) => void
-    fmt: { ok: boolean }; types?: ('same' | 'add' | 'rm')[]; placeholder: string
-    style?: React.CSSProperties
-  }) => (
-    <div className="flex-1 min-w-0 flex flex-col overflow-hidden" style={style}>
-      <div className="flex items-center gap-2 px-4 py-2.5 flex-shrink-0" style={{ borderBottom: '1px solid var(--border)' }}>
-        <span className="text-sm font-semibold" style={{ color: 'var(--text)' }}>{side}</span>
-        {fmt.ok ? <Badge color="ok">✓ 有效</Badge> : value.trim() ? <Badge color="err">格式错误</Badge> : null}
-        <span className="ml-auto text-xs" style={{ color: 'var(--t3)' }}>
-          {value.trim() ? `${value.split('\n').length} 行` : ''}
-        </span>
-      </div>
-      <DiffEditor value={value} onChange={onChange} placeholder={placeholder} lineTypes={showDiff ? types : undefined} />
-    </div>
-  )
+  // 中间分隔条拖拽调宽
+  const onDividerDown = (e: React.PointerEvent) => {
+    e.preventDefault()
+    const rect = containerRef.current?.getBoundingClientRect()
+    if (!rect) return
+    dragRef.current = { startX: e.clientX, startW: leftW }
+    const onMove = (ev: PointerEvent) => {
+      if (!dragRef.current) return
+      const w = containerRef.current?.getBoundingClientRect().width || 1
+      const next = Math.min(85, Math.max(15, dragRef.current.startW + ((ev.clientX - dragRef.current.startX) / w) * 100))
+      setLeftW(next)
+    }
+    const onUp = () => {
+      dragRef.current = null
+      window.removeEventListener('pointermove', onMove)
+      window.removeEventListener('pointerup', onUp)
+    }
+    window.addEventListener('pointermove', onMove)
+    window.addEventListener('pointerup', onUp)
+  }
 
   return (
     <div className="flex flex-col h-full">
-      <div className="glass flex items-center gap-3 px-6 py-3.5 flex-shrink-0" style={{ borderBottom: '1px solid var(--border)' }}>
+      <div className="glass flex items-center gap-2 px-6 py-3.5 flex-shrink-0" style={{ borderBottom: '1px solid var(--border)' }}>
         <SectionTitle>JSON 可视化 & Diff</SectionTitle>
+        {left.trim() && (
+          <Badge color={leftFmt.ok ? 'ok' : 'err'}>{leftFmt.ok ? '左 ✓' : '左 格式错误'}</Badge>
+        )}
+        {right.trim() && (
+          <Badge color={rightFmt.ok ? 'ok' : 'err'}>{rightFmt.ok ? '右 ✓' : '右 格式错误'}</Badge>
+        )}
         {counts && (
           <span className="flex gap-1.5 ml-1">
             <Badge color="ok">+{counts.add}</Badge>
@@ -1055,15 +1191,23 @@ function JsonTool() {
           <Btn small variant={showDiff ? 'primary' : 'soft'} onClick={() => setShowDiff(v => !v)}>
             {showDiff ? '✓ A/B 对比中' : 'A/B 对比'}
           </Btn>
-          {leftFmt.ok && <CopyBtn text={left} />}
         </div>
       </div>
-      <div className="flex-1 flex overflow-hidden" style={{ background: 'var(--code)' }}>
-        <Pane side="A · 左侧" value={left} onChange={setLeft} fmt={leftFmt} types={leftTypes}
-          style={{ borderRight: '1px solid var(--border)' }}
-          placeholder={'{\n  "name": "Alice",\n  "age": 30\n}'} />
-        <Pane side="B · 右侧" value={right} onChange={setRight} fmt={rightFmt} types={rightTypes}
-          placeholder={'{\n  "name": "Bob",\n  "age": 25\n}'} />
+      <div className="flex-1 flex overflow-hidden" ref={containerRef} style={{ background: 'var(--code)' }}>
+        <div style={{ flex: `0 0 ${leftW}%`, minWidth: 0 }} className="flex flex-col overflow-hidden">
+          <JsonPane value={left} onChange={setLeft} fmt={leftFmt} types={leftTypes}
+            focus={leftFocus} setFocus={setLeftFocus} editLock={leftEdit} setEditLock={setLeftEdit}
+            placeholder={'{\n  "name": "Alice",\n  "age": 30\n}'} />
+        </div>
+        <div onPointerDown={onDividerDown} className="flex-shrink-0"
+          style={{ width: 10, cursor: 'col-resize', touchAction: 'none', display: 'flex', justifyContent: 'center' }}>
+          <div className="h-full w-px" style={{ background: 'var(--border)' }} />
+        </div>
+        <div className="flex-1 min-w-0 flex flex-col overflow-hidden">
+          <JsonPane value={right} onChange={setRight} fmt={rightFmt} types={rightTypes}
+            focus={rightFocus} setFocus={setRightFocus} editLock={rightEdit} setEditLock={setRightEdit}
+            placeholder={'{\n  "name": "Bob",\n  "age": 25\n}'} />
+        </div>
       </div>
     </div>
   )
@@ -1277,18 +1421,21 @@ function AiConvertTool() {
         <div className="flex flex-col p-4 overflow-hidden" style={{ borderRight: '1px solid var(--border)' }}>
           <div className="flex items-center mb-2">
             <Label>输入</Label>
+            <div className="ml-auto">
+              <CopyBtn text={input} />
+            </div>
           </div>
           <CustomTextarea value={input} onChange={setInput} mono stretch className="flex-1" style={{ minHeight: 0 }} />
         </div>
         <div className="flex flex-col p-4 overflow-hidden">
-          <div className="flex items-center mb-2 gap-2">
+          <div className="flex items-center mb-2">
             <Label>输出</Label>
             <div className="ml-auto">
               <CopyBtn text={outputWithCache} />
             </div>
           </div>
           <div className="flex-1 rounded-xl overflow-auto p-3 text-xs"
-            style={{ background: 'var(--code)', border: '1px solid var(--inputBorder)', fontFamily: '"JetBrains Mono", monospace', lineHeight: 1.7 }}>
+            style={{ background: 'var(--code)', border: '1px solid var(--inputBorder)', fontFamily: '"JetBrains Mono", monospace', lineHeight: 1.7, whiteSpace: 'pre' }}>
             <div dangerouslySetInnerHTML={{ __html: highlightJson(outputWithCache) }} />
           </div>
         </div>

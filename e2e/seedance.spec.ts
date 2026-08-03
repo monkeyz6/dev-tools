@@ -49,7 +49,8 @@ test.describe('Seedance 计费', () => {
     // 未填价 → 无法计算
     await expect(page.getByText('无法计算')).toBeVisible()
 
-    // 填写单价 → 出结果
+    // 展开默认收起的价目表，再填单价 → 出结果
+    await page.getByRole('button', { name: /价目表/ }).click()
     await page.getByPlaceholder('不含视频', { exact: true }).fill('10')
     await page.getByPlaceholder('含视频', { exact: true }).fill('6')
     await expect(page.getByText(/^¥/).first()).toBeVisible()
@@ -62,6 +63,7 @@ test.describe('Seedance 计费', () => {
     await page.reload()
     await page.getByRole('button', { name: '海外', exact: true }).click()
     await selectOption(page, '模型变体', 'dreamina-seedance-2-5')
+    await page.getByRole('button', { name: /价目表/ }).click()
     await expect(page.getByPlaceholder('不含视频', { exact: true })).toHaveValue('10')
     await expect(page.getByPlaceholder('含视频', { exact: true })).toHaveValue('6')
   })

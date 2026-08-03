@@ -26,7 +26,10 @@ html, body, #root {
 /* Remove number input spinners */
 input[type='number']::-webkit-inner-spin-button,
 input[type='number']::-webkit-outer-spin-button { -webkit-appearance: none; margin: 0; }
-input[type='number'] { -moz-appearance: textfield; }
+input[type='number'] { -moz-appearance: textfield; appearance: textfield; }
+.no-spinner { -moz-appearance: textfield; appearance: textfield; }
+.no-spinner::-webkit-inner-spin-button,
+.no-spinner::-webkit-outer-spin-button { -webkit-appearance: none; margin: 0; }
 
 /* JSON syntax highlight */
 .json-key   { color: var(--jKey); font-weight: 500; }
