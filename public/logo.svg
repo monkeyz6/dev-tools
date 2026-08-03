@@ -1,0 +1,39 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 400 400" role="img" aria-label="SparkQ">
+  <defs>
+    <filter id="bolt-glow" x="-60%" y="-60%" width="220%" height="220%">
+      <feGaussianBlur stdDeviation="10" result="blur1"/>
+      <feGaussianBlur stdDeviation="22" result="blur2"/>
+      <feMerge>
+        <feMergeNode in="blur2"/>
+        <feMergeNode in="blur1"/>
+        <feMergeNode in="SourceGraphic"/>
+      </feMerge>
+    </filter>
+    <radialGradient id="tile-vignette" cx="40%" cy="35%" r="65%">
+      <stop offset="0%" stop-color="#1A1E42" stop-opacity="0.6"/>
+      <stop offset="100%" stop-color="#08091C" stop-opacity="0"/>
+    </radialGradient>
+  </defs>
+  <rect x="0" y="0" width="400" height="400" rx="80" fill="#0D0F26"/>
+  <rect x="0" y="0" width="400" height="400" rx="80" fill="url(#tile-vignette)"/>
+  <g fill="none" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M 160,193
+             C 145,184 148,160 165,153
+             C 158,138 180,131 191,142
+             C 199,129 219,131 223,146
+             C 237,139 254,151 246,169
+             C 258,174 255,193 241,196
+             C 244,208 225,213 215,204
+             C 205,212 189,210 183,201
+             C 172,207 159,203 160,193 Z"
+          stroke="white" stroke-width="6" opacity="0.9"/>
+    <path d="M 204,140 C 197,158 210,171 202,196" stroke="white" stroke-width="4" opacity="0.55"/>
+    <path d="M 171,166 C 182,161 185,173 175,180" stroke="white" stroke-width="4" opacity="0.55"/>
+    <path d="M 225,163 C 235,167 233,180 223,181" stroke="white" stroke-width="4" opacity="0.55"/>
+    <circle cx="215" cy="152" r="5.5" fill="#F59E0B" stroke="none"/>
+  </g>
+  <path d="M 181.6,296.4 A 106,106 0 1,1 268.1,273.2"
+        stroke="white" stroke-width="30" fill="none" stroke-linecap="round" opacity="0.95"/>
+  <polygon points="252,256 272,256 248,302 266,302 237,350 216,350 240,308 222,308"
+           fill="#F59E0B" filter="url(#bolt-glow)"/>
+</svg>

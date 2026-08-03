@@ -1,9 +1,18 @@
 import React, { useState, useCallback, useRef, useEffect, useMemo } from 'react'
+import { BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, Cell, LabelList, ReferenceLine } from 'recharts'
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
 type ThemeKey = 'light' | 'dark' | 'claude' | 'green'
-type ToolKey = 'seedance' | 'json' | 'timestamp' | 'aiconvert' | 'llmbatch'
+type ToolKey = 'seedance' | 'json' | 'timestamp' | 'aiconvert' | 'llmbatch' | 'imganalyze'
+
+interface ImageItem {
+  id: string; order: number; source: 'local' | 'url'; name: string
+  size: number | null; mime: string; status: 'loading' | 'done' | 'error'
+  width: number; height: number; format: string; src: string; origin: string
+  url?: string; error?: string; note?: string; formatNote?: string
+  crossOriginBlocked?: boolean; sizeBlocked?: boolean
+}
 
 interface ThemeVars {
   bg: string; s1: string; s2: string
@@ -107,6 +116,7 @@ const TOOLS: { key: ToolKey; label: string; sub: string; icon: React.ReactNode }
   { key: 'timestamp', label: '时间戳转换', sub: 'ms · s · 双向互转', icon: <IconClock /> },
   { key: 'aiconvert', label: 'AI 格式转换', sub: 'OpenAI · Anthropic', icon: <IconConvert /> },
   { key: 'llmbatch', label: 'LLM 批量测试', sub: '并发请求 · 验真', icon: <IconBatch /> },
+  { key: 'imganalyze', label: '图片信息识别', sub: '分辨率 · 格式 · 等级', icon: <IconImage /> },
 ]
 
 // ─── Icon Components ──────────────────────────────────────────────────────────
@@ -144,6 +154,13 @@ function IconBatch() {
     <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round">
       <rect x="2" y="3" width="6" height="6" rx="1"/><rect x="9" y="3" width="6" height="6" rx="1"/><rect x="16" y="3" width="6" height="6" rx="1"/>
       <rect x="2" y="11" width="6" height="6" rx="1"/><rect x="9" y="11" width="6" height="6" rx="1"/><rect x="16" y="11" width="6" height="6" rx="1"/>
+    </svg>
+  )
+}
+function IconImage() {
+  return (
+    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round">
+      <rect x="3" y="4" width="18" height="16" rx="3"/><circle cx="8.5" cy="9.5" r="1.6"/><path d="m4 17 4.5-4.5 3 3L15 11l5 5"/>
     </svg>
   )
 }
@@ -230,6 +247,163 @@ function computeDiff(a: string[], b: string[]): DiffLine[] {
     else { row.rightNum = ++ri }
     return row
   })
+}
+
+// ─── Image Analyzer Utilities ────────────────────────────────────────────────────
+
+const IMG_STANDARDS = [
+  { tier:'8K', name:'8K UHD (4320p)', w:7680, h:4320 },
+  { tier:'8K', name:'8K DCI', w:8192, h:4320 },
+  { tier:'6K', name:'6K', w:6144, h:3456 },
+  { tier:'5K', name:'5K UHD+', w:5120, h:2880 },
+  { tier:'4K', name:'4K DCI', w:4096, h:2160 },
+  { tier:'4K', name:'4K UHD (2160p)', w:3840, h:2160 },
+  { tier:'4K', name:'4K 宽屏 UW', w:3840, h:1600 },
+  { tier:'3K', name:'3K (3200×1800)', w:3200, h:1800 },
+  { tier:'2K', name:'2K QHD (1440p)', w:2560, h:1440 },
+  { tier:'2K', name:'2K 超宽 UWQHD', w:3440, h:1440 },
+  { tier:'2K', name:'2K DCI', w:2048, h:1080 },
+  { tier:'2K', name:'QXGA', w:2048, h:1536 },
+  { tier:'1080P', name:'WUXGA', w:1920, h:1200 },
+  { tier:'1080P', name:'FHD 1080P', w:1920, h:1080 },
+  { tier:'1080P', name:'FHD 超宽', w:2560, h:1080 },
+  { tier:'900P', name:'HD+ 900P', w:1600, h:900 },
+  { tier:'900P', name:'WSXGA+', w:1680, h:1050 },
+  { tier:'768P', name:'WXGA (768p)', w:1366, h:768 },
+  { tier:'720P', name:'HD 720P', w:1280, h:720 },
+  { tier:'720P', name:'WXGA 16:10', w:1280, h:800 },
+  { tier:'768P', name:'XGA', w:1024, h:768 },
+  { tier:'576P', name:'PAL 576P', w:1024, h:576 },
+  { tier:'480P', name:'FWVGA 480P', w:854, h:480 },
+  { tier:'480P', name:'VGA 480P', w:640, h:480 },
+  { tier:'480P', name:'SVGA', w:800, h:600 },
+  { tier:'360P', name:'nHD 360P', w:640, h:360 },
+  { tier:'240P', name:'240P', w:426, h:240 },
+  { tier:'144P', name:'144P', w:256, h:144 },
+] as const
+
+const IMG_TIER_STYLE: Record<string, string> = {
+  '8K': 'from-rose-500 to-orange-500',
+  '6K': 'from-rose-500 to-pink-500',
+  '5K': 'from-fuchsia-500 to-pink-500',
+  '4K': 'from-violet-500 to-fuchsia-500',
+  '3K': 'from-indigo-500 to-violet-500',
+  '2K': 'from-sky-500 to-indigo-500',
+  '1080P': 'from-emerald-500 to-teal-500',
+  '900P': 'from-teal-500 to-cyan-600',
+  '768P': 'from-cyan-600 to-sky-700',
+  '720P': 'from-amber-500 to-yellow-600',
+  '576P': 'from-amber-600 to-orange-700',
+  '480P': 'from-orange-600 to-red-700',
+  '360P': 'from-slate-500 to-slate-600',
+  '240P': 'from-slate-600 to-slate-700',
+  '144P': 'from-slate-700 to-slate-800',
+  '非标准': 'from-slate-600 to-slate-700',
+}
+
+const IMG_FORMAT_COLOR: Record<string, string> = {
+  JPEG: 'bg-amber-500/15 text-amber-600 dark:text-amber-300 border-amber-400/25',
+  PNG: 'bg-sky-500/15 text-sky-600 dark:text-sky-300 border-sky-400/25',
+  WebP: 'bg-emerald-500/15 text-emerald-600 dark:text-emerald-300 border-emerald-400/25',
+  GIF: 'bg-fuchsia-500/15 text-fuchsia-600 dark:text-fuchsia-300 border-fuchsia-400/25',
+  SVG: 'bg-orange-500/15 text-orange-600 dark:text-orange-300 border-orange-400/25',
+  AVIF: 'bg-violet-500/15 text-violet-600 dark:text-violet-300 border-violet-400/25',
+  HEIC: 'bg-rose-500/15 text-rose-600 dark:text-rose-300 border-rose-400/25',
+  BMP: 'bg-cyan-500/15 text-cyan-600 dark:text-cyan-300 border-cyan-400/25',
+  ICO: 'bg-teal-500/15 text-teal-600 dark:text-teal-300 border-teal-400/25',
+  TIFF: 'bg-indigo-500/15 text-indigo-600 dark:text-indigo-300 border-indigo-400/25',
+}
+
+const IMG_COMMON_RATIOS: [number, number][] = [
+  [16,9],[9,16],[4,3],[3,4],[3,2],[2,3],[1,1],[21,9],[9,21],[16,10],[10,16],[5,4],[4,5],[2,1],[1,2],[32,9],[5,3],[7,5]
+]
+
+function imgFormatBytes(bytes: number | null | undefined): string {
+  if (bytes === null || bytes === undefined || isNaN(bytes)) return '未知'
+  if (bytes < 1024) return bytes + ' B'
+  const kb = bytes / 1024
+  if (kb < 1024) return kb.toFixed(kb < 10 ? 2 : 1) + ' KB'
+  const mb = kb / 1024
+  if (mb < 1024) return mb.toFixed(2) + ' MB'
+  return (mb / 1024).toFixed(2) + ' GB'
+}
+
+function imgGcd(a: number, b: number): number { return b === 0 ? a : imgGcd(b, a % b) }
+
+function imgAspectRatio(w: number, h: number): string {
+  if (!w || !h) return '—'
+  const r = w / h
+  let best: [number, number] | null = null; let bestDiff = Infinity
+  for (const [a, b] of IMG_COMMON_RATIOS) {
+    const d = Math.abs(r - a / b)
+    if (d < bestDiff) { bestDiff = d; best = [a, b] }
+  }
+  if (best && bestDiff / r < 0.012) return `${best[0]}:${best[1]}`
+  const g = imgGcd(w, h); const sw = w / g; const sh = h / g
+  if (sw <= 40 && sh <= 40) return `${sw}:${sh}`
+  return r.toFixed(2) + ':1'
+}
+
+interface ImgClassification { tier: string; label: string; standard: boolean; name: string; exact?: boolean; near?: string }
+
+function imgClassifyResolution(w: number, h: number, loose: boolean): ImgClassification {
+  if (!w || !h) return { tier: '未知', label: '未知', standard: false, name: '' }
+  const long = Math.max(w, h); const short = Math.min(w, h); const tol = loose ? 0.02 : 0
+  for (const s of IMG_STANDARDS) {
+    const sl = Math.max(s.w, s.h); const ss = Math.min(s.w, s.h)
+    const okL = tol ? Math.abs(long - sl) / sl <= tol : long === sl
+    const okS = tol ? Math.abs(short - ss) / ss <= tol : short === ss
+    if (okL && okS) return { tier: s.tier, label: s.tier, standard: true, name: s.name, exact: long === sl && short === ss }
+  }
+  let near = '低于 144P'
+  const buckets: [number, string][] = [[7680,'8K'],[6144,'6K'],[5120,'5K'],[3840,'4K'],[3200,'3K'],[2560,'2K'],[1920,'1080P'],[1600,'900P'],[1366,'768P'],[1280,'720P'],[1024,'576P'],[854,'480P'],[640,'360P'],[426,'240P'],[256,'144P']]
+  for (const [edge, name] of buckets) { if (long >= edge) { near = name; break } }
+  return { tier: '非标准', label: '非标准分辨率', standard: false, name: '', near }
+}
+
+function imgDetectFormat(buffer: ArrayBuffer): string | null {
+  const b = new Uint8Array(buffer)
+  const hex = Array.from(b.slice(0, 16)).map(x => x.toString(16).padStart(2, '0')).join('')
+  if (hex.startsWith('ffd8ff')) return 'JPEG'
+  if (hex.startsWith('89504e47')) return 'PNG'
+  if (hex.startsWith('47494638')) return 'GIF'
+  if (hex.startsWith('424d')) return 'BMP'
+  if (hex.startsWith('00000100')) return 'ICO'
+  if (hex.startsWith('49492a00') || hex.startsWith('4d4d002a')) return 'TIFF'
+  if (hex.startsWith('52494646') && hex.slice(16, 24) === '57454250') return 'WebP'
+  if (b.length > 12 && String.fromCharCode(...b.slice(4, 8)) === 'ftyp') {
+    const brand = String.fromCharCode(...b.slice(8, 12)).toLowerCase()
+    if (brand.startsWith('avi')) return 'AVIF'
+    if (/heic|heix|hevc|mif1|msf1|heim/.test(brand)) return 'HEIC'
+  }
+  try {
+    const head = new TextDecoder().decode(b.slice(0, 300)).trim().toLowerCase()
+    if (head.includes('<svg') || head.startsWith('<?xml')) return 'SVG'
+  } catch { /* ignore */ }
+  return null
+}
+
+function imgMimeToFormat(mime: string = ''): string {
+  const m = mime.toLowerCase()
+  if (m.includes('jpeg') || m.includes('jpg')) return 'JPEG'
+  if (m.includes('png')) return 'PNG'
+  if (m.includes('webp')) return 'WebP'
+  if (m.includes('gif')) return 'GIF'
+  if (m.includes('bmp')) return 'BMP'
+  if (m.includes('svg')) return 'SVG'
+  if (m.includes('avif')) return 'AVIF'
+  if (m.includes('heic') || m.includes('heif')) return 'HEIC'
+  if (m.includes('icon') || m.includes('ico')) return 'ICO'
+  if (m.includes('tiff')) return 'TIFF'
+  return ''
+}
+
+function imgExtFromUrl(url: string = ''): string {
+  try {
+    const clean = url.split('?')[0].split('#')[0]
+    const m = clean.match(/\.([a-z0-9]{2,5})$/i)
+    return m ? m[1].toUpperCase().replace('JPG', 'JPEG') : ''
+  } catch { return '' }
 }
 
 // ─── Seedance Pricing（每百万 Token 计费） ────────────────────────────────────
@@ -652,7 +826,7 @@ function SegmentedControl({ value, options, onChange, className = '' }: {
           <button
             key={o.value}
             onClick={() => onChange(o.value)}
-            className="flex-1 px-3 py-1.5 text-sm font-medium rounded-lg cursor-pointer border-0 outline-none transition-all duration-150 active:scale-[0.96]"
+            className="flex-1 px-3 py-1.5 text-sm font-medium rounded-lg cursor-pointer border-0 outline-none transition-all duration-150 active:scale-[0.96] whitespace-nowrap"
             style={{
               background: active ? 'var(--bg)' : 'transparent',
               color: active ? 'var(--text)' : 'var(--t2)',
@@ -1445,9 +1619,21 @@ function AiConvertTool() {
 }
 
 // ─── Tool: LLM 批量测试 ───────────────────────────────────────────────────────
+// 定位：Token 计费口径核查 —— 同一份请求体反复发送，输入 Token 是否恒定？换模型差多少？
+// 输出 Token 波动多大？验真（返回模型是否被中转站偷换）作为辅助指标保留。
+
+type ApiType = 'anthropic' | 'openai_chat' | 'openai_responses'
+
+interface BatchTask {
+  seq: number
+  model: string
+  localIdx: number // 该模型内的第几次
+}
 
 interface BatchResult {
-  id: number
+  seq: number
+  model: string
+  localIdx: number
   status: 'pending' | 'running' | 'ok' | 'error'
   httpStatus: number | null
   tFirst: number | null
@@ -1455,107 +1641,727 @@ interface BatchResult {
   returnedModel: string | null
   inputTokens: number | null
   outputTokens: number | null
-  content: string | null
   error: string | null
 }
 
-function LlmBatchTool() {
-  const [baseUrl, setBaseUrl] = useState('https://api.openai.com/v1')
-  const [apiKey, setApiKey] = useState('')
-  const [modelId, setModelId] = useState('gpt-4o-mini')
-  const [batchN, setBatchN] = useState('3')
-  const [body, setBody] = useState(JSON.stringify({ messages: [{ role: 'user', content: '用一句话介绍你自己。' }], max_tokens: 128 }, null, 2))
-  const [results, setResults] = useState<BatchResult[]>([])
-  const [running, setRunning] = useState(false)
-  const abortRef = useRef<AbortController | null>(null)
+interface BatchReport {
+  id: string
+  startTime: number
+  endTime: number
+  durationMs: number
+  apiType: ApiType
+  models: string[]
+  n: number
+  c: number
+  stopped: boolean
+  total: number
+  success: number
+  fail: number
+  results: BatchResult[]
+}
 
-  const runBatch = async () => {
-    const n = Math.min(Math.max(parseInt(batchN) || 1, 1), 20)
-    abortRef.current = new AbortController()
-    setRunning(true)
-    const initial: BatchResult[] = Array.from({ length: n }, (_, i) => ({
-      id: i + 1, status: 'pending', httpStatus: null, tFirst: null, elapsed: null,
-      returnedModel: null, inputTokens: null, outputTokens: null, content: null, error: null,
-    }))
-    setResults(initial)
+interface LlmBatchCfg {
+  apiType: ApiType
+  endpoint: string
+  apiKey: string
+  timeout: number
+  bodyText: string
+}
 
-    let parsedBody: Record<string, unknown> = {}
-    try { parsedBody = JSON.parse(body) } catch { parsedBody = {} }
+// ── 协议适配 ──
 
-    const tasks = initial.map(async (r) => {
-      setResults(prev => prev.map(x => x.id === r.id ? { ...x, status: 'running' } : x))
-      const start = Date.now()
-      try {
-        const res = await fetch(`${baseUrl.replace(/\/$/, '')}/chat/completions`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${apiKey}` },
-          signal: abortRef.current?.signal,
-          body: JSON.stringify({ ...parsedBody, model: modelId }),
-        })
-        // 流式读取：以「首字节到达」计时 TTFT，再读余量（流式/非流式均适用）
-        let tFirst: number | null = null
-        let bodyText = ''
-        if (res.body) {
-          const reader = res.body.getReader()
-          const decoder = new TextDecoder()
-          for (;;) {
-            const { done, value } = await reader.read()
-            if (tFirst === null) tFirst = Date.now() - start
-            if (done) break
-            bodyText += decoder.decode(value, { stream: true })
-          }
-          bodyText += decoder.decode()
-        } else {
-          tFirst = Date.now() - start
-          bodyText = await res.text()
+const LLM_API_PATHS: Record<ApiType, string> = {
+  anthropic: '/v1/messages',
+  openai_chat: '/v1/chat/completions',
+  openai_responses: '/v1/responses',
+}
+const LLM_API_LABELS: Record<ApiType, string> = {
+  anthropic: 'Anthropic Messages API',
+  openai_chat: 'OpenAI Chat Completions API',
+  openai_responses: 'OpenAI Responses API',
+}
+
+// baseUrl 允许填到 host（如 https://api.anthropic.com）或已含 /v1（如 https://api.openai.com/v1），
+// 两种写法都推导出正确端点，避免拼出 /v1/v1/...
+function llmEndpointOf(apiType: ApiType, baseUrl: string): string {
+  const b = baseUrl.trim().replace(/\/+$/, '')
+  const p = LLM_API_PATHS[apiType]
+  return b.endsWith('/v1') ? b + p.replace(/^\/v1/, '') : b + p
+}
+
+// {{model}} 占位符：兼容带引号 "{{model}}" 和不带引号 {{model}} 两种写法
+const MODEL_PLACEHOLDER_RE = /"\{\{model\}\}"|\{\{model\}\}/g
+function fillModelPlaceholder(text: string, jsonStringLiteral: string): string {
+  return text.replace(MODEL_PLACEHOLDER_RE, jsonStringLiteral)
+}
+function bodyHasModelPlaceholder(text: string): boolean {
+  MODEL_PLACEHOLDER_RE.lastIndex = 0
+  return MODEL_PLACEHOLDER_RE.test(text)
+}
+// Body 写了 {{model}} 就替换占位符；没写就在顶层自动注入 model 字段，两种写法都能跑
+function buildRequestBody(bodyText: string, model: string): Record<string, unknown> {
+  if (bodyHasModelPlaceholder(bodyText)) {
+    return JSON.parse(fillModelPlaceholder(bodyText, JSON.stringify(model)))
+  }
+  const obj = JSON.parse(bodyText) as Record<string, unknown>
+  return { ...obj, model }
+}
+
+// ── Token / model 提取（非流式）──
+function extractUsageNonStream(json: any): { inTok: number | null; outTok: number | null; model: string | null } {
+  const u = json?.usage
+  let inTok: number | null = null
+  let outTok: number | null = null
+  if (u) {
+    if (u.input_tokens != null || u.output_tokens != null) {
+      inTok = u.input_tokens ?? null
+      outTok = u.output_tokens ?? null
+    } else if (u.prompt_tokens != null || u.completion_tokens != null) {
+      inTok = u.prompt_tokens ?? null
+      outTok = u.completion_tokens ?? null
+    }
+  }
+  const model = typeof json?.model === 'string' ? json.model
+    : typeof json?.response?.model === 'string' ? json.response.model
+    : null
+  return { inTok, outTok, model }
+}
+
+// ── Token / model 提取（SSE 流式）──
+function makeStreamExtractor(apiType: ApiType) {
+  let inTok: number | null = null
+  let outTok: number | null = null
+  let model: string | null = null
+  return {
+    onData(o: any) {
+      if (apiType === 'anthropic') {
+        if (o?.type === 'message_start' && o.message) {
+          if (o.message.usage?.input_tokens != null) inTok = o.message.usage.input_tokens
+          if (typeof o.message.model === 'string') model = o.message.model
         }
-        const elapsed = Date.now() - start
-        let json: Record<string, any> = {}
-        try { json = bodyText ? JSON.parse(bodyText) : {} } catch { json = {} }
-        if (!res.ok) {
-          setResults(prev => prev.map(x => x.id === r.id ? {
-            ...x, status: 'error', httpStatus: res.status, tFirst, elapsed,
-            error: json?.error?.message || `HTTP ${res.status}`,
-          } : x))
-          return
+        if (o?.type === 'message_delta' && o.usage?.output_tokens != null) outTok = o.usage.output_tokens
+      } else if (apiType === 'openai_chat') {
+        if (typeof o?.model === 'string') model = o.model
+        if (o?.usage) {
+          if (o.usage.prompt_tokens != null) inTok = o.usage.prompt_tokens
+          if (o.usage.completion_tokens != null) outTok = o.usage.completion_tokens
         }
-        const choice = json.choices?.[0]
-        setResults(prev => prev.map(x => x.id === r.id ? {
-          ...x, status: 'ok', httpStatus: res.status, tFirst, elapsed,
-          returnedModel: typeof json.model === 'string' ? json.model : null,
-          inputTokens: json.usage?.prompt_tokens ?? null,
-          outputTokens: json.usage?.completion_tokens ?? null,
-          content: choice?.message?.content ?? null,
-        } : x))
-      } catch (e: unknown) {
-        if ((e as { name?: string }).name === 'AbortError') {
-          setResults(prev => prev.map(x => x.id === r.id ? { ...x, status: 'error', error: '已取消' } : x))
-        } else {
-          setResults(prev => prev.map(x => x.id === r.id ? { ...x, status: 'error', elapsed: Date.now() - start, error: String(e) } : x))
+      } else {
+        if (o?.type === 'response.completed' && o.response) {
+          if (typeof o.response.model === 'string') model = o.response.model
+          if (o.response.usage?.input_tokens != null) inTok = o.response.usage.input_tokens
+          if (o.response.usage?.output_tokens != null) outTok = o.response.usage.output_tokens
         }
       }
+    },
+    result() { return { inTok, outTok, model } },
+  }
+}
+
+// ── 单次请求 ──
+async function doLlmRequest(cfg: LlmBatchCfg, task: BatchTask): Promise<BatchResult> {
+  const rec: BatchResult = {
+    seq: task.seq, model: task.model, localIdx: task.localIdx,
+    status: 'error', httpStatus: null, tFirst: null, elapsed: null,
+    returnedModel: null, inputTokens: null, outputTokens: null, error: null,
+  }
+  const controller = new AbortController()
+  let timedOut = false
+  const timer = setTimeout(() => { timedOut = true; controller.abort() }, cfg.timeout * 1000)
+  const start = Date.now()
+  try {
+    let bodyObj: Record<string, any>
+    try {
+      bodyObj = buildRequestBody(cfg.bodyText, task.model)
+    } catch (e) {
+      rec.error = '请求体不是合法 JSON：' + ((e as Error)?.message || String(e))
+      return rec
+    }
+    const isStream = bodyObj.stream === true
+    if (isStream && cfg.apiType === 'openai_chat' && bodyObj.stream_options == null) {
+      bodyObj.stream_options = { include_usage: true }
+    }
+    const headers: Record<string, string> = { 'content-type': 'application/json' }
+    if (cfg.apiType === 'anthropic') {
+      headers['x-api-key'] = cfg.apiKey
+      headers['anthropic-version'] = '2023-06-01'
+    } else {
+      headers.Authorization = 'Bearer ' + cfg.apiKey
+    }
+
+    const res = await fetch(cfg.endpoint, {
+      method: 'POST', headers, body: JSON.stringify(bodyObj), signal: controller.signal,
     })
-    await Promise.allSettled(tasks)
-    setRunning(false)
+
+    if (!res.ok) {
+      let txt = ''
+      try { txt = await res.text() } catch { /* ignore */ }
+      // 错误信息始终带上 HTTP 状态码前缀，即便服务端提供了更具体的 error.message，
+      // 状态码本身也是排查问题（如限流 429 / 鉴权 401）的关键信息，不能被覆盖掉。
+      let detail = ''
+      try {
+        const j = JSON.parse(txt)
+        detail = j?.error?.message || ''
+      } catch {
+        if (txt) detail = txt.slice(0, 200)
+      }
+      rec.httpStatus = res.status
+      rec.error = `HTTP ${res.status}` + (detail ? '：' + detail : '')
+      rec.elapsed = Date.now() - start
+      return rec
+    }
+
+    let tFirst: number | null = null
+    if (isStream && res.body) {
+      const ex = makeStreamExtractor(cfg.apiType)
+      const reader = res.body.getReader()
+      const decoder = new TextDecoder()
+      let buf = ''
+      for (;;) {
+        const { done, value } = await reader.read()
+        if (tFirst === null) tFirst = Date.now() - start
+        if (done) break
+        buf += decoder.decode(value, { stream: true })
+        const lines = buf.split(/\r?\n/)
+        buf = lines.pop() ?? ''
+        for (const line of lines) {
+          if (!line.startsWith('data:')) continue
+          const payload = line.slice(5).trim()
+          if (!payload || payload === '[DONE]') continue
+          try { ex.onData(JSON.parse(payload)) } catch { /* ignore malformed chunk */ }
+        }
+      }
+      const r = ex.result()
+      rec.status = 'ok'
+      rec.httpStatus = res.status
+      rec.tFirst = tFirst
+      rec.elapsed = Date.now() - start
+      rec.inputTokens = r.inTok
+      rec.outputTokens = r.outTok
+      rec.returnedModel = r.model
+    } else {
+      tFirst = Date.now() - start
+      const txt = await res.text()
+      let json: any = {}
+      try {
+        json = txt ? JSON.parse(txt) : {}
+      } catch {
+        rec.error = '响应解析失败（非 JSON）：' + txt.slice(0, 200)
+        rec.httpStatus = res.status
+        rec.elapsed = Date.now() - start
+        return rec
+      }
+      const u = extractUsageNonStream(json)
+      rec.status = 'ok'
+      rec.httpStatus = res.status
+      rec.tFirst = tFirst
+      rec.elapsed = Date.now() - start
+      rec.inputTokens = u.inTok
+      rec.outputTokens = u.outTok
+      rec.returnedModel = u.model
+    }
+  } catch (e: unknown) {
+    rec.elapsed = Date.now() - start
+    if (timedOut) {
+      rec.error = `请求超时（> ${cfg.timeout} 秒）`
+    } else if (e instanceof TypeError) {
+      rec.error = '网络错误或可能被 CORS 拦截：' + (e.message || 'Failed to fetch') + '（若目标服务器未允许跨域，浏览器会拦截响应）'
+    } else if ((e as { name?: string })?.name === 'AbortError') {
+      rec.error = '已取消'
+    } else {
+      rec.error = (e as Error)?.message || String(e)
+    }
+  } finally {
+    clearTimeout(timer)
+  }
+  return rec
+}
+
+// ── 统计 ──
+function llmStatsOf(arr: number[]) {
+  if (!arr.length) return null
+  const sum = arr.reduce((a, b) => a + b, 0)
+  const mean = sum / arr.length
+  const variance = arr.reduce((a, b) => a + (b - mean) * (b - mean), 0) / arr.length
+  return { sum, mean, max: Math.max(...arr), min: Math.min(...arr), std: Math.sqrt(variance) }
+}
+
+function parseModelList(text: string): string[] {
+  const seen = new Set<string>()
+  const out: string[] = []
+  text.split(/[\n,]/).map(s => s.trim()).filter(Boolean).forEach(m => {
+    if (!seen.has(m)) { seen.add(m); out.push(m) }
+  })
+  return out
+}
+
+// ── 格式化 ──
+function llmPad2(n: number) { return String(n).padStart(2, '0') }
+function llmFmtTime(d: number) {
+  const dt = new Date(d)
+  return `${dt.getFullYear()}-${llmPad2(dt.getMonth() + 1)}-${llmPad2(dt.getDate())} ${llmPad2(dt.getHours())}:${llmPad2(dt.getMinutes())}:${llmPad2(dt.getSeconds())}`
+}
+function llmFmtDur(ms: number) {
+  if (ms < 1000) return ms + ' ms'
+  const s = ms / 1000
+  if (s < 60) return s.toFixed(1) + ' s'
+  return Math.floor(s / 60) + ' 分 ' + (s % 60).toFixed(0) + ' 秒'
+}
+function llmTsName(d: number) {
+  const dt = new Date(d)
+  return `${dt.getFullYear()}${llmPad2(dt.getMonth() + 1)}${llmPad2(dt.getDate())}_${llmPad2(dt.getHours())}${llmPad2(dt.getMinutes())}${llmPad2(dt.getSeconds())}`
+}
+function llmDownload(name: string, content: string, mime: string) {
+  const blob = new Blob([content], { type: mime })
+  const a = document.createElement('a')
+  a.href = URL.createObjectURL(blob)
+  a.download = name
+  document.body.appendChild(a)
+  a.click()
+  setTimeout(() => { URL.revokeObjectURL(a.href); a.remove() }, 500)
+}
+function reportToCsv(report: BatchReport): string {
+  const rows: (string | number)[][] = [['序号', '模型', '状态', '输入Token', '输出Token', '总Token', '首字(ms)', '耗时(ms)', '错误信息']]
+  report.results.forEach(r => rows.push([
+    r.seq, r.model, r.status === 'ok' ? '成功' : '失败',
+    r.inputTokens ?? '-', r.outputTokens ?? '-',
+    (r.inputTokens != null && r.outputTokens != null) ? r.inputTokens + r.outputTokens : '-',
+    r.tFirst ?? '-', r.elapsed ?? '-', r.error ?? '',
+  ]))
+  return '﻿' + rows.map(r => r.map(v => '"' + String(v).replace(/"/g, '""') + '"').join(',')).join('\r\n')
+}
+
+// ── 持久化：配置（除 API Key 外）与历史报告（最多 20 条）──
+const LLM_CFG_KEY = 'llmbatch-config'
+const LLM_HIST_KEY = 'llmbatch-history'
+const LLM_HIST_MAX = 20
+
+interface LlmBatchCfgStored {
+  apiType?: ApiType
+  baseUrl?: string
+  timeout?: string
+  models?: string
+  n?: string
+  c?: string
+  body?: string
+}
+function loadLlmCfg(): LlmBatchCfgStored {
+  if (typeof window === 'undefined') return {}
+  try {
+    const raw = localStorage.getItem(LLM_CFG_KEY)
+    if (!raw) return {}
+    const c = JSON.parse(raw)
+    return c && typeof c === 'object' ? c : {}
+  } catch { return {} }
+}
+function saveLlmCfg(cfg: LlmBatchCfgStored) {
+  if (typeof window === 'undefined') return
+  try { localStorage.setItem(LLM_CFG_KEY, JSON.stringify(cfg)) } catch { /* ignore */ }
+}
+function loadLlmHistory(): BatchReport[] {
+  if (typeof window === 'undefined') return []
+  try {
+    const raw = localStorage.getItem(LLM_HIST_KEY)
+    if (!raw) return []
+    const list = JSON.parse(raw)
+    return Array.isArray(list) ? list : []
+  } catch { return [] }
+}
+// 存满 20 条后淘汰最早；QuotaExceededError 时继续删最早的重试，返回是否发生了淘汰
+function saveLlmHistory(report: BatchReport): { list: BatchReport[]; dropped: boolean } {
+  let list = [report, ...loadLlmHistory()]
+  let dropped = false
+  while (list.length > LLM_HIST_MAX) { list.pop(); dropped = true }
+  while (typeof window !== 'undefined') {
+    try { localStorage.setItem(LLM_HIST_KEY, JSON.stringify(list)); break }
+    catch {
+      if (list.length > 0) { list.pop(); dropped = true } else break
+    }
+  }
+  return { list, dropped }
+}
+function deleteLlmHistoryItem(id: string): BatchReport[] {
+  const list = loadLlmHistory().filter(r => r.id !== id)
+  try { localStorage.setItem(LLM_HIST_KEY, JSON.stringify(list)) } catch { /* ignore */ }
+  return list
+}
+function clearLlmHistory() {
+  try { localStorage.removeItem(LLM_HIST_KEY) } catch { /* ignore */ }
+}
+
+const DEFAULT_LLM_BODY = `{
+  "model": "{{model}}",
+  "max_tokens": 100,
+  "messages": [{"role": "user", "content": "Say hello."}]
+}`
+
+// ── 报告渲染（当前报告 / 历史「查看」共用）──
+function LlmBatchReportView({ report }: { report: BatchReport }) {
+  const consistency = useMemo(() => {
+    const map: Record<string, { uniq: number[]; counts: Record<number, number>; consistent: boolean; value: number | null }> = {}
+    for (const m of report.models) {
+      const vals = report.results.filter(r => r.model === m && r.status === 'ok' && r.inputTokens != null).map(r => r.inputTokens as number)
+      if (!vals.length) { map[m] = { uniq: [], counts: {}, consistent: false, value: null }; continue }
+      const counts: Record<number, number> = {}
+      vals.forEach(v => { counts[v] = (counts[v] || 0) + 1 })
+      const uniq = Object.keys(counts).map(Number)
+      map[m] = { uniq, counts, consistent: uniq.length === 1, value: uniq.length === 1 ? uniq[0] : null }
+    }
+    return map
+  }, [report])
+
+  const crossModelNumeric = report.models.map(m => consistency[m]?.value).filter((v): v is number => typeof v === 'number')
+  const crossModelDiff = crossModelNumeric.length > 1 ? Math.max(...crossModelNumeric) - Math.min(...crossModelNumeric) : null
+
+  return (
+    <div className="flex flex-col gap-5">
+      {/* 概况 */}
+      <div className="rounded-2xl flex flex-wrap items-center gap-x-5 gap-y-1.5 px-5 py-3.5 text-sm" style={{ background: 'var(--s1)', border: '1px solid var(--border)' }}>
+        <span style={{ color: 'var(--t2)' }}>{llmFmtTime(report.startTime)} → {llmFmtTime(report.endTime)}</span>
+        <span style={{ color: 'var(--t3)' }}>{LLM_API_LABELS[report.apiType]}</span>
+        <span style={{ color: 'var(--t3)' }}>总耗时 <strong style={{ color: 'var(--text)' }}>{llmFmtDur(report.durationMs)}</strong></span>
+        <span style={{ color: 'var(--t3)' }}>总请求 <strong className="tabular-nums" style={{ color: 'var(--text)' }}>{report.total}</strong></span>
+        <span>
+          <span style={{ color: 'var(--t3)' }}>成功 </span><strong className="tabular-nums" style={{ color: 'var(--ok)' }}>{report.success}</strong>
+          <span style={{ color: 'var(--t3)' }}> / 失败 </span><strong className="tabular-nums" style={{ color: report.fail ? 'var(--err)' : 'var(--t2)' }}>{report.fail}</strong>
+        </span>
+        {report.stopped && <Badge color="warn">⚠ 已手动停止</Badge>}
+        <div className="ml-auto flex gap-2">
+          <Btn small variant="ghost" onClick={() => llmDownload(`report_${llmTsName(report.startTime)}.json`, JSON.stringify(report, null, 2), 'application/json')}>导出 JSON</Btn>
+          <Btn small variant="ghost" onClick={() => llmDownload(`report_${llmTsName(report.startTime)}.csv`, reportToCsv(report), 'text/csv;charset=utf-8')}>导出 CSV</Btn>
+        </div>
+      </div>
+
+      {/* ① 输入 Token 一致性校验 —— 核心结论置顶 */}
+      <div>
+        <h3 className="text-sm font-bold mb-2.5" style={{ color: 'var(--text)' }}>① 输入 Token 一致性校验</h3>
+        <div className="flex flex-col gap-1.5 mb-3">
+          {report.models.map(m => {
+            const c = consistency[m]
+            if (!c || c.uniq.length === 0) {
+              return (
+                <div key={m} className="flex items-center gap-2 text-sm">
+                  <Badge color="warn">⚠</Badge>
+                  <span style={{ color: 'var(--t2)' }}>[{m}] 无可用的成功请求输入 Token 数据</span>
+                </div>
+              )
+            }
+            if (c.consistent) {
+              return (
+                <div key={m} className="flex items-center gap-2 text-sm">
+                  <Badge color="ok">✓</Badge>
+                  <span style={{ color: 'var(--text)' }}>[{m}] 输入 Token 恒定，均为 <strong className="tabular-nums">{c.value}</strong></span>
+                </div>
+              )
+            }
+            const detail = Object.entries(c.counts).sort((a, b) => b[1] - a[1]).map(([v, cnt]) => `${v}（${cnt} 次）`).join('、')
+            return (
+              <div key={m} className="flex items-center gap-2 text-sm">
+                <Badge color="err">✗</Badge>
+                <span style={{ color: 'var(--text)' }}>[{m}] 输入 Token 不一致：{detail}</span>
+              </div>
+            )
+          })}
+        </div>
+        <div className="rounded-2xl overflow-hidden mb-2.5" style={{ border: '1px solid var(--border)' }}>
+          <table className="w-full text-sm">
+            <thead style={{ background: 'var(--s1)' }}>
+              <tr className="text-xs" style={{ color: 'var(--t2)' }}>
+                <th className="text-left px-4 py-2.5 font-semibold">模型</th>
+                <th className="text-left px-4 py-2.5 font-semibold">输入 Token 值</th>
+              </tr>
+            </thead>
+            <tbody>
+              {report.models.map(m => {
+                const c = consistency[m]
+                return (
+                  <tr key={m} style={{ borderTop: '1px solid var(--border)' }}>
+                    <td className="px-4 py-2 font-mono text-xs" style={{ color: 'var(--accent)' }}>{m}</td>
+                    <td className="px-4 py-2 tabular-nums">{c?.value ?? (c?.uniq.length ? '不一致' : '—')}</td>
+                  </tr>
+                )
+              })}
+            </tbody>
+          </table>
+        </div>
+        {crossModelDiff != null && crossModelDiff > 0 && (
+          <div className="rounded-xl px-4 py-2.5 text-sm" style={{ background: 'var(--warnBg)', color: 'var(--warn)' }}>
+            ⚠ 不同模型对同一请求体的 Token 计算存在差异（可能是分词器不同所致），最大相差 {crossModelDiff} tokens
+          </div>
+        )}
+      </div>
+
+      {/* ② 输出 Token 波动图 */}
+      <div>
+        <h3 className="text-sm font-bold mb-2.5" style={{ color: 'var(--text)' }}>② 输出 Token 波动</h3>
+        <div className="flex flex-col gap-4">
+          {report.models.map(m => {
+            const rs = report.results.filter(r => r.model === m).sort((a, b) => a.localIdx - b.localIdx)
+            const okOuts = rs.filter(r => r.status === 'ok' && r.outputTokens != null).map(r => r.outputTokens as number)
+            const st = llmStatsOf(okOuts)
+            const maxVal = okOuts.length ? Math.max(...okOuts) : 1
+            const placeholder = Math.max(1, maxVal * 0.08)
+            const chartData = rs.map(r => ({
+              label: '#' + r.localIdx,
+              value: r.status === 'ok' && r.outputTokens != null ? r.outputTokens : placeholder,
+              ok: r.status === 'ok' && r.outputTokens != null,
+              display: r.status === 'ok' ? String(r.outputTokens ?? '-') : '失败',
+            }))
+            return (
+              <div key={m} className="rounded-2xl p-4" style={{ background: 'var(--bg)', border: '1px solid var(--border)', boxShadow: 'var(--shadow)' }}>
+                <b className="text-sm" style={{ color: 'var(--text)' }}>[{m}] 输出 Token 分布</b>
+                <div style={{ height: 220, marginTop: 8 }}>
+                  <ResponsiveContainer width="100%" height="100%">
+                    <BarChart data={chartData} margin={{ top: 22, right: 8, left: 0, bottom: 0 }}>
+                      <CartesianGrid stroke="var(--border)" vertical={false} />
+                      <XAxis dataKey="label" tick={{ fill: 'var(--t2)', fontSize: 11 }} axisLine={{ stroke: 'var(--border)' }} tickLine={false} />
+                      <YAxis tick={{ fill: 'var(--t2)', fontSize: 11 }} axisLine={false} tickLine={false} width={36} allowDecimals={false} />
+                      <Tooltip
+                        cursor={{ fill: 'var(--s1)' }}
+                        contentStyle={{ background: 'var(--bg)', border: '1px solid var(--border)', borderRadius: 10, fontSize: 12 }}
+                        labelStyle={{ color: 'var(--t2)' }}
+                        formatter={(_value: unknown, _name: unknown, item: any) => [item?.payload?.ok ? item.payload.display + ' tok' : '请求失败', '输出 Token']}
+                      />
+                      {st && <ReferenceLine y={st.mean} stroke="var(--t3)" strokeDasharray="4 3" />}
+                      <Bar dataKey="value" radius={[4, 4, 0, 0]}>
+                        {chartData.map((d, i) => <Cell key={i} fill={d.ok ? 'var(--accent)' : 'var(--t3)'} />)}
+                        <LabelList dataKey="display" position="top" style={{ fill: 'var(--text)', fontSize: 11 }} />
+                      </Bar>
+                    </BarChart>
+                  </ResponsiveContainer>
+                </div>
+                <div className="text-xs mt-1" style={{ color: 'var(--t2)' }}>
+                  均值 {st ? st.mean.toFixed(1) : '—'} ｜ 最大 {st ? st.max : '—'} ｜ 最小 {st ? st.min : '—'} ｜ 标准差（总体）{st ? st.std.toFixed(2) : '—'}
+                </div>
+              </div>
+            )
+          })}
+        </div>
+      </div>
+
+      {/* ③ 各模型汇总统计 */}
+      <div>
+        <h3 className="text-sm font-bold mb-2.5" style={{ color: 'var(--text)' }}>
+          ③ 各模型汇总统计 <span className="text-xs font-normal" style={{ color: 'var(--t3)' }}>（均值保留 1 位小数，仅统计成功请求）</span>
+        </h3>
+        <div className="rounded-2xl overflow-hidden" style={{ border: '1px solid var(--border)', boxShadow: 'var(--shadow)' }}>
+          <div className="overflow-x-auto">
+            <table className="w-full text-sm min-w-[820px]">
+              <thead style={{ background: 'var(--s1)' }}>
+                <tr className="text-xs" style={{ color: 'var(--t2)' }}>
+                  {['模型', '总请求', '成功', '失败', '输入Token总量', '输入Token均值', '输出Token总量', '输出Token均值', '输出Token最大', '输出Token最小'].map(h => (
+                    <th key={h} className="text-left px-4 py-2.5 font-semibold whitespace-nowrap">{h}</th>
+                  ))}
+                </tr>
+              </thead>
+              <tbody>
+                {report.models.map(m => {
+                  const rs = report.results.filter(r => r.model === m)
+                  const okIn = rs.filter(r => r.status === 'ok' && r.inputTokens != null).map(r => r.inputTokens as number)
+                  const okOut = rs.filter(r => r.status === 'ok' && r.outputTokens != null).map(r => r.outputTokens as number)
+                  const si = llmStatsOf(okIn)
+                  const so = llmStatsOf(okOut)
+                  return (
+                    <tr key={m} style={{ borderTop: '1px solid var(--border)' }}>
+                      <td className="px-4 py-2 font-mono text-xs" style={{ color: 'var(--accent)' }}>{m}</td>
+                      <td className="px-4 py-2 tabular-nums">{rs.length}</td>
+                      <td className="px-4 py-2 tabular-nums" style={{ color: 'var(--ok)' }}>{rs.filter(r => r.status === 'ok').length}</td>
+                      <td className="px-4 py-2 tabular-nums" style={{ color: 'var(--err)' }}>{rs.filter(r => r.status === 'error').length}</td>
+                      <td className="px-4 py-2 tabular-nums">{si ? si.sum : '—'}</td>
+                      <td className="px-4 py-2 tabular-nums">{si ? si.mean.toFixed(1) : '—'}</td>
+                      <td className="px-4 py-2 tabular-nums">{so ? so.sum : '—'}</td>
+                      <td className="px-4 py-2 tabular-nums">{so ? so.mean.toFixed(1) : '—'}</td>
+                      <td className="px-4 py-2 tabular-nums">{so ? so.max : '—'}</td>
+                      <td className="px-4 py-2 tabular-nums">{so ? so.min : '—'}</td>
+                    </tr>
+                  )
+                })}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      </div>
+
+      {/* ④ 逐请求明细 */}
+      <div>
+        <h3 className="text-sm font-bold mb-2.5" style={{ color: 'var(--text)' }}>④ 逐请求明细</h3>
+        <div className="rounded-2xl overflow-hidden" style={{ border: '1px solid var(--border)', boxShadow: 'var(--shadow)' }}>
+          <div className="overflow-x-auto" style={{ maxHeight: 420, overflowY: 'auto' }}>
+            <table className="w-full text-sm min-w-[920px]">
+              <thead style={{ background: 'var(--s1)', position: 'sticky', top: 0 }}>
+                <tr className="text-xs" style={{ color: 'var(--t2)' }}>
+                  {['序号', '模型', '状态', '返回模型', '输入Token', '输出Token', '总Token', '首字(ms)', '耗时', '错误信息'].map(h => (
+                    <th key={h} className="text-left px-4 py-2.5 font-semibold whitespace-nowrap">{h}</th>
+                  ))}
+                </tr>
+              </thead>
+              <tbody>
+                {report.results.map(r => (
+                  <tr key={r.seq} style={{ borderTop: '1px solid var(--border)' }}
+                    onMouseEnter={e => { (e.currentTarget as HTMLTableRowElement).style.background = 'var(--s1)' }}
+                    onMouseLeave={e => { (e.currentTarget as HTMLTableRowElement).style.background = 'transparent' }}>
+                    <td className="px-4 py-2 tabular-nums">#{r.seq}</td>
+                    <td className="px-4 py-2 font-mono text-xs" style={{ color: 'var(--accent)' }}>{r.model}</td>
+                    <td className="px-4 py-2">{r.status === 'ok' ? <Badge color="ok">✓ 成功</Badge> : <Badge color="err">✗ 失败</Badge>}</td>
+                    <td className="px-4 py-2 text-xs" style={{ color: r.returnedModel && r.returnedModel !== r.model ? 'var(--err)' : 'var(--t2)' }}>
+                      {r.returnedModel ?? '—'}{r.returnedModel && r.returnedModel !== r.model ? ' ≠' : ''}
+                    </td>
+                    <td className="px-4 py-2 tabular-nums">{r.inputTokens ?? '—'}</td>
+                    <td className="px-4 py-2 tabular-nums">{r.outputTokens ?? '—'}</td>
+                    <td className="px-4 py-2 tabular-nums">{(r.inputTokens != null && r.outputTokens != null) ? r.inputTokens + r.outputTokens : '—'}</td>
+                    <td className="px-4 py-2 tabular-nums">{r.tFirst ?? '—'}</td>
+                    <td className="px-4 py-2 tabular-nums">{r.elapsed != null ? (r.elapsed / 1000).toFixed(2) + 's' : '—'}</td>
+                    <td className="px-4 py-2 text-xs" style={{ color: 'var(--err)', maxWidth: 280, wordBreak: 'break-all' }}>{r.error ?? ''}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      </div>
+    </div>
+  )
+}
+
+function LlmBatchTool() {
+  // ── 配置（持久化，API Key 除外）──
+  const [apiType, setApiType] = useState<ApiType>(() => loadLlmCfg().apiType ?? 'anthropic')
+  const [baseUrl, setBaseUrl] = useState(() => loadLlmCfg().baseUrl ?? 'https://api.anthropic.com')
+  const [apiKey, setApiKey] = useState('') // 明文凭据，不持久化
+  const [timeoutSec, setTimeoutSec] = useState(() => loadLlmCfg().timeout ?? '120')
+  const [modelListText, setModelListText] = useState(() => loadLlmCfg().models ?? 'claude-3-5-sonnet-20241022')
+  const [nReq, setNReq] = useState(() => loadLlmCfg().n ?? '5')
+  const [concurrency, setConcurrency] = useState(() => loadLlmCfg().c ?? '3')
+  const [body, setBody] = useState(() => loadLlmCfg().body ?? DEFAULT_LLM_BODY)
+  const [bodyErr, setBodyErr] = useState('')
+
+  useEffect(() => {
+    saveLlmCfg({ apiType, baseUrl, timeout: timeoutSec, models: modelListText, n: nReq, c: concurrency, body })
+  }, [apiType, baseUrl, timeoutSec, modelListText, nReq, concurrency, body])
+
+  const handleBodyChange = (v: string) => {
+    setBody(v)
+    try {
+      JSON.parse(fillModelPlaceholder(v, '"__MODEL__"'))
+      setBodyErr('')
+    } catch (e) {
+      setBodyErr('JSON 语法错误：' + ((e as Error)?.message || String(e)))
+    }
   }
 
-  const stop = () => { abortRef.current?.abort(); setRunning(false) }
+  // ── 运行状态 ──
+  const [pane, setPane] = useState<'live' | 'report' | 'history'>('live')
+  const [running, setRunning] = useState(false)
+  const [stopping, setStopping] = useState(false)
+  const [startErr, setStartErr] = useState('')
+  const [results, setResults] = useState<BatchResult[]>([])
+  const [liveLog, setLiveLog] = useState<BatchResult[]>([])
+  const [liveModels, setLiveModels] = useState<string[]>([])
+  const [liveN, setLiveN] = useState(0)
+  const stopRef = useRef(false)
 
-  const stats = useMemo(() => {
-    const settled = results.filter(r => r.status === 'ok' || r.status === 'error')
-    if (!settled.length) return null
-    const done = results.filter(r => r.status === 'ok')
-    const avgTime = done.length ? done.reduce((a, r) => a + (r.elapsed ?? 0), 0) / done.length : null
-    const totalIn = done.reduce((a, r) => a + (r.inputTokens ?? 0), 0)
-    const totalOut = done.reduce((a, r) => a + (r.outputTokens ?? 0), 0)
-    const contents = done.map(r => r.content ?? '').filter(Boolean)
-    const unique = new Set(contents).size
-    const statuses = Array.from(new Set(settled.map(r => r.httpStatus).filter((v): v is number => v != null)))
-    return {
-      avgTime, totalIn, totalOut, unique, total: done.length,
-      ok: done.length, err: settled.length - done.length, statuses,
+  // ── 报告 / 历史 ──
+  const [report, setReport] = useState<BatchReport | null>(null)
+  const [history, setHistory] = useState<BatchReport[]>(() => loadLlmHistory())
+  const [expandedHistId, setExpandedHistId] = useState<string | null>(null)
+  const [histNotice, setHistNotice] = useState('')
+
+  const runBatch = async () => {
+    setStartErr('')
+    const errs: string[] = []
+    try {
+      JSON.parse(fillModelPlaceholder(body, '"__MODEL__"'))
+    } catch (e) {
+      errs.push('请求体不是合法 JSON：' + ((e as Error)?.message || String(e)))
     }
-  }, [results])
+    const models = parseModelList(modelListText)
+    if (models.length === 0) errs.push('模型列表不能为空。')
+    if (!apiKey.trim()) errs.push('API Key 不能为空。')
+    if (!baseUrl.trim()) errs.push('Base URL 不能为空。')
+    const N = Math.max(1, parseInt(nReq, 10) || 1)
+    const C = Math.max(1, parseInt(concurrency, 10) || 1)
+    const timeoutNum = Math.max(1, parseFloat(timeoutSec) || 120)
+    if (errs.length) { setStartErr(errs.join('\n')); return }
+
+    const cfg: LlmBatchCfg = { apiType, endpoint: llmEndpointOf(apiType, baseUrl), apiKey: apiKey.trim(), timeout: timeoutNum, bodyText: body }
+
+    const queue: BatchTask[] = []
+    let seqCounter = 0
+    for (const m of models) {
+      for (let i = 1; i <= N; i++) queue.push({ seq: ++seqCounter, model: m, localIdx: i })
+    }
+    const initial: BatchResult[] = queue.map(t => ({
+      seq: t.seq, model: t.model, localIdx: t.localIdx, status: 'pending',
+      httpStatus: null, tFirst: null, elapsed: null, returnedModel: null,
+      inputTokens: null, outputTokens: null, error: null,
+    }))
+
+    stopRef.current = false
+    setStopping(false)
+    setRunning(true)
+    setPane('live')
+    setReport(null)
+    setResults(initial)
+    setLiveLog([])
+    setLiveModels(models)
+    setLiveN(N)
+
+    // 用一个普通局部数组同步维护最新结果，作为报告数据的唯一真源；
+    // setResults 只负责触发渲染 —— React 的 setState 是异步/批处理的，
+    // Promise.all(workers) resolve 后不能保证最后一次 setResults 的 updater 已经跑完，
+    // 若报告直接从 state（或镜像 state 的 ref）读取，最后完成的那条请求可能还来不及写入。
+    const resultsArr = initial
+    const startTime = Date.now()
+    let cursor = 0
+    const worker = async () => {
+      while (!stopRef.current && cursor < queue.length) {
+        const task = queue[cursor++]
+        const idx = task.seq - 1
+        resultsArr[idx] = { ...resultsArr[idx], status: 'running' }
+        setResults([...resultsArr])
+        const rec = await doLlmRequest(cfg, task)
+        resultsArr[idx] = rec
+        setResults([...resultsArr])
+        setLiveLog(prev => [rec, ...prev])
+      }
+    }
+    const workerCount = Math.min(C, queue.length)
+    await Promise.all(Array.from({ length: workerCount }, worker))
+
+    const endTime = Date.now()
+    const wasStopped = stopRef.current
+    stopRef.current = false
+    setStopping(false)
+    setRunning(false)
+
+    const finalResults = [...resultsArr].sort((a, b) => a.seq - b.seq)
+    const rep: BatchReport = {
+      id: 'r' + endTime + '_' + Math.random().toString(36).slice(2, 7),
+      startTime, endTime, durationMs: endTime - startTime,
+      apiType, models, n: N, c: C, stopped: wasStopped,
+      total: finalResults.length,
+      success: finalResults.filter(r => r.status === 'ok').length,
+      fail: finalResults.filter(r => r.status === 'error').length,
+      results: finalResults,
+    }
+    const { list, dropped } = saveLlmHistory(rep)
+    setHistory(list)
+    setHistNotice(dropped ? '存储空间有限，已自动删除最早的历史报告为新报告腾出空间。' : '')
+    setReport(rep)
+    setPane('report')
+  }
+
+  const stopBatch = () => {
+    stopRef.current = true
+    setStopping(true)
+  }
+
+  const completed = results.filter(r => r.status === 'ok' || r.status === 'error').length
+  const total = results.length
+  const pct = total ? Math.round(completed / total * 100) : 0
+  const okCount = results.filter(r => r.status === 'ok').length
+  const errCount = results.filter(r => r.status === 'error').length
+  const statusCodes = Array.from(new Set(results.map(r => r.httpStatus).filter((v): v is number => v != null))).sort((a, b) => a - b)
 
   return (
     <div className="flex flex-col h-full">
@@ -1563,94 +2369,199 @@ function LlmBatchTool() {
         <SectionTitle>LLM 批量测试 & 验真</SectionTitle>
         <div className="ml-auto flex gap-2">
           {running
-            ? <Btn variant="danger" onClick={stop}>⏹ 停止</Btn>
-            : <Btn variant="primary" onClick={runBatch} disabled={!apiKey || !baseUrl}>▶ 开始批量请求</Btn>}
+            ? <Btn variant="danger" onClick={stopBatch} disabled={stopping}>{stopping ? '正在停止…' : '⏹ 停止'}</Btn>
+            : <Btn variant="primary" onClick={runBatch} disabled={!apiKey.trim() || !baseUrl.trim()}>▶ 开始批量请求</Btn>}
         </div>
       </div>
 
       <div className="flex-1 flex overflow-hidden">
-        {/* Config panel */}
-        <div className="w-72 flex-shrink-0 flex flex-col p-4 gap-4 overflow-y-auto" style={{ borderRight: '1px solid var(--border)', background: 'var(--s1)' }}>
+        {/* 左侧配置栏 */}
+        <div className="w-72 flex-shrink-0 flex flex-col p-4 gap-3.5 overflow-y-auto" style={{ borderRight: '1px solid var(--border)', background: 'var(--s1)' }}>
+          <div>
+            <Label className="block mb-1.5">API 类型</Label>
+            <CustomSelect value={apiType} onChange={v => setApiType(v as ApiType)} options={[
+              { value: 'anthropic', label: 'Anthropic Messages API' },
+              { value: 'openai_chat', label: 'OpenAI Chat Completions API' },
+              { value: 'openai_responses', label: 'OpenAI Responses API' },
+            ]} />
+          </div>
           <div>
             <Label className="block mb-1.5">Base URL</Label>
-            <CustomInput value={baseUrl} onChange={setBaseUrl} placeholder="https://api.openai.com/v1" />
+            <CustomInput value={baseUrl} onChange={setBaseUrl} placeholder="https://api.anthropic.com" />
           </div>
           <div>
             <Label className="block mb-1.5">API Key</Label>
-            <CustomInput value={apiKey} onChange={setApiKey} placeholder="sk-..." type="password" />
+            <CustomInput value={apiKey} onChange={setApiKey} placeholder="sk-...（仅存内存，刷新即清空）" type="password" />
           </div>
           <div>
-            <Label className="block mb-1.5">Model</Label>
-            <CustomInput value={modelId} onChange={setModelId} placeholder="gpt-4o-mini" mono />
+            <Label className="block mb-1.5">请求超时（秒）</Label>
+            <CustomInput value={timeoutSec} onChange={setTimeoutSec} type="number" placeholder="120" />
           </div>
-          <div>
-            <Label className="block mb-1.5">批量次数（最多 20）</Label>
-            <CustomInput value={batchN} onChange={setBatchN} type="number" placeholder="3" />
+          <p className="text-xs leading-relaxed" style={{ color: 'var(--t3)' }}>实际请求端点：{llmEndpointOf(apiType, baseUrl || '{BaseURL}')}</p>
+
+          <div style={{ borderTop: '1px solid var(--border)', paddingTop: 14 }}>
+            <Label className="block mb-1.5">模型列表（每行一个，或逗号分隔）</Label>
+            <CustomTextarea value={modelListText} onChange={setModelListText} mono rows={3}
+              placeholder={'claude-3-5-sonnet-20241022\nclaude-3-haiku-20240307'} />
+          </div>
+          <div className="grid grid-cols-2 gap-3">
+            <div><Label className="block mb-1.5">每模型次数 N</Label><CustomInput value={nReq} onChange={setNReq} type="number" placeholder="5" /></div>
+            <div><Label className="block mb-1.5">全局并发数 C</Label><CustomInput value={concurrency} onChange={setConcurrency} type="number" placeholder="3" /></div>
           </div>
           <div className="flex-1 flex flex-col min-h-0">
-            <Label className="block mb-1.5">请求体 JSON</Label>
-            <CustomTextarea value={body} onChange={setBody} mono stretch
-              placeholder='{"messages": [...], "max_tokens": 128}' className="flex-1" style={{ minHeight: 0 }} />
+            <Label className="block mb-1.5">请求体 JSON（{'{{model}}'} 占位，或留空自动注入 model）</Label>
+            <CustomTextarea value={body} onChange={handleBodyChange} mono stretch className="flex-1"
+              style={{ minHeight: 0, ...(bodyErr ? { border: '1px solid var(--err)', boxShadow: '0 0 0 3px var(--errBg)' } : {}) }} />
+            {bodyErr && <p className="text-xs mt-1.5" style={{ color: 'var(--err)' }}>{bodyErr}</p>}
           </div>
+          {startErr && <p className="text-xs whitespace-pre-wrap" style={{ color: 'var(--err)' }}>{startErr}</p>}
         </div>
 
-        {/* Results */}
-        <div className="flex-1 overflow-hidden">
-          <div className="h-full overflow-y-auto flex flex-col">
-          {stats && (
-            <div className="glass sticky top-0 z-10 flex flex-wrap gap-x-6 gap-y-1 px-6 py-3 text-sm" style={{ borderBottom: '1px solid var(--border)' }}>
-              <div><span style={{ color: 'var(--t2)' }}>均耗时 </span><strong style={{ color: 'var(--text)', fontVariantNumeric: 'tabular-nums' }}>{stats.avgTime != null ? (stats.avgTime / 1000).toFixed(2) + 's' : '—'}</strong></div>
-              <div><span style={{ color: 'var(--t2)' }}>成功 </span><strong style={{ color: 'var(--ok)' }}>{stats.ok}</strong>
-                <span style={{ color: 'var(--t3)' }}> / 失败 </span><strong style={{ color: stats.err ? 'var(--err)' : 'var(--t2)' }}>{stats.err}</strong></div>
-              <div><span style={{ color: 'var(--t2)' }}>输入 tokens </span><strong style={{ color: 'var(--text)' }}>{stats.totalIn}</strong></div>
-              <div><span style={{ color: 'var(--t2)' }}>输出 tokens </span><strong style={{ color: 'var(--text)' }}>{stats.totalOut}</strong></div>
-              <div>
-                <span style={{ color: 'var(--t2)' }}>响应一致性 </span>
-                <Badge color={stats.total > 0 && stats.unique === 1 ? 'ok' : stats.total > 0 && stats.unique <= 2 ? 'warn' : 'err'}>
-                  {stats.unique}/{stats.total} 种
-                </Badge>
-              </div>
-              {stats.statuses.length > 0 && (
-                <div><span style={{ color: 'var(--t2)' }}>状态码 </span>
-                  <strong style={{ color: 'var(--text)', fontVariantNumeric: 'tabular-nums' }}>{stats.statuses.join(', ')}</strong></div>
-              )}
-            </div>
-          )}
-          <div className="p-4 flex flex-col gap-3 flex-1">
-            {results.length === 0 ? (
-              <div className="flex flex-col items-center justify-center h-full" style={{ color: 'var(--t3)' }}>
-                <div className="text-4xl mb-3 opacity-60">⊞</div>
-                <p className="text-sm">配置参数后点击「开始批量请求」</p>
-              </div>
-            ) : results.map(r => (
-              <div key={r.id} className="rounded-2xl p-4" style={{ background: 'var(--bg)', boxShadow: 'var(--shadow)', border: `1px solid ${r.status === 'error' ? 'var(--err)' : 'var(--border)'}` }}>
-                <div className="flex flex-wrap items-center gap-x-3 gap-y-1 mb-2">
-                  <span className="text-xs font-bold" style={{ color: 'var(--t2)' }}>#{r.id}</span>
-                  <Badge color={r.status === 'ok' ? 'ok' : r.status === 'error' ? 'err' : 'default'}>
-                    {r.status === 'running' ? '⟳ 请求中…' : r.status === 'ok' ? '✓ 成功' : r.status === 'error' ? '✗ 失败' : '等待中'}
-                  </Badge>
-                  {r.httpStatus != null && <Badge>{r.httpStatus}</Badge>}
-                  {r.returnedModel != null && (
-                    <Badge color={r.returnedModel === modelId ? 'ok' : 'err'}>
-                      返回模型 {r.returnedModel}{r.returnedModel !== modelId ? ' ≠' : ''}
-                    </Badge>
-                  )}
-                  {r.tFirst != null && <span className="text-xs" style={{ color: 'var(--t2)' }}>首字 {r.tFirst}ms</span>}
-                  {r.elapsed != null && <span className="text-xs" style={{ color: 'var(--t3)' }}>总 {(r.elapsed / 1000).toFixed(2)}s</span>}
-                  {r.inputTokens != null && <span className="text-xs" style={{ color: 'var(--t3)' }}>in: {r.inputTokens}</span>}
-                  {r.outputTokens != null && <span className="text-xs" style={{ color: 'var(--t3)' }}>out: {r.outputTokens}</span>}
-                  {r.content && <div className="ml-auto"><CopyBtn text={r.content} /></div>}
+        {/* 右侧结果区 */}
+        <div className="flex-1 flex flex-col overflow-hidden">
+          <div className="glass flex items-center px-6 py-3 flex-shrink-0" style={{ borderBottom: '1px solid var(--border)' }}>
+            <SegmentedControl value={pane} onChange={v => setPane(v as 'live' | 'report' | 'history')} options={[
+              { value: 'live', label: '实时' },
+              { value: 'report', label: '报告' },
+              { value: 'history', label: `历史 (${history.length})` },
+            ]} />
+          </div>
+
+          <div className="flex-1 overflow-y-auto">
+            {pane === 'live' && (
+              <div className="flex flex-col">
+                {total > 0 && (
+                  <div className="px-6 py-3 flex flex-col gap-2 flex-shrink-0" style={{ borderBottom: '1px solid var(--border)' }}>
+                    <div className="flex items-center justify-between text-sm">
+                      <span style={{ color: 'var(--t2)' }}>总进度</span>
+                      <span className="tabular-nums" style={{ color: 'var(--t2)' }}>{completed} / {total}（{pct}%）</span>
+                    </div>
+                    <div className="h-1.5 rounded-full overflow-hidden" style={{ background: 'var(--s2)' }}>
+                      <div className="h-full rounded-full transition-all duration-300" style={{ background: 'var(--accent)', width: pct + '%' }} />
+                    </div>
+                    <div className="flex flex-wrap gap-x-5 gap-y-1 text-xs pt-0.5">
+                      <span style={{ color: 'var(--t2)' }}>成功 <strong className="tabular-nums" style={{ color: 'var(--ok)' }}>{okCount}</strong></span>
+                      <span style={{ color: 'var(--t2)' }}>失败 <strong className="tabular-nums" style={{ color: errCount ? 'var(--err)' : 'var(--t2)' }}>{errCount}</strong></span>
+                      {statusCodes.length > 0 && (
+                        <span style={{ color: 'var(--t2)' }}>状态码 <strong className="tabular-nums" style={{ color: 'var(--text)' }}>{statusCodes.join(', ')}</strong></span>
+                      )}
+                    </div>
+                    <div className="flex flex-col gap-2.5 pt-1">
+                      {liveModels.map(m => {
+                        const rs = results.filter(r => r.model === m)
+                        const doneM = rs.filter(r => r.status === 'ok' || r.status === 'error').length
+                        const okM = rs.filter(r => r.status === 'ok').length
+                        const failM = rs.filter(r => r.status === 'error').length
+                        const pctM = liveN ? Math.round(doneM / liveN * 100) : 0
+                        return (
+                          <div key={m}>
+                            <div className="flex items-center justify-between text-xs mb-1">
+                              <span className="font-mono" style={{ color: 'var(--text)' }}>{m}</span>
+                              <span style={{ color: 'var(--t3)' }}>
+                                <span style={{ color: 'var(--ok)' }}>成功 {okM}</span> / <span style={{ color: 'var(--err)' }}>失败 {failM}</span> · {doneM}/{liveN}
+                              </span>
+                            </div>
+                            <div className="h-1 rounded-full overflow-hidden" style={{ background: 'var(--s2)' }}>
+                              <div className="h-full rounded-full transition-all duration-300" style={{ background: 'var(--accent)', width: pctM + '%' }} />
+                            </div>
+                          </div>
+                        )
+                      })}
+                    </div>
+                  </div>
+                )}
+                <div className="p-4 flex flex-col gap-2">
+                  {liveLog.length === 0 ? (
+                    <div className="flex flex-col items-center justify-center py-16" style={{ color: 'var(--t3)' }}>
+                      <div className="text-4xl mb-3 opacity-60">⊞</div>
+                      <p className="text-sm">配置参数后点击「开始批量请求」</p>
+                    </div>
+                  ) : liveLog.map(r => (
+                    <div key={r.seq} className="flex flex-wrap items-center gap-x-2.5 gap-y-1 rounded-xl px-3.5 py-2.5 text-xs"
+                      style={{ background: 'var(--bg)', border: `1px solid ${r.status === 'error' ? 'var(--err)' : 'var(--border)'}`, boxShadow: 'var(--shadow)' }}>
+                      <span className="font-bold" style={{ color: 'var(--t2)' }}>#{r.seq}</span>
+                      <span className="font-mono" style={{ color: 'var(--accent)' }}>{r.model}</span>
+                      <Badge color={r.status === 'ok' ? 'ok' : 'err'}>{r.status === 'ok' ? '✓ 成功' : '✗ 失败'}</Badge>
+                      {r.httpStatus != null && <Badge>{r.httpStatus}</Badge>}
+                      {r.returnedModel != null && (
+                        <Badge color={r.returnedModel === r.model ? 'ok' : 'err'}>
+                          返回模型 {r.returnedModel}{r.returnedModel !== r.model ? ' ≠' : ''}
+                        </Badge>
+                      )}
+                      {r.tFirst != null && <span style={{ color: 'var(--t2)' }}>首字 {r.tFirst}ms</span>}
+                      {r.elapsed != null && <span style={{ color: 'var(--t3)' }}>总 {(r.elapsed / 1000).toFixed(2)}s</span>}
+                      {r.inputTokens != null && <span style={{ color: 'var(--t3)' }}>in: {r.inputTokens}</span>}
+                      {r.outputTokens != null && <span style={{ color: 'var(--t3)' }}>out: {r.outputTokens}</span>}
+                      {r.error && <span style={{ color: 'var(--err)' }}>{r.error.slice(0, 160)}</span>}
+                    </div>
+                  ))}
                 </div>
-                {r.error && <p className="text-sm" style={{ color: 'var(--err)' }}>{r.error}</p>}
-                {r.content && <p className="text-sm leading-relaxed line-clamp-4" style={{ color: 'var(--text)' }}>{r.content}</p>}
-                {r.status === 'running' && (
-                  <div className="h-0.5 rounded-full overflow-hidden mt-3" style={{ background: 'var(--s2)' }}>
-                    <div className="h-full rounded-full animate-pulse" style={{ background: 'var(--accent)', width: '60%' }} />
+              </div>
+            )}
+
+            {pane === 'report' && (
+              <div className="p-5">
+                {report ? <LlmBatchReportView report={report} /> : (
+                  <div className="flex flex-col items-center justify-center py-16" style={{ color: 'var(--t3)' }}>
+                    <p className="text-sm">还没有已完成的测试报告。</p>
                   </div>
                 )}
               </div>
-            ))}
-          </div>
+            )}
+
+            {pane === 'history' && (
+              <div className="p-5 flex flex-col gap-3">
+                <div className="flex items-center justify-between">
+                  <span className="text-xs" style={{ color: 'var(--t3)' }}>已存 {history.length} / {LLM_HIST_MAX} 条历史报告</span>
+                  {history.length > 0 && (
+                    <Btn small variant="danger" onClick={() => {
+                      if (window.confirm('确认清空全部历史报告？此操作不可恢复。')) {
+                        clearLlmHistory(); setHistory([]); setExpandedHistId(null)
+                      }
+                    }}>清空全部</Btn>
+                  )}
+                </div>
+                {histNotice && <p className="text-xs" style={{ color: 'var(--warn)' }}>⚠ {histNotice}</p>}
+                {history.length === 0 ? (
+                  <div className="flex flex-col items-center justify-center py-16" style={{ color: 'var(--t3)' }}>
+                    <p className="text-sm">暂无历史报告。</p>
+                  </div>
+                ) : history.map(rep => (
+                  <div key={rep.id} className="rounded-2xl p-4" style={{ background: 'var(--bg)', border: '1px solid var(--border)', boxShadow: 'var(--shadow)' }}>
+                    <div className="flex flex-wrap items-center justify-between gap-2">
+                      <div>
+                        <div className="text-sm font-semibold" style={{ color: 'var(--text)' }}>
+                          {llmFmtTime(rep.startTime)}
+                          {rep.stopped && <span className="ml-2 text-xs font-normal" style={{ color: 'var(--warn)' }}>（已手动停止）</span>}
+                        </div>
+                        <div className="text-xs mt-0.5" style={{ color: 'var(--t3)' }}>
+                          模型：{rep.models.join(', ')} ｜ 成功 <span style={{ color: 'var(--ok)' }}>{rep.success}</span> / 总 {rep.total} ｜ 耗时 {llmFmtDur(rep.durationMs)}
+                        </div>
+                      </div>
+                      <div className="flex gap-2 flex-shrink-0">
+                        <Btn small variant="ghost" onClick={() => setExpandedHistId(id => id === rep.id ? null : rep.id)}>
+                          {expandedHistId === rep.id ? '收起' : '查看'}
+                        </Btn>
+                        <Btn small variant="ghost" onClick={() => llmDownload(`report_${llmTsName(rep.startTime)}.json`, JSON.stringify(rep, null, 2), 'application/json')}>JSON</Btn>
+                        <Btn small variant="ghost" onClick={() => llmDownload(`report_${llmTsName(rep.startTime)}.csv`, reportToCsv(rep), 'text/csv;charset=utf-8')}>CSV</Btn>
+                        <Btn small variant="danger" onClick={() => {
+                          if (window.confirm('确认删除该条历史报告？此操作不可恢复。')) {
+                            const list = deleteLlmHistoryItem(rep.id)
+                            setHistory(list)
+                            if (expandedHistId === rep.id) setExpandedHistId(null)
+                          }
+                        }}>删除</Btn>
+                      </div>
+                    </div>
+                    {expandedHistId === rep.id && (
+                      <div className="mt-4 pt-4" style={{ borderTop: '1px solid var(--border)' }}>
+                        <LlmBatchReportView report={rep} />
+                      </div>
+                    )}
+                  </div>
+                ))}
+              </div>
+            )}
           </div>
         </div>
       </div>
@@ -1713,6 +2624,528 @@ function ThemeMenu({ theme, setTheme }: { theme: ThemeKey; setTheme: (t: ThemeKe
   )
 }
 
+// ─── Tool: 图片信息识别 ─────────────────────────────────────────────────────────
+
+let imgCounter = 0
+
+function ImageAnalyzerTool() {
+  const [items, setItems] = useState<ImageItem[]>([])
+  const [view, setView] = useState<'card' | 'table'>('card')
+  const [sortBy, setSortBy] = useState<'added' | 'pixels' | 'size' | 'name' | 'width'>('added')
+  const [filterTier, setFilterTier] = useState('')
+  const [search, setSearch] = useState('')
+  const [loose, setLoose] = useState(false)
+  const [lightboxItem, setLightboxItem] = useState<ImageItem | null>(null)
+  const [toasts, setToasts] = useState<{ id: number; msg: string; type: 'info' | 'ok' | 'err' }[]>([])
+  const fileInputRef = useRef<HTMLInputElement>(null)
+  const dropzoneRef = useRef<HTMLDivElement>(null)
+
+  const addToast = useCallback((msg: string, type: 'info' | 'ok' | 'err' = 'info') => {
+    const id = Date.now() + Math.random()
+    setToasts(prev => [...prev, { id, msg, type }])
+    setTimeout(() => {
+      setToasts(prev => prev.map(t => t.id === id ? { ...t, msg: '' } : t))
+      setTimeout(() => setToasts(prev => prev.filter(t => t.id !== id)), 320)
+    }, 2600)
+  }, [])
+
+  const updateItem = useCallback((id: string, patch: Partial<ImageItem>) => {
+    setItems(prev => prev.map(it => it.id === id ? { ...it, ...patch } : it))
+  }, [])
+
+  const addFiles = useCallback((fileList: FileList | File[]) => {
+    const files = Array.from(fileList).filter(f => f.type.startsWith('image/') || /\.(jpe?g|png|webp|gif|bmp|svg|avif|heic|ico|tiff?)$/i.test(f.name))
+    if (!files.length) { addToast('未检测到有效的图片文件', 'err'); return }
+    files.forEach(file => {
+      const id = Math.random().toString(36).slice(2, 10)
+      const item: ImageItem = {
+        id, order: imgCounter++, source: 'local', name: file.name,
+        size: file.size, mime: file.type, status: 'loading',
+        width: 0, height: 0, format: '', src: '', origin: '本地文件',
+      }
+      setItems(prev => [...prev, item])
+      const headReader = new FileReader()
+      headReader.onload = () => {
+        const detected = imgDetectFormat(headReader.result as ArrayBuffer)
+        const fmt = detected || imgMimeToFormat(file.type) || imgExtFromUrl(file.name) || '未知'
+        const patch: Partial<ImageItem> = { format: fmt }
+        if (detected && imgMimeToFormat(file.type) && detected !== imgMimeToFormat(file.type)) {
+          patch.formatNote = `扩展名声明为 ${imgMimeToFormat(file.type)}`
+        }
+        updateItem(id, patch)
+      }
+      headReader.readAsArrayBuffer(file.slice(0, 512))
+      const reader = new FileReader()
+      reader.onload = e => {
+        const img = new Image()
+        img.onload = () => {
+          const w = img.naturalWidth || img.width; const h = img.naturalHeight || img.height
+          updateItem(id, { width: w || 0, height: h || 0, src: e.target!.result as string, status: 'done', note: (!w || !h) ? '矢量图 / 无固有尺寸' : undefined })
+        }
+        img.onerror = () => updateItem(id, { status: 'error', error: '图片解码失败，可能是浏览器不支持的格式（如 HEIC）' })
+        img.src = e.target!.result as string
+      }
+      reader.onerror = () => updateItem(id, { status: 'error', error: '文件读取失败' })
+      reader.readAsDataURL(file)
+    })
+    addToast(`已添加 ${files.length} 张本地图片`, 'ok')
+  }, [addToast, updateItem])
+
+  const addUrls = useCallback((text: string) => {
+    const urls = text.split(/[\n,\s]+/).map(s => s.trim()).filter(Boolean).filter(u => /^(https?:)?\/\/|^data:image\//i.test(u))
+    if (!urls.length) { addToast('请输入有效的图片 URL（以 http(s):// 开头）', 'err'); return }
+    urls.forEach(url => {
+      const rawName = decodeURIComponent(url.split('/').pop()!.split('?')[0]) || '远程图片'
+      const id = Math.random().toString(36).slice(2, 10)
+      const item: ImageItem = {
+        id, order: imgCounter++, source: 'url', name: rawName.length > 44 ? rawName.slice(0, 42) + '…' : rawName,
+        url, size: null, mime: '', status: 'loading', width: 0, height: 0,
+        format: imgExtFromUrl(url) || '', src: url, origin: 'URL 链接',
+      }
+      setItems(prev => [...prev, item])
+      const img = new Image(); img.crossOrigin = 'anonymous'
+      const fallback = () => {
+        const img2 = new Image()
+        img2.onload = () => updateItem(id, { width: img2.naturalWidth, height: img2.naturalHeight, status: 'done', crossOriginBlocked: true, format: item.format || '未知' })
+        img2.onerror = () => updateItem(id, { status: 'error', error: '无法加载该 URL（链接失效、非图片或被防盗链拦截）' })
+        img2.src = url
+      }
+      img.onload = () => updateItem(id, { width: img.naturalWidth, height: img.naturalHeight, status: 'done' })
+      img.onerror = fallback; img.src = url
+      fetch(url, { mode: 'cors' })
+        .then(r => { if (!r.ok) throw new Error('HTTP ' + r.status); return r.blob() })
+        .then(async blob => {
+          const fmt = await blob.slice(0, 512).arrayBuffer().then(buf => imgDetectFormat(buf) || imgMimeToFormat(blob.type) || item.format || '未知').catch(() => imgMimeToFormat(blob.type) || item.format || '未知')
+          updateItem(id, { size: blob.size, mime: blob.type, format: fmt })
+        })
+        .catch(() => updateItem(id, { sizeBlocked: true, format: item.format || '未知' }))
+    })
+    addToast(`已开始加载 ${urls.length} 个 URL 图片`, 'ok')
+  }, [addToast, updateItem])
+
+  const removeItem = useCallback((id: string) => setItems(prev => prev.filter(i => i.id !== id)), [])
+
+  const visibleItems = useMemo(() => {
+    let list = items.filter(it => {
+      const c = imgClassifyResolution(it.width, it.height, loose)
+      if (filterTier && c.tier !== filterTier) return false
+      if (search && !(it.name.toLowerCase().includes(search) || (it.format || '').toLowerCase().includes(search))) return false
+      return true
+    })
+    list.sort((a, b) => {
+      if (sortBy === 'pixels') return (b.width * b.height) - (a.width * a.height)
+      if (sortBy === 'size') return (b.size || 0) - (a.size || 0)
+      if (sortBy === 'name') return a.name.localeCompare(b.name, 'zh')
+      if (sortBy === 'width') return b.width - a.width
+      return a.order - b.order
+    })
+    return list
+  }, [items, sortBy, filterTier, search, loose])
+
+  const tierOptions = useMemo(() => {
+    const tiers = [...new Set(items.filter(i => i.status === 'done').map(i => imgClassifyResolution(i.width, i.height, loose).tier))]
+    return [{ value: '', label: '全部' }, ...tiers.map(t => ({ value: t, label: t }))]
+  }, [items, loose])
+
+  const stats = useMemo(() => {
+    const done = items.filter(i => i.status === 'done')
+    const totalSize = done.reduce((s, i) => s + (i.size || 0), 0)
+    const stdCount = done.filter(i => imgClassifyResolution(i.width, i.height, loose).standard).length
+    const maxItem = done.slice().sort((a, b) => (b.width * b.height) - (a.width * a.height))[0]
+    const totalMP = done.reduce((s, i) => s + i.width * i.height, 0) / 1e6
+    return { done, totalSize, stdCount, maxItem, totalMP }
+  }, [items, loose])
+
+  // Paste handler
+  useEffect(() => {
+    const handler = (e: ClipboardEvent) => {
+      const files = Array.from(e.clipboardData?.files || [])
+      if (files.length) { addFiles(files); return }
+      const text = e.clipboardData?.getData('text')
+      if (text && /^https?:\/\//i.test(text.trim())) addUrls(text)
+    }
+    window.addEventListener('paste', handler as EventListener)
+    return () => window.removeEventListener('paste', handler as EventListener)
+  }, [addFiles, addUrls])
+
+  // Lightbox escape
+  useEffect(() => {
+    if (!lightboxItem) return
+    const handler = (e: KeyboardEvent) => { if (e.key === 'Escape') setLightboxItem(null) }
+    window.addEventListener('keydown', handler)
+    return () => window.removeEventListener('keydown', handler)
+  }, [lightboxItem])
+
+  // Prevent default drag on document
+  useEffect(() => {
+    const prevent = (e: DragEvent) => e.preventDefault()
+    document.addEventListener('dragover', prevent); document.addEventListener('dragenter', prevent)
+    return () => { document.removeEventListener('dragover', prevent); document.removeEventListener('dragenter', prevent) }
+  }, [])
+
+  const has = items.length > 0
+  const done = stats.done
+
+  const tierBadge = (c: ImgClassification) => {
+    const grad = IMG_TIER_STYLE[c.tier] || IMG_TIER_STYLE['非标准']
+    return <span className={`inline-flex items-center gap-1 rounded-full font-bold bg-gradient-to-r ${grad} text-white px-2 py-0.5 text-[10px]`} style={{ textShadow: '0 1px 6px rgba(0,0,0,.35)' }}>{c.standard ? c.tier : '非标准'}</span>
+  }
+
+  const copyInfo = (it: ImageItem) => {
+    const c = imgClassifyResolution(it.width, it.height, loose)
+    const txt = `文件名：${it.name}\n分辨率：${it.width} × ${it.height} 像素\n文件大小：${it.size == null ? '未知' : imgFormatBytes(it.size)}\n分辨率等级：${c.standard ? c.tier + '（' + c.name + '）' : '非标准分辨率（最接近 ' + c.near + '）'}\n图片格式：${it.format}\n宽高比：${imgAspectRatio(it.width, it.height)}\n来源：${it.origin}`
+    navigator.clipboard.writeText(txt).then(() => addToast('图片信息已复制到剪贴板', 'ok')).catch(() => addToast('复制失败', 'err'))
+  }
+
+  const exportCsv = () => {
+    const rows = [['文件名', '来源', '宽度(px)', '高度(px)', '分辨率', '文件大小(字节)', '文件大小', '分辨率等级', '标准规格', '图片格式', '宽高比', '百万像素']]
+    visibleItems.filter(i => i.status === 'done').forEach(it => {
+      const c = imgClassifyResolution(it.width, it.height, loose)
+      rows.push([it.name, it.origin, String(it.width), String(it.height), `${it.width}x${it.height}`, String(it.size ?? ''), it.size == null ? '未知' : imgFormatBytes(it.size),
+        c.standard ? c.tier : '非标准分辨率', c.standard ? c.name : ('最接近 ' + (c.near || '')), it.format, imgAspectRatio(it.width, it.height), ((it.width * it.height) / 1e6).toFixed(2)])
+    })
+    const csv = '\ufeff' + rows.map(r => r.map(v => `"${String(v).replace(/"/g, '""')}"`).join(',')).join('\n')
+    const a = document.createElement('a')
+    a.href = URL.createObjectURL(new Blob([csv], { type: 'text/csv;charset=utf-8' }))
+    a.download = `图片信息_${new Date().toISOString().slice(0, 10)}.csv`
+    a.click(); addToast('CSV 已导出', 'ok')
+  }
+
+  const [dragOver, setDragOver] = useState(false)
+  const onDragEnter = (e: React.DragEvent) => { e.preventDefault(); setDragOver(true) }
+  const onDragLeave = (e: React.DragEvent) => { e.preventDefault(); if (!dropzoneRef.current?.contains(e.relatedTarget as Node)) setDragOver(false) }
+  const onDrop = (e: React.DragEvent) => {
+    e.preventDefault(); setDragOver(false)
+    if (e.dataTransfer.files.length) addFiles(e.dataTransfer.files)
+    else { const url = e.dataTransfer.getData('text/uri-list') || e.dataTransfer.getData('text/plain'); if (url) addUrls(url) }
+  }
+
+  return (
+    <div className="mx-auto max-w-[1500px] px-6 py-12 space-y-6">
+      <SectionTitle>图片信息识别器</SectionTitle>
+
+      {/* Input Area */}
+      <section className="grid lg:grid-cols-2 gap-5">
+        <div className="rounded-2xl p-5" style={{ background: 'var(--bg)', border: '1px solid var(--border)', boxShadow: 'var(--shadow)' }}>
+          <div className="flex items-center gap-2 mb-3">
+            <span className="w-7 h-7 rounded-lg flex items-center justify-center" style={{ background: 'var(--accentSub)', color: 'var(--accent)' }}>
+              <svg viewBox="0 0 24 24" className="w-4 h-4" fill="none" stroke="currentColor" strokeWidth="2"><path d="M12 16V4m0 0 4 4m-4-4L8 8" /><path d="M4 16v2a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-2" /></svg>
+            </span>
+            <span className="text-sm font-semibold" style={{ color: 'var(--text)' }}>本地上传 <span style={{ color: 'var(--t3)' }} className="font-normal">（支持多选 / 拖拽 / 粘贴）</span></span>
+          </div>
+          <div ref={dropzoneRef}
+            className={`ia-checker rounded-xl border-2 border-dashed cursor-pointer p-8 text-center select-none transition-all duration-200 ${dragOver ? 'ia-drag-active' : ''}`}
+            style={{ borderColor: dragOver ? undefined : 'var(--border)' }}
+            onClick={() => fileInputRef.current?.click()}
+            onDragEnter={onDragEnter} onDragLeave={onDragLeave} onDrop={onDrop}
+          >
+            <svg viewBox="0 0 24 24" className="w-11 h-11 mx-auto mb-2" fill="none" stroke="currentColor" strokeWidth="1.5" style={{ color: 'var(--t3)' }}>
+              <path d="M21 15v3a3 3 0 0 1-3 3H6a3 3 0 0 1-3-3v-3" /><path d="M12 3v13m0-13 5 5m-5-5-5 5" />
+            </svg>
+            <p className="text-sm font-medium" style={{ color: 'var(--text)' }}>拖拽图片到此处，或 <span style={{ color: 'var(--accent)' }} className="underline decoration-dotted">点击选择文件</span></p>
+            <p className="text-[11px] mt-1.5" style={{ color: 'var(--t3)' }}>支持 JPG / PNG / WebP / GIF / BMP / AVIF / SVG / ICO 等 · 可一次选择多张</p>
+            <input ref={fileInputRef} type="file" accept="image/*" multiple className="hidden" onChange={e => { if (e.target.files?.length) addFiles(e.target.files); e.target.value = '' }} />
+          </div>
+        </div>
+
+        <div className="rounded-2xl p-5 flex flex-col" style={{ background: 'var(--bg)', border: '1px solid var(--border)', boxShadow: 'var(--shadow)' }}>
+          <div className="flex items-center gap-2 mb-3">
+            <span className="w-7 h-7 rounded-lg flex items-center justify-center" style={{ background: 'var(--accentSub)', color: 'var(--accent)' }}>
+              <svg viewBox="0 0 24 24" className="w-4 h-4" fill="none" stroke="currentColor" strokeWidth="2"><path d="M10 13a5 5 0 0 0 7.5.5l3-3a5 5 0 0 0-7-7l-1.5 1.5" /><path d="M14 11a5 5 0 0 0-7.5-.5l-3 3a5 5 0 0 0 7 7L12 19" /></svg>
+            </span>
+            <span className="text-sm font-semibold" style={{ color: 'var(--text)' }}>图片 URL 加载 <span style={{ color: 'var(--t3)' }} className="font-normal">（每行一个，可批量）</span></span>
+          </div>
+          <UrlInput onSubmit={addUrls} />
+        </div>
+      </section>
+
+      {/* Toolbar */}
+      {has && (
+        <section className="rounded-2xl px-4 py-3 flex flex-wrap items-center gap-3" style={{ background: 'var(--bg)', border: '1px solid var(--border)', boxShadow: 'var(--shadow)' }}>
+          <SegmentedControl value={view} options={[{ value: 'card', label: '卡片' }, { value: 'table', label: '表格' }]} onChange={v => setView(v as 'card' | 'table')} />
+          <div className="w-px h-5" style={{ background: 'var(--border)' }} />
+          <CustomSelect value={sortBy} onChange={v => setSortBy(v as typeof sortBy)}
+            options={[{ value: 'added', label: '添加顺序' }, { value: 'pixels', label: '像素总数 ↓' }, { value: 'size', label: '文件大小 ↓' }, { value: 'name', label: '文件名 A→Z' }, { value: 'width', label: '宽度 ↓' }]} />
+          <CustomSelect value={filterTier} onChange={setFilterTier} options={tierOptions} />
+          <input type="text" placeholder="搜索文件名 / 格式…" value={search} onChange={e => setSearch(e.target.value)}
+            className="rounded-xl px-3 py-1.5 text-xs outline-none transition-all duration-150"
+            style={{ background: 'var(--inputBg)', border: '1px solid var(--inputBorder)', color: 'var(--text)', width: 176 }}
+          />
+          <label className="flex items-center gap-1.5 text-xs cursor-pointer select-none" style={{ color: 'var(--t2)' }}>
+            <input type="checkbox" checked={loose} onChange={e => setLoose(e.target.checked)} className="accent-blue-500 w-3.5 h-3.5" />
+            宽松匹配 ±2%
+          </label>
+          <div className="flex-1" />
+          <span className="text-[11px]" style={{ color: 'var(--t3)' }}>显示 {visibleItems.length} / {items.length} 张</span>
+          <Btn small onClick={exportCsv}>导出 CSV</Btn>
+          <Btn small variant="danger" onClick={() => { setItems([]); addToast('已清空全部图片') }}>清空</Btn>
+        </section>
+      )}
+
+      {/* Stats */}
+      {has && (
+        <section className="grid grid-cols-2 md:grid-cols-4 gap-3">
+          {([
+            ['图片总数', items.length + ' 张', `已解析 ${done.length} · 加载中 ${items.filter(i => i.status === 'loading').length}`, 'text-blue-500'],
+            ['总文件大小', imgFormatBytes(stats.totalSize), `${done.filter(i => i.size == null).length} 张体积未知`, 'text-emerald-500'],
+            ['标准分辨率', `${stats.stdCount} / ${done.length}`, `${done.length - stats.stdCount} 张为非标准分辨率`, 'text-violet-500'],
+            ['最高分辨率', stats.maxItem ? `${stats.maxItem.width}×${stats.maxItem.height}` : '—', `合计 ${stats.totalMP.toFixed(1)} 百万像素`, 'text-amber-500'],
+          ] as const).map(([t, v, s, c]) => (
+            <div key={t} className="rounded-2xl p-4" style={{ background: 'var(--s1)', border: '1px solid var(--border)' }}>
+              <p className="text-[11px]" style={{ color: 'var(--t2)' }}>{t}</p>
+              <p className={`text-xl font-bold mt-1 font-mono ${c}`}>{v}</p>
+              <p className="text-[10px] mt-1" style={{ color: 'var(--t3)' }}>{s}</p>
+            </div>
+          ))}
+        </section>
+      )}
+
+      {/* Empty State */}
+      {!has && (
+        <section className="rounded-2xl py-20 text-center" style={{ background: 'var(--bg)', border: '1px solid var(--border)', boxShadow: 'var(--shadow)' }}>
+          <svg viewBox="0 0 24 24" className="w-16 h-16 mx-auto mb-4" fill="none" stroke="currentColor" strokeWidth="1.2" style={{ color: 'var(--t3)' }}>
+            <rect x="3" y="4" width="18" height="16" rx="3" /><circle cx="8.5" cy="9.5" r="1.6" /><path d="m4 17 4.5-4.5 3 3L15 11l5 5" />
+          </svg>
+          <p className="font-medium" style={{ color: 'var(--t2)' }}>还没有图片</p>
+          <p className="text-xs mt-1.5" style={{ color: 'var(--t3)' }}>上传本地图片或粘贴图片 URL，即可自动识别分辨率、大小、等级与格式</p>
+        </section>
+      )}
+
+      {/* Card View */}
+      {view === 'card' && has && (
+        <div className="grid sm:grid-cols-2 xl:grid-cols-3 2xl:grid-cols-4 gap-4">
+          {visibleItems.map(it => {
+            const c = imgClassifyResolution(it.width, it.height, loose)
+            const fmtCls = IMG_FORMAT_COLOR[it.format] || 'bg-slate-500/15 text-slate-600 dark:text-slate-300 border-slate-400/25'
+            if (it.status === 'loading') return (
+              <div key={it.id} className="rounded-2xl overflow-hidden ia-card-enter" style={{ background: 'var(--bg)', border: '1px solid var(--border)', boxShadow: 'var(--shadow)' }}>
+                <div className="h-44 ia-shimmer" />
+                <div className="p-4 space-y-2.5">
+                  <div className="h-4 w-3/4 rounded ia-shimmer" />
+                  <div className="h-3 w-1/2 rounded ia-shimmer" />
+                  <div className="grid grid-cols-2 gap-2 pt-1"><div className="h-11 rounded-lg ia-shimmer" /><div className="h-11 rounded-lg ia-shimmer" /></div>
+                </div>
+              </div>
+            )
+            if (it.status === 'error') return (
+              <div key={it.id} className="rounded-2xl overflow-hidden ia-card-enter" style={{ background: 'var(--bg)', border: '1px solid var(--err)', boxShadow: 'var(--shadow)' }}>
+                <div className="h-44 grid place-items-center" style={{ background: 'var(--errBg)' }}>
+                  <svg viewBox="0 0 24 24" className="w-10 h-10 opacity-70" fill="none" stroke="currentColor" strokeWidth="1.5" style={{ color: 'var(--err)' }}><circle cx="12" cy="12" r="9" /><path d="M12 7v6m0 3h.01" /></svg>
+                </div>
+                <div className="p-4">
+                  <p className="font-semibold text-sm truncate" style={{ color: 'var(--text)' }} title={it.name}>{it.name}</p>
+                  <p className="text-xs mt-1.5" style={{ color: 'var(--err)' }}>{it.error || '加载失败'}</p>
+                  <Btn small variant="soft" className="mt-3 w-full" onClick={() => removeItem(it.id)}>移除</Btn>
+                </div>
+              </div>
+            )
+            const mp = ((it.width * it.height) / 1e6).toFixed(2)
+            const orientation = it.width === it.height ? '正方形' : (it.width > it.height ? '横向' : '纵向')
+            return (
+              <div key={it.id} className="rounded-2xl overflow-hidden ia-card-enter group transition-all duration-200" style={{ background: 'var(--bg)', border: '1px solid var(--border)', boxShadow: 'var(--shadow)' }}
+                onMouseEnter={e => (e.currentTarget.style.borderColor = 'var(--accentSubHard)')}
+                onMouseLeave={e => (e.currentTarget.style.borderColor = 'var(--border)')}
+              >
+                <div className="relative h-44 ia-checker cursor-zoom-in overflow-hidden" onClick={() => setLightboxItem(it)}>
+                  <img src={it.src} alt={it.name} className="w-full h-full object-contain transition-transform duration-500 group-hover:scale-[1.04]" loading="lazy" />
+                  <div className="absolute top-2 left-2 flex gap-1.5">{tierBadge(c)}</div>
+                  <div className="absolute top-2 right-2">
+                    <span className={`px-2 py-0.5 rounded-full text-[10px] font-semibold border ${fmtCls}`}>{it.format || '未知'}</span>
+                  </div>
+                  <div className="absolute bottom-2 right-2 px-2 py-0.5 rounded-md text-[10px] font-mono" style={{ background: 'color-mix(in srgb, var(--bg) 80%, transparent)', border: '1px solid var(--border)', color: 'var(--text)' }}>{it.width}×{it.height}</div>
+                </div>
+                <div className="p-4">
+                  <p className="font-semibold text-sm truncate" style={{ color: 'var(--text)' }} title={it.name}>{it.name}</p>
+                  <p className="text-[10px] mt-0.5 flex items-center gap-1" style={{ color: 'var(--t3)' }}>
+                    <span className="w-1.5 h-1.5 rounded-full" style={{ background: it.source === 'local' ? 'var(--accent)' : 'var(--warn)' }} />{it.origin}
+                  </p>
+                  <div className="grid grid-cols-2 gap-2 mt-3">
+                    <div className="rounded-lg px-2.5 py-2" style={{ background: 'var(--s1)', border: '1px solid var(--border)' }}>
+                      <p className="text-[10px]" style={{ color: 'var(--t3)' }}>分辨率</p>
+                      <p className="font-mono text-sm font-semibold" style={{ color: 'var(--accent)' }}>{it.width} × {it.height}</p>
+                    </div>
+                    <div className="rounded-lg px-2.5 py-2" style={{ background: 'var(--s1)', border: '1px solid var(--border)' }}>
+                      <p className="text-[10px]" style={{ color: 'var(--t3)' }}>文件大小</p>
+                      <p className="font-mono text-sm font-semibold" style={{ color: it.size == null ? 'var(--t3)' : 'var(--ok)' }}>{it.size == null ? '未知' : imgFormatBytes(it.size)}</p>
+                    </div>
+                    <div className="rounded-lg px-2.5 py-2" style={{ background: 'var(--s1)', border: '1px solid var(--border)' }}>
+                      <p className="text-[10px]" style={{ color: 'var(--t3)' }}>分辨率等级</p>
+                      <p className="text-sm font-semibold" style={{ color: c.standard ? 'var(--accent)' : 'var(--warn)' }}>{c.standard ? c.tier : '非标准'}</p>
+                    </div>
+                    <div className="rounded-lg px-2.5 py-2" style={{ background: 'var(--s1)', border: '1px solid var(--border)' }}>
+                      <p className="text-[10px]" style={{ color: 'var(--t3)' }}>图片格式</p>
+                      <p className="text-sm font-semibold" style={{ color: 'var(--text)' }}>{it.format || '未知'}</p>
+                    </div>
+                  </div>
+                  <div className="mt-2.5 text-[11px] leading-relaxed" style={{ color: 'var(--t2)' }}>
+                    {c.standard
+                      ? <span style={{ color: 'var(--ok)' }}>✓ 标准规格：{c.name}{c.exact ? '' : '（±2% 近似）'}</span>
+                      : <><span style={{ color: 'var(--warn)' }}>⚠ 非标准分辨率</span> · 最接近 <b style={{ color: 'var(--text)' }}>{c.near}</b></>}
+                  </div>
+                  <div className="mt-2 flex flex-wrap gap-1.5 text-[10px]" style={{ color: 'var(--t3)' }}>
+                    <span className="px-1.5 py-0.5 rounded" style={{ background: 'var(--s1)', border: '1px solid var(--border)' }}>宽高比 {imgAspectRatio(it.width, it.height)}</span>
+                    <span className="px-1.5 py-0.5 rounded" style={{ background: 'var(--s1)', border: '1px solid var(--border)' }}>{mp} MP</span>
+                    <span className="px-1.5 py-0.5 rounded" style={{ background: 'var(--s1)', border: '1px solid var(--border)' }}>{orientation}</span>
+                    {it.sizeBlocked && <span className="px-1.5 py-0.5 rounded" style={{ background: 'var(--warnBg)', border: '1px solid var(--warn)', color: 'var(--warn)' }}>跨域·体积未知</span>}
+                    {it.formatNote && <span className="px-1.5 py-0.5 rounded" style={{ background: 'var(--warnBg)', border: '1px solid var(--warn)', color: 'var(--warn)' }}>{it.formatNote}</span>}
+                  </div>
+                  <div className="mt-3 flex gap-2">
+                    <Btn small variant="soft" className="flex-1" onClick={() => copyInfo(it)}>复制信息</Btn>
+                    <Btn small variant="accent" className="flex-1" onClick={() => setLightboxItem(it)}>查看大图</Btn>
+                    <Btn small variant="danger" onClick={() => removeItem(it.id)}>✕</Btn>
+                  </div>
+                </div>
+              </div>
+            )
+          })}
+        </div>
+      )}
+
+      {/* Table View */}
+      {view === 'table' && has && (
+        <div className="rounded-2xl overflow-hidden" style={{ background: 'var(--bg)', border: '1px solid var(--border)', boxShadow: 'var(--shadow)' }}>
+          <div className="overflow-x-auto">
+            <table className="w-full text-sm min-w-[900px]">
+              <thead style={{ background: 'var(--s1)' }}>
+                <tr className="text-[11px] uppercase tracking-wider" style={{ color: 'var(--t2)' }}>
+                  {['预览', '名称 / 来源', '分辨率', '等级', '文件大小', '格式', '宽高比', '像素', ''].map(h => (
+                    <th key={h} className="text-left px-4 py-3 font-semibold">{h}</th>
+                  ))}
+                </tr>
+              </thead>
+              <tbody>
+                {visibleItems.map(it => {
+                  const c = imgClassifyResolution(it.width, it.height, loose)
+                  if (it.status === 'loading') return <tr key={it.id}><td colSpan={9} className="px-4 py-3"><div className="h-8 rounded ia-shimmer" /></td></tr>
+                  if (it.status === 'error') return <tr key={it.id}><td className="px-4 py-3" style={{ color: 'var(--err)' }}>—</td><td className="px-4 py-3 text-xs">{it.name}</td><td colSpan={6} className="px-4 py-3 text-xs" style={{ color: 'var(--err)' }}>{it.error}</td><td className="px-4 py-3"><button onClick={() => removeItem(it.id)} className="text-xs hover:underline" style={{ color: 'var(--err)' }}>移除</button></td></tr>
+                  const fmtCls = IMG_FORMAT_COLOR[it.format] || 'bg-slate-500/15 text-slate-600 dark:text-slate-300 border-slate-400/25'
+                  return (
+                    <tr key={it.id} className="transition-colors duration-100" style={{ borderTop: '1px solid var(--border)' }}
+                      onMouseEnter={e => (e.currentTarget.style.background = 'var(--s1)')}
+                      onMouseLeave={e => (e.currentTarget.style.background = 'transparent')}
+                    >
+                      <td className="px-4 py-2"><div className="w-14 h-10 ia-checker rounded overflow-hidden cursor-zoom-in" onClick={() => setLightboxItem(it)}><img src={it.src} className="w-full h-full object-contain" /></div></td>
+                      <td className="px-4 py-2 max-w-[220px]"><p className="truncate text-xs font-medium" style={{ color: 'var(--text)' }} title={it.name}>{it.name}</p><p className="text-[10px]" style={{ color: 'var(--t3)' }}>{it.origin}</p></td>
+                      <td className="px-4 py-2 font-mono text-xs" style={{ color: 'var(--accent)' }}>{it.width} × {it.height}</td>
+                      <td className="px-4 py-2">{tierBadge(c)}<span className="block text-[10px] mt-0.5" style={{ color: 'var(--t3)' }}>{c.standard ? c.name : '最接近 ' + c.near}</span></td>
+                      <td className="px-4 py-2 font-mono text-xs" style={{ color: it.size == null ? 'var(--t3)' : 'var(--ok)' }}>{it.size == null ? '未知' : imgFormatBytes(it.size)}</td>
+                      <td className="px-4 py-2"><span className={`px-2 py-0.5 rounded text-[10px] font-semibold border ${fmtCls}`}>{it.format || '未知'}</span></td>
+                      <td className="px-4 py-2 text-xs" style={{ color: 'var(--t2)' }}>{imgAspectRatio(it.width, it.height)}</td>
+                      <td className="px-4 py-2 text-xs" style={{ color: 'var(--t2)' }}>{((it.width * it.height) / 1e6).toFixed(2)} MP</td>
+                      <td className="px-4 py-2 text-right whitespace-nowrap">
+                        <button onClick={() => copyInfo(it)} className="text-[11px] transition-colors duration-100" style={{ color: 'var(--t2)' }} onMouseEnter={e => (e.currentTarget.style.color = 'var(--accent)')} onMouseLeave={e => (e.currentTarget.style.color = 'var(--t2)')}>复制</button>
+                        <button onClick={() => removeItem(it.id)} className="ml-2 text-[11px] transition-colors duration-100" style={{ color: 'var(--err)' }} onMouseEnter={e => (e.currentTarget.style.color = 'var(--err)')} onMouseLeave={e => (e.currentTarget.style.color = 'var(--t2)')}>删除</button>
+                      </td>
+                    </tr>
+                  )
+                })}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      )}
+
+      {/* Standards Reference */}
+      <section className="rounded-2xl p-5" style={{ background: 'var(--bg)', border: '1px solid var(--border)', boxShadow: 'var(--shadow)' }}>
+        <details>
+          <summary className="cursor-pointer text-sm font-semibold flex items-center gap-2 select-none" style={{ color: 'var(--text)' }}>
+            <svg viewBox="0 0 24 24" className="w-4 h-4" fill="none" stroke="currentColor" strokeWidth="2" style={{ color: 'var(--t3)' }}><circle cx="12" cy="12" r="9" /><path d="M12 8h.01M11 12h1v4h1" /></svg>
+            分辨率标准规格参照表（判定规则说明）
+          </summary>
+          <div className="mt-4 text-xs space-y-3" style={{ color: 'var(--t2)' }}>
+            <p>判定逻辑：取图片的<strong style={{ color: 'var(--text)' }}>长边与短边</strong>与标准规格比对（自动兼容横屏 / 竖屏）。完全一致时判定为对应标准等级；开启"宽松匹配"后允许 ±2% 误差；均不匹配时显示<span style={{ color: 'var(--warn)', fontWeight: 600 }}>非标准分辨率</span>，并给出最接近的等级参考（按长边区间归类）。</p>
+            <div className="grid sm:grid-cols-2 lg:grid-cols-4 gap-2">
+              {IMG_STANDARDS.map(s => (
+                <div key={s.name} className="flex items-center justify-between gap-2 rounded-lg px-2.5 py-1.5" style={{ background: 'var(--s1)', border: '1px solid var(--border)' }}>
+                  <span className="text-[11px] truncate" style={{ color: 'var(--t2)' }}>{s.name}</span>
+                  <span className="font-mono text-[11px] whitespace-nowrap" style={{ color: 'var(--t3)' }}>{s.w}×{s.h}</span>
+                  <span className={`px-1.5 py-0.5 rounded text-[9px] font-bold bg-gradient-to-r ${IMG_TIER_STYLE[s.tier]} text-white`}>{s.tier}</span>
+                </div>
+              ))}
+            </div>
+          </div>
+        </details>
+      </section>
+
+      <footer className="text-center text-[11px] py-6" style={{ color: 'var(--t3)' }}>
+        纯前端实现 · 所有图片均在本地浏览器解析，不会上传到任何服务器 · FileReader API + Image 动态加载
+      </footer>
+
+      {/* Lightbox */}
+      {lightboxItem && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 ia-lightbox-enter"
+          style={{ background: 'color-mix(in srgb, var(--bg) 85%, transparent)', backdropFilter: 'blur(8px)' }}
+          onClick={e => { if (e.target === e.currentTarget) setLightboxItem(null) }}
+        >
+          <div className="max-w-6xl w-full max-h-full flex flex-col gap-3">
+            <div className="flex items-start gap-3">
+              <div className="flex-1 min-w-0">
+                <p className="font-semibold truncate" style={{ color: 'var(--text)' }}>{lightboxItem.name}</p>
+                <p className="text-xs mt-0.5" style={{ color: 'var(--t2)' }}>
+                  {lightboxItem.width} × {lightboxItem.height} px · {lightboxItem.size == null ? '体积未知' : imgFormatBytes(lightboxItem.size)} · {lightboxItem.format} · {(() => { const c = imgClassifyResolution(lightboxItem.width, lightboxItem.height, loose); return c.standard ? c.tier + '（' + c.name + '）' : '非标准分辨率' })()} · {imgAspectRatio(lightboxItem.width, lightboxItem.height)}
+                </p>
+              </div>
+              <Btn small variant="soft" onClick={() => setLightboxItem(null)}>关闭 ✕</Btn>
+            </div>
+            <div className="ia-checker rounded-xl overflow-hidden flex-1 grid place-items-center min-h-0" style={{ border: '1px solid var(--border)' }}>
+              <img src={lightboxItem.src} className="max-w-full max-h-[72vh] object-contain" alt="" />
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Toasts */}
+      <div className="fixed top-20 right-4 z-[60] space-y-2 pointer-events-none">
+        {toasts.map(t => (
+          <div key={t.id} className={`ia-toast-in pointer-events-auto px-4 py-2.5 rounded-xl text-sm font-medium shadow-2xl max-w-xs ${t.msg === '' ? 'opacity-0 translate-y-[-10px]' : ''}`}
+            style={{
+              background: t.type === 'ok' ? 'var(--ok)' : t.type === 'err' ? 'var(--err)' : 'var(--s2)',
+              color: t.type === 'ok' || t.type === 'err' ? '#fff' : 'var(--text)',
+              border: `1px solid ${t.type === 'ok' ? 'var(--ok)' : t.type === 'err' ? 'var(--err)' : 'var(--border)'}`,
+              transition: 'opacity 0.3s, transform 0.3s',
+            }}
+          >
+            {t.msg}
+          </div>
+        ))}
+      </div>
+    </div>
+  )
+}
+
+function UrlInput({ onSubmit }: { onSubmit: (text: string) => void }) {
+  const [value, setValue] = useState('')
+  const [focused, setFocused] = useState(false)
+  return (
+    <>
+      <textarea
+        value={value} onChange={e => setValue(e.target.value)} rows={4} spellCheck={false}
+        onFocus={() => setFocused(true)} onBlur={() => setFocused(false)}
+        placeholder="https://example.com/photo.jpg&#10;https://example.com/banner.png"
+        className="w-full flex-1 rounded-xl p-3 text-xs leading-relaxed resize-y outline-none transition-all duration-150"
+        style={{
+          background: 'var(--inputBg)', color: 'var(--text)',
+          border: `1px solid ${focused ? 'var(--accent)' : 'var(--inputBorder)'}`,
+          boxShadow: focused ? '0 0 0 3px var(--accentSub)' : 'none',
+          fontFamily: '"JetBrains Mono", monospace', minHeight: 80,
+        }}
+        onKeyDown={e => { if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) { onSubmit(value); setValue('') } }}
+      />
+      <div className="flex items-center gap-2 mt-3 flex-wrap">
+        <Btn variant="accent" onClick={() => { onSubmit(value); setValue('') }}>加载 URL 图片</Btn>
+        {[
+          { url: 'https://picsum.photos/id/1015/1920/1080', label: '示例 1080P' },
+          { url: 'https://picsum.photos/id/1043/3840/2160', label: '示例 4K' },
+          { url: 'https://picsum.photos/id/1025/1000/667', label: '示例 非标准' },
+        ].map(s => (
+          <Btn key={s.url} small variant="soft" onClick={() => onSubmit(s.url)}>{s.label}</Btn>
+        ))}
+        <span className="text-[10px]" style={{ color: 'var(--t3)' }}>跨域图片可能无法读取文件大小</span>
+      </div>
+    </>
+  )
+}
+
 function Sidebar({ tool, setTool, theme, setTheme }: {
   tool: ToolKey; setTool: (t: ToolKey) => void
   theme: ThemeKey; setTheme: (t: ThemeKey) => void
@@ -1722,8 +3155,7 @@ function Sidebar({ tool, setTool, theme, setTheme }: {
       {/* Logo */}
       <div className="px-5 pt-6 pb-5 flex-shrink-0">
         <div className="flex items-center gap-2.5">
-          <div className="w-8 h-8 rounded-xl flex items-center justify-center text-sm font-bold flex-shrink-0"
-            style={{ background: 'var(--primary)', color: 'var(--primaryFg)' }}>D</div>
+          <img src="/logo.svg" alt="SparkQ" className="w-8 h-8 rounded-xl flex-shrink-0" />
           <div>
             <div className="text-sm font-bold tracking-tight" style={{ color: 'var(--text)', letterSpacing: '-0.02em' }}>Dev Toolkit</div>
             <div className="text-xs" style={{ color: 'var(--t3)' }}>前端导航工具</div>
@@ -1813,6 +3245,7 @@ export default function App() {
     timestamp: <TimestampTool />,
     aiconvert: <AiConvertTool />,
     llmbatch: <LlmBatchTool />,
+    imganalyze: <ImageAnalyzerTool />,
   }
 
   return (
