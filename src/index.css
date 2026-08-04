@@ -83,6 +83,37 @@ input[type='number'] { -moz-appearance: textfield; appearance: textfield; }
   transition: background-color 0.25s ease, color 0.25s ease, border-color 0.25s ease, box-shadow 0.25s ease !important;
 }
 
+/* ─── Sidebar Nav Items ──────────────────────────────────────────── */
+
+.sb-nav-item {
+  transition: background 0.15s ease, box-shadow 0.15s ease, transform 0.15s ease;
+}
+.sb-nav-item:hover:not(.sb-nav-item-active) {
+  background: var(--s2) !important;
+  box-shadow: 0 1px 2px color-mix(in srgb, var(--text) 4%, transparent) !important;
+}
+.sb-nav-item-active {
+  background: var(--bg) !important;
+  box-shadow: var(--shadow) !important;
+}
+
+.sb-menu-item {
+  transition: background 0.15s ease;
+}
+.sb-menu-item:hover:not(.sb-menu-item-active) {
+  background: var(--s2) !important;
+}
+.sb-menu-item-active {
+  background: var(--accentSubHard) !important;
+}
+
+.sb-settings-btn {
+  transition: background 0.15s ease, color 0.15s ease, box-shadow 0.15s ease;
+}
+.sb-settings-btn:hover {
+  color: var(--text) !important;
+}
+
 /* Diff lines */
 .diff-add { background: var(--addBg) !important; }
 .diff-add .line-content { color: var(--addText) !important; }

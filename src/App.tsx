@@ -29,6 +29,7 @@ interface ThemeVars {
   rmBg: string; rmText: string
   jKey: string; jStr: string; jNum: string; jBool: string; jNull: string
   inputBg: string; inputBorder: string
+  bgGrad: string
 }
 
 // ─── Themes ───────────────────────────────────────────────────────────────────
@@ -37,13 +38,13 @@ const THEMES: Record<ThemeKey, { label: string; icon: string; dark: boolean; v: 
   light: {
     label: '浅色', icon: '◐', dark: false,
     v: {
-      // Nearly white — matches the Zendeeps reference: pure surfaces, ghost borders
-      bg: '#ffffff', s1: '#f9fafb', s2: '#f3f4f6',
+      bg: '#ffffff', s1: '#f5f6f7', s2: '#eef0f2',
       border: 'rgba(0,0,0,0.07)', borderHard: 'rgba(0,0,0,0.16)',
       text: '#111827', t2: '#6b7280', t3: '#9ca3af',
       accent: '#2563eb', accentFg: '#fff', accentSub: 'rgba(37,99,235,0.07)', accentSubHard: 'rgba(37,99,235,0.12)',
       primary: '#111827', primaryFg: '#ffffff',
-      sidebar: '#f9fafb', code: '#f9fafb', shadow: '0 1px 3px rgba(0,0,0,0.05), 0 4px 12px -4px rgba(0,0,0,0.07)', shadowMd: '0 4px 16px rgba(0,0,0,0.08), 0 1px 3px rgba(0,0,0,0.05)',
+      sidebar: '#ffffff', code: '#f5f6f7',
+      shadow: '0 1px 3px rgba(0,0,0,0.05), 0 4px 12px -4px rgba(0,0,0,0.07)', shadowMd: '0 4px 16px rgba(0,0,0,0.08), 0 1px 3px rgba(0,0,0,0.05)',
       ok: '#16a34a', okBg: 'rgba(22,163,74,0.08)',
       err: '#dc2626', errBg: 'rgba(220,38,38,0.08)',
       warn: '#d97706', warnBg: 'rgba(217,119,6,0.08)',
@@ -51,36 +52,41 @@ const THEMES: Record<ThemeKey, { label: string; icon: string; dark: boolean; v: 
       rmBg: 'rgba(220,38,38,0.09)', rmText: '#b91c1c',
       jKey: '#7c3aed', jStr: '#15803d', jNum: '#1d4ed8', jBool: '#b45309', jNull: '#9ca3af',
       inputBg: '#ffffff', inputBorder: 'rgba(0,0,0,0.11)',
+      bgGrad: 'radial-gradient(1200px 700px at 80% -10%, rgba(37,99,235,0.03) 0%, transparent 60%), radial-gradient(900px 600px at -5% 110%, rgba(37,99,235,0.02) 0%, transparent 55%)',
     },
   },
   dark: {
+    // 深色科技 — 参照 Forge C：暖橙主色 + 靛蓝氛围光 + 毛玻璃表面
     label: '深色', icon: '●', dark: true,
     v: {
-      bg: '#111113', s1: '#1a1a1c', s2: '#252527',
-      border: 'rgba(255,255,255,0.07)', borderHard: 'rgba(255,255,255,0.15)',
-      text: '#f0f0f2', t2: '#8e8e93', t3: '#48484a',
-      accent: '#3b82f6', accentFg: '#fff', accentSub: 'rgba(59,130,246,0.13)', accentSubHard: 'rgba(59,130,246,0.2)',
-      primary: '#ebebed', primaryFg: '#111113',
-      sidebar: '#0d0d0f', code: '#0d0d0f', shadow: '0 1px 3px rgba(0,0,0,0.5), 0 8px 24px -8px rgba(0,0,0,0.6)', shadowMd: '0 4px 20px rgba(0,0,0,0.55)',
+      bg: '#090b12', s1: 'rgba(255,255,255,0.045)', s2: 'rgba(255,255,255,0.07)',
+      border: 'rgba(255,255,255,0.10)', borderHard: 'rgba(255,255,255,0.20)',
+      text: '#eceef5', t2: '#9aa3b4', t3: '#69728a',
+      accent: '#ff7a45', accentFg: '#1a0d05', accentSub: 'rgba(255,122,69,0.16)', accentSubHard: 'rgba(255,122,69,0.24)',
+      primary: '#ebebed', primaryFg: '#090b12',
+      sidebar: 'rgba(255,255,255,0.035)', code: '#12141d',
+      shadow: '0 1px 2px rgba(0,0,0,0.4)',
+      shadowMd: '0 4px 20px rgba(0,0,0,0.55)',
       ok: '#34d399', okBg: 'rgba(52,211,153,0.1)',
-      err: '#f87171', errBg: 'rgba(248,113,113,0.1)',
-      warn: '#fbbf24', warnBg: 'rgba(251,191,36,0.1)',
+      err: '#ff6b81', errBg: 'rgba(255,107,129,0.1)',
+      warn: '#ffc24b', warnBg: 'rgba(255,194,75,0.1)',
       addBg: 'rgba(52,211,153,0.13)', addText: '#34d399',
-      rmBg: 'rgba(248,113,113,0.13)', rmText: '#f87171',
+      rmBg: 'rgba(255,107,129,0.13)', rmText: '#ff6b81',
       jKey: '#c084fc', jStr: '#6ee7b7', jNum: '#7dd3fc', jBool: '#fcd34d', jNull: '#6b7280',
-      inputBg: '#1a1a1c', inputBorder: 'rgba(255,255,255,0.1)',
+      inputBg: '#12141d', inputBorder: 'rgba(255,255,255,0.10)',
+      bgGrad: 'radial-gradient(900px 560px at 12% -8%, rgba(255,122,69,.20) 0%, transparent 55%), radial-gradient(820px 560px at 96% 8%, rgba(124,108,255,.20) 0%, transparent 52%), radial-gradient(700px 700px at 70% 120%, rgba(124,108,255,.12) 0%, transparent 60%)',
     },
   },
   claude: {
     // Muted clay/terracotta — not yellow. Warm cream base with dusty sienna accent.
     label: '暖陶', icon: '✦', dark: false,
     v: {
-      bg: '#fdf8f4', s1: '#f5ede4', s2: '#ede0d4',
+      bg: '#f8f2ec', s1: '#efe6dd', s2: '#e6d9cd',
       border: 'rgba(120,70,40,0.1)', borderHard: 'rgba(120,70,40,0.22)',
       text: '#2c1f14', t2: '#7a5c44', t3: '#b09880',
       accent: '#b5603a', accentFg: '#fff', accentSub: 'rgba(181,96,58,0.09)', accentSubHard: 'rgba(181,96,58,0.16)',
-      primary: '#2c1f14', primaryFg: '#fdf8f4',
-      sidebar: '#f7efe6', code: '#f2e8dc', shadow: '0 1px 3px rgba(80,40,20,0.07), 0 4px 12px -4px rgba(80,40,20,0.12)', shadowMd: '0 4px 16px rgba(80,40,20,0.14)',
+      primary: '#2c1f14', primaryFg: '#f8f2ec',
+      sidebar: '#f8f2ec', code: '#f2e8dc', shadow: '0 1px 3px rgba(80,40,20,0.07), 0 4px 12px -4px rgba(80,40,20,0.12)', shadowMd: '0 4px 16px rgba(80,40,20,0.14)',
       ok: '#5a8740', okBg: 'rgba(90,135,64,0.09)',
       err: '#c44b38', errBg: 'rgba(196,75,56,0.09)',
       warn: '#b5603a', warnBg: 'rgba(181,96,58,0.09)',
@@ -88,18 +94,19 @@ const THEMES: Record<ThemeKey, { label: string; icon: string; dark: boolean; v: 
       rmBg: 'rgba(196,75,56,0.12)', rmText: '#963228',
       jKey: '#8b5cf6', jStr: '#3d7a28', jNum: '#2563eb', jBool: '#b5603a', jNull: '#b09880',
       inputBg: '#fdf8f4', inputBorder: 'rgba(120,70,40,0.15)',
+      bgGrad: 'radial-gradient(1200px 700px at 80% -10%, #f3e4dc 0%, transparent 60%), radial-gradient(900px 600px at -5% 110%, #f1e7e0 0%, transparent 55%)',
     },
   },
   green: {
     // Dusty sage — muted, not saturated. Matches swatch.
     label: '山野绿', icon: '◉', dark: false,
     v: {
-      bg: '#f8fbf8', s1: '#eef4ee', s2: '#e0ece0',
+      bg: '#f0f5f0', s1: '#e6eee6', s2: '#dae6da',
       border: 'rgba(30,70,40,0.09)', borderHard: 'rgba(30,70,40,0.2)',
       text: '#1a2e1f', t2: '#4a7055', t3: '#85a88e',
       accent: '#3d7a54', accentFg: '#fff', accentSub: 'rgba(61,122,84,0.09)', accentSubHard: 'rgba(61,122,84,0.16)',
-      primary: '#1a2e1f', primaryFg: '#f8fbf8',
-      sidebar: '#f0f7f0', code: '#eaf3ea', shadow: '0 1px 3px rgba(20,50,30,0.06), 0 4px 12px -4px rgba(20,50,30,0.1)', shadowMd: '0 4px 16px rgba(20,50,30,0.12)',
+      primary: '#1a2e1f', primaryFg: '#f0f5f0',
+      sidebar: '#f0f5f0', code: '#eaf3ea', shadow: '0 1px 3px rgba(20,50,30,0.06), 0 4px 12px -4px rgba(20,50,30,0.1)', shadowMd: '0 4px 16px rgba(20,50,30,0.12)',
       ok: '#3d7a54', okBg: 'rgba(61,122,84,0.09)',
       err: '#c44b38', errBg: 'rgba(196,75,56,0.09)',
       warn: '#a07030', warnBg: 'rgba(160,112,48,0.09)',
@@ -107,6 +114,7 @@ const THEMES: Record<ThemeKey, { label: string; icon: string; dark: boolean; v: 
       rmBg: 'rgba(196,75,56,0.13)', rmText: '#8f2e20',
       jKey: '#6d5aad', jStr: '#2e6e44', jNum: '#1d6a9e', jBool: '#8a6030', jNull: '#85a88e',
       inputBg: '#f0faf4', inputBorder: 'rgba(0,80,40,0.16)',
+      bgGrad: 'radial-gradient(1200px 700px at 80% -10%, #e3efe8 0%, transparent 60%), radial-gradient(900px 600px at -5% 110%, #e6eee9 0%, transparent 55%)',
     },
   },
 }
@@ -3038,7 +3046,7 @@ function ThemeMenu({ theme, setTheme }: { theme: ThemeKey; setTheme: (t: ThemeKe
   }, [open])
 
   const SWATCHES: Record<ThemeKey, string> = {
-    light: '#f3f4f6', dark: '#1a1a1c', claude: '#c4855a', green: '#4a8060',
+    light: '#2563eb', dark: '#ff7a45', claude: '#b5603a', green: '#3d7a54',
   }
 
   return (
@@ -3051,10 +3059,8 @@ function ThemeMenu({ theme, setTheme }: { theme: ThemeKey; setTheme: (t: ThemeKe
             const active = theme === t
             return (
               <button key={t} onClick={() => { setTheme(t); setOpen(false) }}
-                className="w-full flex items-center gap-3 px-2 py-2 rounded-xl text-sm font-medium cursor-pointer border-0 outline-none transition-all duration-150"
+                className={"w-full flex items-center gap-3 px-2 py-2 rounded-xl text-sm font-medium cursor-pointer border-0 outline-none " + (active ? "sb-menu-item-active" : "sb-menu-item")}
                 style={{ background: active ? 'var(--accentSubHard)' : 'transparent', color: active ? 'var(--accent)' : 'var(--text)', fontFamily: 'inherit' }}
-                onPointerEnter={e => { if (!active) (e.currentTarget as HTMLButtonElement).style.background = 'var(--s1)' }}
-                onPointerLeave={e => { if (!active) (e.currentTarget as HTMLButtonElement).style.background = 'transparent' }}
               >
                 <span className="w-5 h-5 rounded-full flex-shrink-0"
                   style={{ background: SWATCHES[t], border: `2px solid ${active ? 'var(--accent)' : 'var(--borderHard)'}` }} />
@@ -3066,10 +3072,8 @@ function ThemeMenu({ theme, setTheme }: { theme: ThemeKey; setTheme: (t: ThemeKe
         </div>
       )}
       <button onClick={() => setOpen(o => !o)} aria-label="切换主题"
-        className="w-9 h-9 rounded-xl flex items-center justify-center cursor-pointer border-0 outline-none transition-all duration-150 active:scale-95"
+        className={"w-9 h-9 rounded-xl flex items-center justify-center cursor-pointer border-0 outline-none transition-all duration-150 active:scale-95 " + (open ? "" : "sb-settings-btn")}
         style={{ background: open ? 'var(--accentSubHard)' : 'var(--s1)', color: open ? 'var(--accent)' : 'var(--t2)', border: '1px solid var(--border)' }}
-        onPointerEnter={e => { (e.currentTarget as HTMLButtonElement).style.color = 'var(--text)' }}
-        onPointerLeave={e => { (e.currentTarget as HTMLButtonElement).style.color = open ? 'var(--accent)' : 'var(--t2)' }}
       >
         <IconSettings />
       </button>
@@ -3623,10 +3627,8 @@ function Sidebar({ tool, setTool, theme, setTheme }: {
             const active = tool === t.key
             return (
               <button key={t.key} onClick={() => setTool(t.key)}
-                className="w-full text-left px-3 py-2.5 rounded-xl cursor-pointer border-0 outline-none transition-all duration-150 active:scale-[0.98]"
-                style={{ background: active ? 'var(--bg)' : 'transparent', boxShadow: active ? 'var(--shadow)' : 'none', fontFamily: 'inherit' }}
-                onPointerEnter={e => { if (!active) (e.currentTarget as HTMLButtonElement).style.background = 'var(--s1)' }}
-                onPointerLeave={e => { if (!active) (e.currentTarget as HTMLButtonElement).style.background = 'transparent' }}
+                className={"w-full text-left px-3 py-2.5 rounded-xl cursor-pointer border-0 outline-none active:scale-[0.98] " + (active ? "sb-nav-item-active" : "sb-nav-item")}
+                style={{ fontFamily: 'inherit' }}
               >
                 <div className="flex items-center gap-3">
                   <span className="w-7 h-7 rounded-lg flex items-center justify-center flex-shrink-0 transition-all duration-150"
@@ -5141,7 +5143,7 @@ export default function App() {
   return (
     <div className={themeX ? 'theme-x' : undefined} style={{
       display: 'flex', height: '100vh', overflow: 'hidden', background: 'var(--bg)', ...cssVars,
-      backgroundImage: 'linear-gradient(180deg, color-mix(in srgb, var(--accent) 4%, transparent) 0%, transparent 220px)',
+      backgroundImage: 'var(--bgGrad)',
     }}>
       <Sidebar tool={tool} setTool={switchTool} theme={theme} setTheme={changeTheme} />
       <main className="flex-1 overflow-hidden flex flex-col" style={{ paddingLeft: 'var(--sidebar-w)' }}>
