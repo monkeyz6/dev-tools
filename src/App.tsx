@@ -111,16 +111,16 @@ const THEMES: Record<ThemeKey, { label: string; icon: string; dark: boolean; v: 
   },
 }
 
-const TOOLS: { key: ToolKey; label: string; sub: string; icon: React.ReactNode }[] = [
-  { key: 'seedance', label: 'Seedance 计费', sub: '字节跳动 AI 视频', icon: <IconSeedance /> },
-  { key: 'json', label: 'JSON 可视化', sub: '格式化 · 对比 · 折叠', icon: <IconJson /> },
-  { key: 'timestamp', label: '时间戳转换', sub: 'ms · s · 双向互转', icon: <IconClock /> },
-  { key: 'aiconvert', label: 'AI 格式转换', sub: 'OpenAI · Anthropic', icon: <IconConvert /> },
-  { key: 'llmbatch', label: 'LLM 批量测试', sub: '并发请求 · 验真', icon: <IconBatch /> },
-  { key: 'imganalyze', label: '图片信息识别', sub: '分辨率 · 格式 · 等级', icon: <IconImage /> },
-  { key: 'idgen', label: 'ID 生成器', sub: 'UUID · 随机串 · 批量', icon: <IconId /> },
-  { key: 'base64', label: 'Base64 编解码', sub: 'UTF-8 · URL-safe', icon: <IconCode /> },
-  { key: 'unicode', label: 'Unicode 转换', sub: '\\u · &#x · U+', icon: <IconType /> },
+const TOOLS: { key: ToolKey; label: string; icon: React.ReactNode }[] = [
+  { key: 'seedance', label: 'Seedance 计费', icon: <IconSeedance /> },
+  { key: 'json', label: 'JSON 可视化', icon: <IconJson /> },
+  { key: 'timestamp', label: '时间戳转换', icon: <IconClock /> },
+  { key: 'aiconvert', label: 'AI 格式转换', icon: <IconConvert /> },
+  { key: 'llmbatch', label: 'LLM 批量测试', icon: <IconBatch /> },
+  { key: 'imganalyze', label: '图片信息识别', icon: <IconImage /> },
+  { key: 'idgen', label: 'ID 生成器', icon: <IconId /> },
+  { key: 'base64', label: 'Base64 编解码', icon: <IconCode /> },
+  { key: 'unicode', label: 'Unicode 转换', icon: <IconType /> },
 ]
 
 // ─── Icon Components ──────────────────────────────────────────────────────────
@@ -223,11 +223,15 @@ function formatJson(raw: string): { ok: boolean; text: string } {
   }
 }
 
-function highlightJson(text: string): string {
-  const safe = text
+function highlightJson(text: string, matchCol?: number): string {
+  let safe = text
     .replace(/&/g, '&amp;')
     .replace(/</g, '&lt;')
     .replace(/>/g, '&gt;')
+  // 在匹配的括号字符周围插入高亮 span（括号字符不会被 highlightJson 正则匹配，安全）
+  if (matchCol != null && matchCol >= 0 && matchCol < safe.length && '{[]}'.includes(safe[matchCol])) {
+    safe = safe.slice(0, matchCol) + `<span class="json-bracket-match">${safe[matchCol]}</span>` + safe.slice(matchCol + 1)
+  }
   return safe.replace(
     /("(?:\\u[a-fA-F0-9]{4}|\\[^u]|[^\\"])*"(\s*:)?|true|false|null|-?\d+(?:\.\d*)?(?:[eE][+\-]?\d+)?)/g,
     (m) => {
@@ -272,6 +276,89 @@ function computeDiff(a: string[], b: string[]): DiffLine[] {
     else { row.rightNum = ++ri }
     return row
   })
+}
+
+/** 查找匹配的括号位置（返回绝对值字符索引，null 表示无匹配） */
+function findMatchingBracket(text: string, cursorPos: number): number | null {
+  if (cursorPos <= 0 || cursorPos > text.length) return null
+  const ch = text[cursorPos - 1]
+  if (!'{[]}'.includes(ch)) return null
+  const isOpen = ch === '{' || ch === '['
+  const open = ch === '{' || ch === '}' ? '{' : '['
+  const close = ch === '{' || ch === '}' ? '}' : ']'
+  let depth = 1
+  const step = isOpen ? 1 : -1
+  let i = cursorPos - 1 + step
+  while (i >= 0 && i < text.length) {
+    if (text[i] === '"') {
+      if (step === 1) {
+        i++
+        while (i < text.length) {
+          if (text[i] === '\\') i += 2
+          else if (text[i] === '"') break
+          else i++
+        }
+      } else {
+        i--
+        while (i >= 0) {
+          if (text[i] === '\\') i--
+          else if (text[i] === '"') break
+          else i--
+        }
+      }
+      i += step
+      continue
+    }
+    if (text[i] === open) depth++
+    else if (text[i] === close) {
+      depth--
+      if (depth === 0) return i
+    }
+    i += step
+  }
+  return null
+}
+
+/** 计算光标位置对应的 JSON 路径（如 root > name > first） */
+function getJsonPath(text: string, line: number, col: number): string | null {
+  if (!text.trim()) return null
+  const lines = text.split('\n')
+  let charIdx = 0
+  for (let i = 0; i < Math.min(line, lines.length); i++) charIdx += lines[i].length + 1
+  charIdx += Math.min(col, lines[line]?.length || 0)
+
+  const segments: string[] = ['root']
+  let inStr = false, currentKey = '', arrIdx = 0, escape = false
+
+  for (let i = 0; i < text.length && i < charIdx; i++) {
+    const ch = text[i]
+    if (escape) { escape = false; continue }
+    if (inStr) {
+      if (ch === '\\') { escape = true; continue }
+      if (ch === '"') {
+        inStr = false
+        const after = text.slice(i + 1).match(/\S/)
+        if (after && text[i + 1 + after.index!] === ':' && segments.length > 0) {
+          segments[segments.length - 1] = currentKey
+        }
+        currentKey = ''
+      } else { currentKey += ch }
+      continue
+    }
+    if (ch === '"') { inStr = true; currentKey = ''; continue }
+    if (ch === '{') { segments.push('?'); continue }
+    if (ch === '}') { if (segments.length > 1) segments.pop(); continue }
+    if (ch === '[') { arrIdx = 0; segments.push('[0]'); continue }
+    if (ch === ']') { if (segments.length > 1) segments.pop(); continue }
+    if (ch === ',') {
+      const last = segments[segments.length - 1]
+      if (last && /^\[\d+\]$/.test(last)) {
+        arrIdx++
+        segments[segments.length - 1] = `[${arrIdx}]`
+      }
+    }
+  }
+  return segments.join(' > ')
 }
 
 // ─── Image Analyzer Utilities ────────────────────────────────────────────────────
@@ -657,7 +744,7 @@ function CustomInput({ value, onChange, placeholder, className = '', type = 'tex
           outline: 'none',
           fontSize: 14,
           color: 'var(--text)',
-          fontFamily: mono ? '"JetBrains Mono", monospace' : 'inherit',
+          fontFamily: mono ? '"SF Mono", "Fira Code", "Fira Mono", "Roboto Mono", "Droid Sans Mono", "Cascadia Code", Consolas, "Courier New", monospace' : 'inherit',
           WebkitAppearance: 'none',
           MozAppearance: 'none',
         }}
@@ -799,7 +886,7 @@ function CustomTextarea({ value, onChange, placeholder, rows, className = '', mo
           outline: 'none',
           fontSize: 13,
           color: 'var(--text)',
-          fontFamily: mono ? '"JetBrains Mono", monospace' : 'inherit',
+          fontFamily: mono ? '"SF Mono", "Fira Code", "Fira Mono", "Roboto Mono", "Droid Sans Mono", "Cascadia Code", Consolas, "Courier New", monospace' : 'inherit',
           lineHeight: 1.65,
           display: 'block',
         }}
@@ -906,7 +993,7 @@ function MiniNumInput({ value, placeholder, onChange }: {
         border: `1px solid ${focused ? 'var(--accent)' : 'var(--inputBorder)'}`,
         boxShadow: focused ? '0 0 0 3px var(--accentSub)' : 'none',
         color: 'var(--text)',
-        fontFamily: '"JetBrains Mono", monospace',
+        fontFamily: '"SF Mono", "Fira Code", "Fira Mono", "Roboto Mono", "Droid Sans Mono", "Cascadia Code", Consolas, "Courier New", monospace',
         WebkitAppearance: 'none', MozAppearance: 'none',
       }}
     />
@@ -1156,7 +1243,7 @@ const JSON_GUTTER_W = JSON_LINE_NO_W + JSON_FOLD_W // 行号(24) + 折叠箭头�
 const JSON_CONTENT_X = JSON_PAD_L + JSON_GUTTER_W // 48px：两态内容真正起始的 x 坐标，必须完全一致，否则悬停切换会横向跳动
 
 const JSON_EDITOR_STYLE: React.CSSProperties = {
-  fontFamily: '"JetBrains Mono", monospace',
+  fontFamily: '"SF Mono", "Fira Code", "Fira Mono", "Roboto Mono", "Droid Sans Mono", "Cascadia Code", Consolas, "Courier New", monospace',
   fontSize: '12.5px',
   lineHeight: JSON_ROW + 'px',
   padding: `${JSON_PAD_TB}px 16px ${JSON_PAD_TB}px ${JSON_CONTENT_X}px`,
@@ -1244,7 +1331,7 @@ function JsonTreeView({ text, types, collapsed, toggleFold, scrollRef, onContent
     <div className="relative flex-1 min-h-0 overflow-hidden">
       <div ref={containerRef} onScroll={onScroll}
         className="absolute inset-0 overflow-auto"
-        style={{ fontFamily: '"JetBrains Mono", monospace', fontSize: '12.5px', lineHeight: JSON_ROW + 'px', padding: `${JSON_PAD_TB}px 16px ${JSON_PAD_TB}px ${JSON_PAD_L}px`, tabSize: 2 }}>
+        style={{ fontFamily: '"SF Mono", "Fira Code", "Fira Mono", "Roboto Mono", "Droid Sans Mono", "Cascadia Code", Consolas, "Courier New", monospace', fontSize: '12.5px', lineHeight: JSON_ROW + 'px', padding: `${JSON_PAD_TB}px 16px ${JSON_PAD_TB}px ${JSON_PAD_L}px`, tabSize: 2 }}>
         <div style={{ height: visible.length * JSON_ROW, position: 'relative' }}>
           {slice.map((i, k) => {
             const vi = start + k // 可见序位（用于绝对定位），i 才是真实行号（用于取值/折叠区间）
@@ -1275,17 +1362,20 @@ function JsonTreeView({ text, types, collapsed, toggleFold, scrollRef, onContent
   )
 }
 
-function DiffEditor({ value, onChange, placeholder, lineTypes, scrollRef, onFocus, onBlur, autoFocus, onGutterEnter }: {
+function DiffEditor({ value, onChange, placeholder, lineTypes, scrollRef, onFocus, onBlur, autoFocus, onGutterEnter, onCursorChange }: {
   value: string; onChange: (v: string) => void
   placeholder?: string; lineTypes?: ('same' | 'add' | 'rm')[]
   scrollRef: React.MutableRefObject<{ top: number; left: number }>
   onFocus?: () => void; onBlur?: () => void; autoFocus?: boolean
   onGutterEnter: () => void
+  onCursorChange?: (line: number, col: number) => void
 }) {
   const taRef = useRef<HTMLTextAreaElement>(null)
   const backRef = useRef<HTMLPreElement>(null)
   const gutterRef = useRef<HTMLDivElement>(null)
   const lines = value.length ? value.split('\n') : ['']
+  const [matchPos, setMatchPos] = useState<{ line: number; col: number } | null>(null)
+  const prevValueRef = useRef(value)
 
   const sync = () => {
     const ta = taRef.current, back = backRef.current, gutter = gutterRef.current
@@ -1293,6 +1383,103 @@ function DiffEditor({ value, onChange, placeholder, lineTypes, scrollRef, onFocu
     if (back) { back.scrollTop = ta.scrollTop; back.scrollLeft = ta.scrollLeft }
     if (gutter) gutter.style.transform = `translateY(${-ta.scrollTop}px)`
     scrollRef.current = { top: ta.scrollTop, left: ta.scrollLeft }
+  }
+
+  /** 更新光标位置和括号匹配 */
+  const updateCursor = () => {
+    const ta = taRef.current
+    if (!ta) return
+    const pos = ta.selectionStart
+    const text = ta.value
+    // 计算行列
+    const before = text.slice(0, pos)
+    const line = before.split('\n').length - 1
+    const lastNL = before.lastIndexOf('\n')
+    const col = lastNL === -1 ? pos : pos - lastNL - 1
+    onCursorChange?.(line, col)
+    // 括号匹配高亮
+    const matchIdx = findMatchingBracket(text, pos)
+    if (matchIdx != null) {
+      const beforeM = text.slice(0, matchIdx)
+      const mLines = beforeM.split('\n')
+      setMatchPos({ line: mLines.length - 1, col: mLines[mLines.length - 1].length })
+    } else {
+      setMatchPos(null)
+    }
+  }
+
+  /** 键盘事件：自动补全括号/引号，智能删除空配对 */
+  const handleKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
+    const ta = taRef.current
+    if (!ta) return
+    const { selectionStart, selectionEnd } = ta
+    const val = value
+
+    if (e.key === '{') {
+      e.preventDefault()
+      const newVal = val.slice(0, selectionStart) + '{}' + val.slice(selectionEnd)
+      onChange(newVal)
+      requestAnimationFrame(() => {
+        ta.selectionStart = ta.selectionEnd = selectionStart + 1
+        updateCursor()
+      })
+      return
+    }
+    if (e.key === '[') {
+      e.preventDefault()
+      const newVal = val.slice(0, selectionStart) + '[]' + val.slice(selectionEnd)
+      onChange(newVal)
+      requestAnimationFrame(() => {
+        ta.selectionStart = ta.selectionEnd = selectionStart + 1
+        updateCursor()
+      })
+      return
+    }
+    if (e.key === '"') {
+      // 选中文本时用引号包裹
+      if (selectionStart !== selectionEnd) {
+        e.preventDefault()
+        const newVal = val.slice(0, selectionStart) + '"' + val.slice(selectionStart, selectionEnd) + '"' + val.slice(selectionEnd)
+        onChange(newVal)
+        requestAnimationFrame(() => {
+          ta.selectionStart = selectionStart + 1
+          ta.selectionEnd = selectionEnd + 1
+          updateCursor()
+        })
+        return
+      }
+      // 不在字符串内部才自动补全
+      const before = val.slice(0, selectionStart)
+      const after = val.slice(selectionStart)
+      // 简单判断：如果前面有未闭合的引号，则不自动补全
+      const quotesBefore = before.split('').filter(c => c === '"').length
+      const quotesAfter = after.split('').filter(c => c === '"').length
+      if (quotesBefore % 2 === 0 && quotesAfter % 2 === 0) {
+        e.preventDefault()
+        const newVal = val.slice(0, selectionStart) + '""' + val.slice(selectionEnd)
+        onChange(newVal)
+        requestAnimationFrame(() => {
+          ta.selectionStart = ta.selectionEnd = selectionStart + 1
+          updateCursor()
+        })
+        return
+      }
+    }
+    // Backspace：在空配对 {} [] "" 中时删除整个配对
+    if (e.key === 'Backspace' && selectionStart === selectionEnd && selectionStart > 0) {
+      const prev = val[selectionStart - 1]
+      const next = val[selectionStart]
+      if ((prev === '{' && next === '}') || (prev === '[' && next === ']') || (prev === '"' && next === '"')) {
+        e.preventDefault()
+        const newVal = val.slice(0, selectionStart - 1) + val.slice(selectionStart + 1)
+        onChange(newVal)
+        requestAnimationFrame(() => {
+          ta.selectionStart = ta.selectionEnd = selectionStart - 1
+          updateCursor()
+        })
+        return
+      }
+    }
   }
 
   // 挂载时把查看态留下的滚动位置带回来，避免悬停切换时视口跳变
@@ -1305,6 +1492,9 @@ function DiffEditor({ value, onChange, placeholder, lineTypes, scrollRef, onFocu
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
 
+  // 跟踪 value 变化，用于检测自动补全后的光标保持
+  useEffect(() => { prevValueRef.current = value }, [value])
+
   return (
     <div className="relative flex-1 min-h-0 overflow-hidden">
       <pre ref={backRef} aria-hidden
@@ -1315,15 +1505,18 @@ function DiffEditor({ value, onChange, placeholder, lineTypes, scrollRef, onFocu
         ) : lines.map((ln, i) => {
           const t = lineTypes?.[i]
           const bg = t === 'add' ? 'var(--addBg)' : t === 'rm' ? 'var(--rmBg)' : 'transparent'
+          const mL = matchPos && matchPos.line === i ? matchPos.col : undefined
           return (
             <div key={i} style={{ background: bg, position: 'relative' }}>
-              <span dangerouslySetInnerHTML={{ __html: highlightJson(ln) || '​' }} />
+              <span dangerouslySetInnerHTML={{ __html: highlightJson(ln, mL) || '​' }} />
             </div>
           )
         })}
       </pre>
       <textarea
-        ref={taRef} value={value} onChange={e => onChange(e.target.value)} onScroll={sync}
+        ref={taRef} value={value} onChange={e => { onChange(e.target.value); prevValueRef.current = e.target.value }}
+        onKeyDown={handleKeyDown}
+        onScroll={sync} onClick={updateCursor} onKeyUp={updateCursor}
         spellCheck={false} wrap="off" autoFocus={autoFocus}
         onFocus={onFocus} onBlur={onBlur}
         data-testid="json-content"
@@ -1356,10 +1549,11 @@ function DiffEditor({ value, onChange, placeholder, lineTypes, scrollRef, onFocu
  * 单侧面板：鼠标进入内容区即编辑（不改写内容、不抢焦点），行号列悬停/移出面板/失焦则回到查看态。
  * 折叠状态与滚动位置提升到本组件持有，避免查看态/编辑态互相切换时被重置。
  */
-function JsonPane({ value, onChange, fmt, types, placeholder, style, paneId }: {
+function JsonPane({ value, onChange, fmt, types, placeholder, style, paneId, onCursorChange }: {
   value: string; onChange: (v: string) => void; fmt: { ok: boolean; text: string }
   types?: ('same' | 'add' | 'rm')[]; placeholder: string; style?: React.CSSProperties
   paneId: 'a' | 'b'
+  onCursorChange?: (line: number, col: number) => void
 }) {
   const [focus, setFocus] = useState(false)
   const [contentHover, setContentHover] = useState(false)
@@ -1400,7 +1594,7 @@ function JsonPane({ value, onChange, fmt, types, placeholder, style, paneId }: {
             if (isTouchRef.current) { setContentHover(false); isTouchRef.current = false }
           }}
           onGutterEnter={() => setContentHover(false)}
-          autoFocus={wantFocus} />
+          autoFocus={wantFocus} onCursorChange={onCursorChange} />
       )}
     </div>
   )
@@ -1413,6 +1607,8 @@ function JsonTool() {
   const [leftW, setLeftW] = useState(50)
   const containerRef = useRef<HTMLDivElement>(null)
   const dragRef = useRef<{ startX: number; startW: number } | null>(null)
+  const [cursorPath, setCursorPath] = useState<string | null>(null)
+  const [cursorPane, setCursorPane] = useState<'a' | 'b'>('a')
 
   const leftFmt = useMemo(() => formatJson(left), [left])
   const rightFmt = useMemo(() => formatJson(right), [right])
@@ -1431,6 +1627,17 @@ function JsonTool() {
   const formatBoth = () => {
     if (leftFmt.ok) setLeft(leftFmt.text)
     if (rightFmt.ok) setRight(rightFmt.text)
+  }
+
+  const handleCursorChange = (pane: 'a' | 'b') => (line: number, col: number) => {
+    setCursorPane(pane)
+    const text = pane === 'a' ? left : right
+    const fmt = pane === 'a' ? leftFmt : rightFmt
+    if (fmt.ok && text.trim()) {
+      setCursorPath(getJsonPath(text, line, col))
+    } else {
+      setCursorPath(null)
+    }
   }
 
   // 中间分隔条拖拽调宽
@@ -1458,6 +1665,13 @@ function JsonTool() {
     <div className="flex flex-col h-full">
       <div className="glass flex items-center gap-2 px-6 py-3.5 flex-shrink-0" style={{ borderBottom: '1px solid var(--border)' }}>
         <SectionTitle>JSON 可视化 & Diff</SectionTitle>
+        {cursorPath && (
+          <span className="text-xs font-mono truncate max-w-[300px]" style={{ color: 'var(--t2)' }} title={cursorPath}>
+            <span className="opacity-50 mr-1">📎</span>
+            {cursorPane === 'b' && <span className="opacity-50">右: </span>}
+            {cursorPath}
+          </span>
+        )}
         {left.trim() && (
           <Badge color={leftFmt.ok ? 'ok' : 'err'}>{leftFmt.ok ? '左 ✓' : '左 格式错误'}</Badge>
         )}
@@ -1480,7 +1694,8 @@ function JsonTool() {
       <div className="flex-1 flex overflow-hidden" ref={containerRef} style={{ background: 'var(--code)' }}>
         <div style={{ flex: `0 0 ${leftW}%`, minWidth: 0 }} className="flex flex-col overflow-hidden">
           <JsonPane paneId="a" value={left} onChange={setLeft} fmt={leftFmt} types={leftTypes}
-            placeholder={'{\n  "name": "Alice",\n  "age": 30\n}'} />
+            placeholder={'{\n  "name": "Alice",\n  "age": 30\n}'}
+            onCursorChange={handleCursorChange('a')} />
         </div>
         <div onPointerDown={onDividerDown} className="flex-shrink-0"
           style={{ width: 10, cursor: 'col-resize', touchAction: 'none', display: 'flex', justifyContent: 'center' }}>
@@ -1488,7 +1703,8 @@ function JsonTool() {
         </div>
         <div className="flex-1 min-w-0 flex flex-col overflow-hidden">
           <JsonPane paneId="b" value={right} onChange={setRight} fmt={rightFmt} types={rightTypes}
-            placeholder={'{\n  "name": "Bob",\n  "age": 25\n}'} />
+            placeholder={'{\n  "name": "Bob",\n  "age": 25\n}'}
+            onCursorChange={handleCursorChange('b')} />
         </div>
       </div>
     </div>
@@ -1547,9 +1763,9 @@ function TimestampTool() {
       {/* Current timestamp pill */}
       <div className="flex items-center gap-3 px-4 py-3 rounded-xl mb-6 text-sm" style={{ background: 'var(--s1)', border: '1px solid var(--border)' }}>
         <span style={{ color: 'var(--t2)' }}>当前时间戳</span>
-        <code style={{ fontFamily: '"JetBrains Mono", monospace', color: 'var(--text)', fontWeight: 600 }}>{now}</code>
+        <code style={{ fontFamily: '"SF Mono", "Fira Code", "Fira Mono", "Roboto Mono", "Droid Sans Mono", "Cascadia Code", Consolas, "Courier New", monospace', color: 'var(--text)', fontWeight: 600 }}>{now}</code>
         <span style={{ color: 'var(--t3)' }}>ms</span>
-        <code style={{ fontFamily: '"JetBrains Mono", monospace', color: 'var(--text)', fontWeight: 600, marginLeft: 4 }}>{nowTs}</code>
+        <code style={{ fontFamily: '"SF Mono", "Fira Code", "Fira Mono", "Roboto Mono", "Droid Sans Mono", "Cascadia Code", Consolas, "Courier New", monospace', color: 'var(--text)', fontWeight: 600, marginLeft: 4 }}>{nowTs}</code>
         <span style={{ color: 'var(--t3)' }}>s</span>
         <Btn small onClick={() => setTsInput(String(now))} className="ml-auto">使用当前</Btn>
       </div>
@@ -1589,7 +1805,7 @@ function TimestampTool() {
                   ].map(([label, val]) => (
                     <div key={label} className="flex items-center gap-3 px-3 py-2 rounded-xl" style={{ background: 'var(--s1)', border: '1px solid var(--border)' }}>
                       <span className="text-xs w-24 flex-shrink-0" style={{ color: 'var(--t2)' }}>{label}</span>
-                      <code className="flex-1 text-sm" style={{ fontFamily: '"JetBrains Mono", monospace', color: 'var(--text)' }}>{val}</code>
+                      <code className="flex-1 text-sm" style={{ fontFamily: '"SF Mono", "Fira Code", "Fira Mono", "Roboto Mono", "Droid Sans Mono", "Cascadia Code", Consolas, "Courier New", monospace', color: 'var(--text)' }}>{val}</code>
                       <CopyBtn text={val ?? ''} />
                     </div>
                   ))}
@@ -1618,7 +1834,7 @@ function TimestampTool() {
                   ].map(([label, val]) => (
                     <div key={label} className="flex items-center gap-3 px-3 py-2 rounded-xl" style={{ background: 'var(--s1)', border: '1px solid var(--border)' }}>
                       <span className="text-xs w-36 flex-shrink-0" style={{ color: 'var(--t2)' }}>{label}</span>
-                      <code className="flex-1 text-sm font-semibold" style={{ fontFamily: '"JetBrains Mono", monospace', color: 'var(--text)' }}>{val}</code>
+                      <code className="flex-1 text-sm font-semibold" style={{ fontFamily: '"SF Mono", "Fira Code", "Fira Mono", "Roboto Mono", "Droid Sans Mono", "Cascadia Code", Consolas, "Courier New", monospace', color: 'var(--text)' }}>{val}</code>
                       <CopyBtn text={val ?? ''} />
                     </div>
                   ))}
@@ -1717,7 +1933,7 @@ function AiConvertTool() {
             </div>
           </div>
           <div className="flex-1 rounded-xl overflow-auto p-3 text-xs"
-            style={{ background: 'var(--code)', border: '1px solid var(--inputBorder)', fontFamily: '"JetBrains Mono", monospace', lineHeight: 1.7, whiteSpace: 'pre' }}>
+            style={{ background: 'var(--code)', border: '1px solid var(--inputBorder)', fontFamily: '"SF Mono", "Fira Code", "Fira Mono", "Roboto Mono", "Droid Sans Mono", "Cascadia Code", Consolas, "Courier New", monospace', lineHeight: 1.7, whiteSpace: 'pre' }}>
             <div dangerouslySetInnerHTML={{ __html: highlightJson(outputWithCache) }} />
           </div>
         </div>
@@ -2445,7 +2661,7 @@ function LlmBatchReportView({ report, apiKey }: { report: BatchReport; apiKey: s
                   <Label>请求体 JSON</Label>
                   {viewingBodyObj != null && <CopyBtn text={JSON.stringify(viewingBodyObj, null, 2)} />}
                 </div>
-                <pre className="rounded-xl p-3 text-xs overflow-auto" style={{ background: 'var(--code)', border: '1px solid var(--inputBorder)', fontFamily: '"JetBrains Mono", monospace', lineHeight: 1.7, maxHeight: '30vh' }}>
+                <pre className="rounded-xl p-3 text-xs overflow-auto" style={{ background: 'var(--code)', border: '1px solid var(--inputBorder)', fontFamily: '"SF Mono", "Fira Code", "Fira Mono", "Roboto Mono", "Droid Sans Mono", "Cascadia Code", Consolas, "Courier New", monospace', lineHeight: 1.7, maxHeight: '30vh' }}>
                   {viewingBodyObj != null ? JSON.stringify(viewingBodyObj, null, 2) : '（请求体解析失败）'}
                 </pre>
               </div>
@@ -2454,7 +2670,7 @@ function LlmBatchReportView({ report, apiKey }: { report: BatchReport; apiKey: s
                   <Label>cURL 命令</Label>
                   {viewingBodyObj != null && <CopyBtn text={buildCurlCommand(report, viewingBodyObj, apiKey)} />}
                 </div>
-                <pre className="rounded-xl p-3 text-xs overflow-auto whitespace-pre-wrap" style={{ background: 'var(--code)', border: '1px solid var(--inputBorder)', fontFamily: '"JetBrains Mono", monospace', lineHeight: 1.7, maxHeight: '30vh', wordBreak: 'break-all' }}>
+                <pre className="rounded-xl p-3 text-xs overflow-auto whitespace-pre-wrap" style={{ background: 'var(--code)', border: '1px solid var(--inputBorder)', fontFamily: '"SF Mono", "Fira Code", "Fira Mono", "Roboto Mono", "Droid Sans Mono", "Cascadia Code", Consolas, "Courier New", monospace', lineHeight: 1.7, maxHeight: '30vh', wordBreak: 'break-all' }}>
                   {viewingBodyObj != null ? buildCurlCommand(report, viewingBodyObj, apiKey) : '（请求体解析失败）'}
                 </pre>
                 <p className="text-xs mt-1.5" style={{ color: 'var(--warn)' }}>⚠ cURL 命令含明文 API Key，注意妥善保管，不要粘贴到公开场合</p>
@@ -3389,7 +3605,7 @@ function UrlInput({ onSubmit }: { onSubmit: (text: string) => void }) {
           background: 'var(--inputBg)', color: 'var(--text)',
           border: `1px solid ${focused ? 'var(--accent)' : 'var(--inputBorder)'}`,
           boxShadow: focused ? '0 0 0 3px var(--accentSub)' : 'none',
-          fontFamily: '"JetBrains Mono", monospace', minHeight: 80,
+          fontFamily: '"SF Mono", "Fira Code", "Fira Mono", "Roboto Mono", "Droid Sans Mono", "Cascadia Code", Consolas, "Courier New", monospace', minHeight: 80,
         }}
         onKeyDown={e => { if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) { onSubmit(value); setValue('') } }}
       />
@@ -3442,10 +3658,7 @@ function Sidebar({ tool, setTool, theme, setTheme }: {
                     style={{ background: active ? 'var(--accentSubHard)' : 'var(--s2)', color: active ? 'var(--accent)' : 'var(--t2)' }}>
                     {t.icon}
                   </span>
-                  <div className="min-w-0">
-                    <div className="text-sm font-semibold leading-tight truncate" style={{ color: 'var(--text)' }}>{t.label}</div>
-                    <div className="text-xs leading-snug truncate" style={{ color: 'var(--t3)' }}>{t.sub}</div>
-                  </div>
+                  <span className="text-sm font-semibold leading-tight truncate" style={{ color: 'var(--text)' }}>{t.label}</span>
                 </div>
               </button>
             )
@@ -3835,7 +4048,7 @@ function IdGenTool() {
             <div>
               <div className="flex items-center justify-between mb-1.5">
                 <Label>长度</Label>
-                <span className="text-sm font-semibold tabular-nums" style={{ color: 'var(--accent)', fontFamily: '"JetBrains Mono", monospace' }}>{opts.rand.len}</span>
+                <span className="text-sm font-semibold tabular-nums" style={{ color: 'var(--accent)', fontFamily: '"SF Mono", "Fira Code", "Fira Mono", "Roboto Mono", "Droid Sans Mono", "Cascadia Code", Consolas, "Courier New", monospace' }}>{opts.rand.len}</span>
               </div>
               <input
                 type="range" min={1} max={256} value={opts.rand.len}
@@ -3911,13 +4124,13 @@ function IdGenTool() {
         {first && (
           <div className="flex items-center gap-3 px-4 py-3 rounded-xl mb-3" style={{ background: 'var(--s1)', border: '1px solid var(--border)' }}>
             <Badge color="ok">首条</Badge>
-            <code className="flex-1 text-sm font-semibold" style={{ fontFamily: '"JetBrains Mono", monospace', color: 'var(--text)', overflowWrap: 'anywhere' }}>{first}</code>
+            <code className="flex-1 text-sm font-semibold" style={{ fontFamily: '"SF Mono", "Fira Code", "Fira Mono", "Roboto Mono", "Droid Sans Mono", "Cascadia Code", Consolas, "Courier New", monospace', color: 'var(--text)', overflowWrap: 'anywhere' }}>{first}</code>
             <CopyBtn text={first} />
           </div>
         )}
         <div
           className="idgen-result rounded-xl overflow-auto p-4 text-xs leading-relaxed"
-          style={{ background: 'var(--code)', border: '1px solid var(--inputBorder)', fontFamily: '"JetBrains Mono", monospace', color: 'var(--text)', whiteSpace: 'pre', maxHeight: 460 }}
+          style={{ background: 'var(--code)', border: '1px solid var(--inputBorder)', fontFamily: '"SF Mono", "Fira Code", "Fira Mono", "Roboto Mono", "Droid Sans Mono", "Cascadia Code", Consolas, "Courier New", monospace', color: 'var(--text)', whiteSpace: 'pre', maxHeight: 460 }}
         >
           {text}
         </div>

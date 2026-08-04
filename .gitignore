@@ -19,3 +19,6 @@ blob-report/
 .claude/
 .mimocode/
 .agents/
+
+# 部署脚本（含服务器地址，不提交）
+deploy-tool.sh

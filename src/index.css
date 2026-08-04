@@ -1,5 +1,3 @@
-@import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap');
-@import url('https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600&display=swap');
 @import 'tailwindcss';
 
 *, *::before, *::after { box-sizing: border-box; }
@@ -8,7 +6,7 @@ html, body, #root {
   height: 100%;
   margin: 0;
   padding: 0;
-  font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', 'Helvetica Neue', Helvetica, Arial, sans-serif;
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
 }
@@ -37,6 +35,7 @@ input[type='number'] { -moz-appearance: textfield; appearance: textfield; }
 .json-num   { color: var(--jNum); }
 .json-bool  { color: var(--jBool); }
 .json-null  { color: var(--jNull); }
+.json-bracket-match { background: color-mix(in srgb, var(--accent) 25%, transparent); border-radius: 2px; outline: 1px solid var(--accent); }
 
 /* Transition prefers */
 @media (prefers-reduced-motion: reduce) {
