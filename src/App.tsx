@@ -792,7 +792,7 @@ function CustomSelect({ value, onChange, options, className = '' }: {
         onFocus={() => setFocused(true)}
         onBlur={() => setFocused(false)}
         onKeyDown={handleKey}
-        className="w-full flex items-center justify-between rounded-xl transition-all duration-150 cursor-pointer border-0 outline-none active:scale-[0.99]"
+        className="w-full flex items-center justify-between overflow-hidden min-w-0 rounded-xl transition-all duration-150 cursor-pointer border-0 outline-none active:scale-[0.99]"
         style={{
           padding: '8px 12px',
           background: 'var(--inputBg)',
@@ -803,7 +803,7 @@ function CustomSelect({ value, onChange, options, className = '' }: {
           fontFamily: 'inherit',
         }}
       >
-        <span style={{ color: selected ? 'var(--text)' : 'var(--t3)' }}>{selected?.label ?? '选择…'}</span>
+        <span className="truncate" style={{ color: selected ? 'var(--text)' : 'var(--t3)' }} title={selected?.label ?? ''}>{selected?.label ?? '选择…'}</span>
         <span style={{ color: 'var(--t3)', marginLeft: 8, flexShrink: 0 }}>
           <IconChevron open={open} />
         </span>
@@ -838,7 +838,7 @@ function CustomSelect({ value, onChange, options, className = '' }: {
                 onPointerEnter={e => { if (!isActive) (e.currentTarget as HTMLButtonElement).style.background = 'var(--s1)' }}
                 onPointerLeave={e => { if (!isActive) (e.currentTarget as HTMLButtonElement).style.background = 'transparent' }}
               >
-                <span className="flex-1">{o.label}</span>
+                <span className="flex-1 truncate" title={o.label}>{o.label}</span>
                 {isActive && <span style={{ color: 'var(--accent)', flexShrink: 0 }}><IconCheck /></span>}
               </button>
             )
