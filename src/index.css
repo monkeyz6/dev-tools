@@ -140,3 +140,17 @@ textarea:focus-visible { outline: none; }
   transform: scale(0.97);
   transition: transform 100ms ease-out;
 }
+
+/* ─── GraphQL Syntax Highlight ──────────────────────────────────────────── */
+
+.gql-keyword   { color: var(--jKey); font-weight: 500; }
+.gql-type      { color: var(--jBool); }
+.gql-string    { color: var(--jStr); }
+.gql-number    { color: var(--jNum); }
+.gql-boolean   { color: var(--jKey); }
+.gql-null      { color: var(--jNull); }
+.gql-comment   { color: var(--t3); font-style: italic; }
+.gql-variable  { color: var(--err); }
+.gql-directive { color: var(--warn); }
+.gql-punc      { color: var(--t3); }
+.gql-argname   { color: var(--jNum); }

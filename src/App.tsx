@@ -5,7 +5,7 @@ import { BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContaine
 
 type ThemeKey = 'light' | 'dark' | 'claude' | 'green'
 type ToolKey = 'seedance' | 'json' | 'timestamp' | 'aiconvert' | 'llmbatch' | 'imganalyze'
-  | 'idgen' | 'base64' | 'unicode'
+  | 'idgen' | 'base64' | 'unicode' | 'graphql'
 
 interface ImageItem {
   id: string; order: number; source: 'local' | 'url'; name: string
@@ -121,6 +121,7 @@ const TOOLS: { key: ToolKey; label: string; icon: React.ReactNode }[] = [
   { key: 'idgen', label: 'ID 生成器', icon: <IconId /> },
   { key: 'base64', label: 'Base64 编解码', icon: <IconCode /> },
   { key: 'unicode', label: 'Unicode 转换', icon: <IconType /> },
+  { key: 'graphql', label: 'GraphQL 格式化', icon: <IconGraphql /> },
 ]
 
 // ─── Icon Components ──────────────────────────────────────────────────────────
@@ -186,6 +187,13 @@ function IconType() {
   return (
     <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round">
       <polyline points="4 7 4 4 20 4 20 7"/><line x1="9" y1="20" x2="15" y2="20"/><line x1="12" y1="4" x2="12" y2="20"/>
+    </svg>
+  )
+}
+function IconGraphql() {
+  return (
+    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round">
+      <path d="M4 8l8-5 8 5v8l-8 5-8-5z"/><path d="M4 8l8 5 8-5"/><path d="M12 3v18"/><path d="M4 16l8-5 8 5"/>
     </svg>
   )
 }
@@ -738,13 +746,13 @@ function CustomInput({ value, onChange, placeholder, className = '', type = 'tex
         placeholder={placeholder}
         style={{
           width: '100%',
-          padding: '8px 12px',
+          padding: '10px 12px',
           background: 'transparent',
           border: 'none',
           outline: 'none',
           fontSize: 14,
           color: 'var(--text)',
-          fontFamily: mono ? '"SF Mono", "Fira Code", "Fira Mono", "Roboto Mono", "Droid Sans Mono", "Cascadia Code", Consolas, "Courier New", monospace' : 'inherit',
+          fontFamily: mono ? '"JetBrainsMono Nerd Font", "SF Mono", "Fira Code", "Fira Mono", "Roboto Mono", "Droid Sans Mono", "Cascadia Code", Consolas, "Courier New", monospace' : 'inherit',
           WebkitAppearance: 'none',
           MozAppearance: 'none',
         }}
@@ -794,7 +802,7 @@ function CustomSelect({ value, onChange, options, className = '' }: {
         onKeyDown={handleKey}
         className="w-full flex items-center justify-between overflow-hidden min-w-0 rounded-xl transition-all duration-150 cursor-pointer border-0 outline-none active:scale-[0.99]"
         style={{
-          padding: '8px 12px',
+          padding: '10px 12px',
           background: 'var(--inputBg)',
           border: `1px solid ${open || focused ? 'var(--accent)' : 'var(--inputBorder)'}`,
           boxShadow: open || focused ? '0 0 0 3px var(--accentSub)' : '0 1px 2px rgba(0,0,0,0.03)',
@@ -886,7 +894,7 @@ function CustomTextarea({ value, onChange, placeholder, rows, className = '', mo
           outline: 'none',
           fontSize: 13,
           color: 'var(--text)',
-          fontFamily: mono ? '"SF Mono", "Fira Code", "Fira Mono", "Roboto Mono", "Droid Sans Mono", "Cascadia Code", Consolas, "Courier New", monospace' : 'inherit',
+          fontFamily: mono ? '"JetBrainsMono Nerd Font", "SF Mono", "Fira Code", "Fira Mono", "Roboto Mono", "Droid Sans Mono", "Cascadia Code", Consolas, "Courier New", monospace' : 'inherit',
           lineHeight: 1.65,
           display: 'block',
         }}
@@ -993,7 +1001,7 @@ function MiniNumInput({ value, placeholder, onChange }: {
         border: `1px solid ${focused ? 'var(--accent)' : 'var(--inputBorder)'}`,
         boxShadow: focused ? '0 0 0 3px var(--accentSub)' : 'none',
         color: 'var(--text)',
-        fontFamily: '"SF Mono", "Fira Code", "Fira Mono", "Roboto Mono", "Droid Sans Mono", "Cascadia Code", Consolas, "Courier New", monospace',
+        fontFamily: '"JetBrainsMono Nerd Font", "SF Mono", "Fira Code", "Fira Mono", "Roboto Mono", "Droid Sans Mono", "Cascadia Code", Consolas, "Courier New", monospace',
         WebkitAppearance: 'none', MozAppearance: 'none',
       }}
     />
@@ -1085,16 +1093,16 @@ function SeedanceTool() {
   }
 
   return (
-    <div className="mx-auto max-w-xl px-6 py-12">
+    <div className="mx-auto max-w-2xl px-6 py-12">
       <SectionTitle>Seedance 计费计算器</SectionTitle>
 
       <div className="grid gap-5">
         {/* 操作区（整块表单卡片） */}
         <Card>
           {/* 区域 + 模型 */}
-          <div className="grid grid-cols-2 gap-4">
+          <div className="grid grid-cols-2 gap-4 mb-4">
             <div>
-              <Label className="block mb-2">计费区域</Label>
+              <Label className="block mb-1">计费区域</Label>
               <SegmentedControl
                 value={region}
                 options={[{ value: 'cn', label: '国内' }, { value: 'us', label: '海外' }]}
@@ -1103,21 +1111,21 @@ function SeedanceTool() {
               />
             </div>
             <div>
-              <Label className="block mb-2">模型变体</Label>
+              <Label className="block mb-1">模型变体</Label>
               <CustomSelect value={model} onChange={onModelChange}
                 options={Object.keys(SEEDANCE_PRICING[region]).map(m => ({ value: m, label: m }))} />
             </div>
           </div>
 
           {/* 分辨率 + 是否含视频 */}
-          <div className="grid grid-cols-2 gap-4">
+          <div className="grid grid-cols-2 gap-4 mb-4">
             <div>
-              <Label className="block mb-2">输出分辨率</Label>
+              <Label className="block mb-1">输出分辨率</Label>
               <CustomSelect value={resolution} onChange={setResolution}
                 options={availableRes.map(r => ({ value: r, label: r }))} />
             </div>
             <div>
-              <Label className="block mb-2">输入是否包含视频</Label>
+              <Label className="block mb-1">输入是否包含视频</Label>
               <CustomSelect value={hasVideo} onChange={setHasVideo}
                 options={[{ value: '是', label: '是' }, { value: '否', label: '否' }]} />
             </div>
@@ -1126,11 +1134,11 @@ function SeedanceTool() {
           {/* Token 数 + 汇率 */}
           <div className="grid grid-cols-2 gap-4">
             <div>
-              <Label className="block mb-2">Token 数量</Label>
+              <Label className="block mb-1">Token 数量</Label>
               <CustomInput type="number" value={tokens} onChange={setTokens} placeholder="200000" mono />
             </div>
             <div>
-              <Label className="block mb-2">汇率 1 USD = ? CNY</Label>
+              <Label className="block mb-1">汇率 1 USD = ? CNY</Label>
               <CustomInput type="number" value={rate} onChange={setRate} placeholder="7" mono />
             </div>
           </div>
@@ -1243,7 +1251,7 @@ const JSON_GUTTER_W = JSON_LINE_NO_W + JSON_FOLD_W // 行号(24) + 折叠箭头�
 const JSON_CONTENT_X = JSON_PAD_L + JSON_GUTTER_W // 48px：两态内容真正起始的 x 坐标，必须完全一致，否则悬停切换会横向跳动
 
 const JSON_EDITOR_STYLE: React.CSSProperties = {
-  fontFamily: '"SF Mono", "Fira Code", "Fira Mono", "Roboto Mono", "Droid Sans Mono", "Cascadia Code", Consolas, "Courier New", monospace',
+  fontFamily: '"JetBrainsMono Nerd Font", "SF Mono", "Fira Code", "Fira Mono", "Roboto Mono", "Droid Sans Mono", "Cascadia Code", Consolas, "Courier New", monospace',
   fontSize: '12.5px',
   lineHeight: JSON_ROW + 'px',
   padding: `${JSON_PAD_TB}px 16px ${JSON_PAD_TB}px ${JSON_CONTENT_X}px`,
@@ -1331,7 +1339,7 @@ function JsonTreeView({ text, types, collapsed, toggleFold, scrollRef, onContent
     <div className="relative flex-1 min-h-0 overflow-hidden">
       <div ref={containerRef} onScroll={onScroll}
         className="absolute inset-0 overflow-auto"
-        style={{ fontFamily: '"SF Mono", "Fira Code", "Fira Mono", "Roboto Mono", "Droid Sans Mono", "Cascadia Code", Consolas, "Courier New", monospace', fontSize: '12.5px', lineHeight: JSON_ROW + 'px', padding: `${JSON_PAD_TB}px 16px ${JSON_PAD_TB}px ${JSON_PAD_L}px`, tabSize: 2 }}>
+        style={{ fontFamily: '"JetBrainsMono Nerd Font", "SF Mono", "Fira Code", "Fira Mono", "Roboto Mono", "Droid Sans Mono", "Cascadia Code", Consolas, "Courier New", monospace', fontSize: '12.5px', lineHeight: JSON_ROW + 'px', padding: `${JSON_PAD_TB}px 16px ${JSON_PAD_TB}px ${JSON_PAD_L}px`, tabSize: 2 }}>
         <div style={{ height: visible.length * JSON_ROW, position: 'relative' }}>
           {slice.map((i, k) => {
             const vi = start + k // 可见序位（用于绝对定位），i 才是真实行号（用于取值/折叠区间）
@@ -1375,7 +1383,6 @@ function DiffEditor({ value, onChange, placeholder, lineTypes, scrollRef, onFocu
   const gutterRef = useRef<HTMLDivElement>(null)
   const lines = value.length ? value.split('\n') : ['']
   const [matchPos, setMatchPos] = useState<{ line: number; col: number } | null>(null)
-  const prevValueRef = useRef(value)
 
   const sync = () => {
     const ta = taRef.current, back = backRef.current, gutter = gutterRef.current
@@ -1408,71 +1415,113 @@ function DiffEditor({ value, onChange, placeholder, lineTypes, scrollRef, onFocu
     }
   }
 
-  /** 键盘事件：自动补全括号/引号，智能删除空配对 */
+  /** 键盘事件：Tab 缩进/补全，智能删除空配对 */
   const handleKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
     const ta = taRef.current
     if (!ta) return
     const { selectionStart, selectionEnd } = ta
     const val = value
 
-    if (e.key === '{') {
+    if (e.key === 'Tab') {
       e.preventDefault()
-      const newVal = val.slice(0, selectionStart) + '{}' + val.slice(selectionEnd)
-      onChange(newVal)
-      requestAnimationFrame(() => {
-        ta.selectionStart = ta.selectionEnd = selectionStart + 1
-        updateCursor()
-      })
-      return
-    }
-    if (e.key === '[') {
-      e.preventDefault()
-      const newVal = val.slice(0, selectionStart) + '[]' + val.slice(selectionEnd)
-      onChange(newVal)
-      requestAnimationFrame(() => {
-        ta.selectionStart = ta.selectionEnd = selectionStart + 1
-        updateCursor()
-      })
-      return
-    }
-    if (e.key === '"') {
-      // 选中文本时用引号包裹
       if (selectionStart !== selectionEnd) {
-        e.preventDefault()
-        const newVal = val.slice(0, selectionStart) + '"' + val.slice(selectionStart, selectionEnd) + '"' + val.slice(selectionEnd)
-        onChange(newVal)
+        // 多行选中：Tab 缩进全部选中行，Shift+Tab 减少缩进
+        const sel = val.slice(selectionStart, selectionEnd)
+        const selLines = sel.split('\n')
+        if (e.shiftKey) {
+          // Shift+Tab：去掉每行行首 2 空格（第一行非行首时跳过）
+          const newLines = selLines.map((l, i) => {
+            if (i === 0 && selectionStart > 0) return l
+            return l.startsWith('  ') ? l.slice(2) : l
+          })
+          const newSel = newLines.join('\n')
+          const firstTrimmed = (selectionStart > 0) ? 0 : (selLines[0].startsWith('  ') ? 2 : 0)
+          onChange(val.slice(0, selectionStart) + newSel + val.slice(selectionEnd))
+          requestAnimationFrame(() => {
+            ta.selectionStart = selectionStart - firstTrimmed
+            ta.selectionEnd = selectionStart - firstTrimmed + newSel.length
+            updateCursor()
+          })
+        } else {
+          // Tab：每行行首加 2 空格
+          const newLines = selLines.map((l, i) => {
+            if (i === 0 && selectionStart > 0) return l
+            return '  ' + l
+          })
+          const newSel = newLines.join('\n')
+          onChange(val.slice(0, selectionStart) + newSel + val.slice(selectionEnd))
+          requestAnimationFrame(() => {
+            ta.selectionStart = selectionStart
+            ta.selectionEnd = selectionStart + newSel.length
+            updateCursor()
+          })
+        }
+        return
+      }
+
+      // 无选中：Tab 补全或缩进
+      if (e.shiftKey) {
+        // Shift+Tab：删除行首 2 空格
+        const lineStart = val.lastIndexOf('\n', selectionStart - 1) + 1
+        if (val.slice(lineStart, lineStart + 2) === '  ') {
+          onChange(val.slice(0, lineStart) + val.slice(lineStart + 2))
+          requestAnimationFrame(() => {
+            ta.selectionStart = ta.selectionEnd = selectionStart - 2
+            updateCursor()
+          })
+        }
+        return
+      }
+
+      // 补全：检查光标前字符
+      const prevChar = selectionStart > 0 ? val[selectionStart - 1] : ''
+      const nextChar = selectionStart < val.length ? val[selectionStart] : ''
+
+      if (prevChar === '{' && nextChar !== '}') {
+        onChange(val.slice(0, selectionStart) + '}' + val.slice(selectionEnd))
         requestAnimationFrame(() => {
-          ta.selectionStart = selectionStart + 1
-          ta.selectionEnd = selectionEnd + 1
+          ta.selectionStart = ta.selectionEnd = selectionStart
           updateCursor()
         })
         return
       }
-      // 不在字符串内部才自动补全
-      const before = val.slice(0, selectionStart)
-      const after = val.slice(selectionStart)
-      // 简单判断：如果前面有未闭合的引号，则不自动补全
-      const quotesBefore = before.split('').filter(c => c === '"').length
-      const quotesAfter = after.split('').filter(c => c === '"').length
-      if (quotesBefore % 2 === 0 && quotesAfter % 2 === 0) {
-        e.preventDefault()
-        const newVal = val.slice(0, selectionStart) + '""' + val.slice(selectionEnd)
-        onChange(newVal)
+      if (prevChar === '[' && nextChar !== ']') {
+        onChange(val.slice(0, selectionStart) + ']' + val.slice(selectionEnd))
         requestAnimationFrame(() => {
-          ta.selectionStart = ta.selectionEnd = selectionStart + 1
+          ta.selectionStart = ta.selectionEnd = selectionStart
           updateCursor()
         })
         return
       }
+      if (prevChar === '"' && nextChar !== '"') {
+        // 引号补全：仅当光标前引号未闭合（奇数个）时补全
+        const quotesBefore = val.slice(0, selectionStart).split('').filter(c => c === '"').length
+        if (quotesBefore % 2 === 1) {
+          onChange(val.slice(0, selectionStart) + '"' + val.slice(selectionEnd))
+          requestAnimationFrame(() => {
+            ta.selectionStart = ta.selectionEnd = selectionStart
+            updateCursor()
+          })
+          return
+        }
+      }
+
+      // 默认：插入 2 空格缩进
+      onChange(val.slice(0, selectionStart) + '  ' + val.slice(selectionEnd))
+      requestAnimationFrame(() => {
+        ta.selectionStart = ta.selectionEnd = selectionStart + 2
+        updateCursor()
+      })
+      return
     }
+
     // Backspace：在空配对 {} [] "" 中时删除整个配对
     if (e.key === 'Backspace' && selectionStart === selectionEnd && selectionStart > 0) {
       const prev = val[selectionStart - 1]
       const next = val[selectionStart]
       if ((prev === '{' && next === '}') || (prev === '[' && next === ']') || (prev === '"' && next === '"')) {
         e.preventDefault()
-        const newVal = val.slice(0, selectionStart - 1) + val.slice(selectionStart + 1)
-        onChange(newVal)
+        onChange(val.slice(0, selectionStart - 1) + val.slice(selectionStart + 1))
         requestAnimationFrame(() => {
           ta.selectionStart = ta.selectionEnd = selectionStart - 1
           updateCursor()
@@ -1491,9 +1540,6 @@ function DiffEditor({ value, onChange, placeholder, lineTypes, scrollRef, onFocu
     sync()
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
-
-  // 跟踪 value 变化，用于检测自动补全后的光标保持
-  useEffect(() => { prevValueRef.current = value }, [value])
 
   return (
     <div className="relative flex-1 min-h-0 overflow-hidden">
@@ -1514,7 +1560,7 @@ function DiffEditor({ value, onChange, placeholder, lineTypes, scrollRef, onFocu
         })}
       </pre>
       <textarea
-        ref={taRef} value={value} onChange={e => { onChange(e.target.value); prevValueRef.current = e.target.value }}
+        ref={taRef} value={value} onChange={e => onChange(e.target.value)}
         onKeyDown={handleKeyDown}
         onScroll={sync} onClick={updateCursor} onKeyUp={updateCursor}
         spellCheck={false} wrap="off" autoFocus={autoFocus}
@@ -1763,9 +1809,9 @@ function TimestampTool() {
       {/* Current timestamp pill */}
       <div className="flex items-center gap-3 px-4 py-3 rounded-xl mb-6 text-sm" style={{ background: 'var(--s1)', border: '1px solid var(--border)' }}>
         <span style={{ color: 'var(--t2)' }}>当前时间戳</span>
-        <code style={{ fontFamily: '"SF Mono", "Fira Code", "Fira Mono", "Roboto Mono", "Droid Sans Mono", "Cascadia Code", Consolas, "Courier New", monospace', color: 'var(--text)', fontWeight: 600 }}>{now}</code>
+        <code style={{ fontFamily: '"JetBrainsMono Nerd Font", "SF Mono", "Fira Code", "Fira Mono", "Roboto Mono", "Droid Sans Mono", "Cascadia Code", Consolas, "Courier New", monospace', color: 'var(--text)', fontWeight: 600 }}>{now}</code>
         <span style={{ color: 'var(--t3)' }}>ms</span>
-        <code style={{ fontFamily: '"SF Mono", "Fira Code", "Fira Mono", "Roboto Mono", "Droid Sans Mono", "Cascadia Code", Consolas, "Courier New", monospace', color: 'var(--text)', fontWeight: 600, marginLeft: 4 }}>{nowTs}</code>
+        <code style={{ fontFamily: '"JetBrainsMono Nerd Font", "SF Mono", "Fira Code", "Fira Mono", "Roboto Mono", "Droid Sans Mono", "Cascadia Code", Consolas, "Courier New", monospace', color: 'var(--text)', fontWeight: 600, marginLeft: 4 }}>{nowTs}</code>
         <span style={{ color: 'var(--t3)' }}>s</span>
         <Btn small onClick={() => setTsInput(String(now))} className="ml-auto">使用当前</Btn>
       </div>
@@ -1805,7 +1851,7 @@ function TimestampTool() {
                   ].map(([label, val]) => (
                     <div key={label} className="flex items-center gap-3 px-3 py-2 rounded-xl" style={{ background: 'var(--s1)', border: '1px solid var(--border)' }}>
                       <span className="text-xs w-24 flex-shrink-0" style={{ color: 'var(--t2)' }}>{label}</span>
-                      <code className="flex-1 text-sm" style={{ fontFamily: '"SF Mono", "Fira Code", "Fira Mono", "Roboto Mono", "Droid Sans Mono", "Cascadia Code", Consolas, "Courier New", monospace', color: 'var(--text)' }}>{val}</code>
+                      <code className="flex-1 text-sm" style={{ fontFamily: '"JetBrainsMono Nerd Font", "SF Mono", "Fira Code", "Fira Mono", "Roboto Mono", "Droid Sans Mono", "Cascadia Code", Consolas, "Courier New", monospace', color: 'var(--text)' }}>{val}</code>
                       <CopyBtn text={val ?? ''} />
                     </div>
                   ))}
@@ -1834,7 +1880,7 @@ function TimestampTool() {
                   ].map(([label, val]) => (
                     <div key={label} className="flex items-center gap-3 px-3 py-2 rounded-xl" style={{ background: 'var(--s1)', border: '1px solid var(--border)' }}>
                       <span className="text-xs w-36 flex-shrink-0" style={{ color: 'var(--t2)' }}>{label}</span>
-                      <code className="flex-1 text-sm font-semibold" style={{ fontFamily: '"SF Mono", "Fira Code", "Fira Mono", "Roboto Mono", "Droid Sans Mono", "Cascadia Code", Consolas, "Courier New", monospace', color: 'var(--text)' }}>{val}</code>
+                      <code className="flex-1 text-sm font-semibold" style={{ fontFamily: '"JetBrainsMono Nerd Font", "SF Mono", "Fira Code", "Fira Mono", "Roboto Mono", "Droid Sans Mono", "Cascadia Code", Consolas, "Courier New", monospace', color: 'var(--text)' }}>{val}</code>
                       <CopyBtn text={val ?? ''} />
                     </div>
                   ))}
@@ -1933,7 +1979,7 @@ function AiConvertTool() {
             </div>
           </div>
           <div className="flex-1 rounded-xl overflow-auto p-3 text-xs"
-            style={{ background: 'var(--code)', border: '1px solid var(--inputBorder)', fontFamily: '"SF Mono", "Fira Code", "Fira Mono", "Roboto Mono", "Droid Sans Mono", "Cascadia Code", Consolas, "Courier New", monospace', lineHeight: 1.7, whiteSpace: 'pre' }}>
+            style={{ background: 'var(--code)', border: '1px solid var(--inputBorder)', fontFamily: '"JetBrainsMono Nerd Font", "SF Mono", "Fira Code", "Fira Mono", "Roboto Mono", "Droid Sans Mono", "Cascadia Code", Consolas, "Courier New", monospace', lineHeight: 1.7, whiteSpace: 'pre' }}>
             <div dangerouslySetInnerHTML={{ __html: highlightJson(outputWithCache) }} />
           </div>
         </div>
@@ -2661,7 +2707,7 @@ function LlmBatchReportView({ report, apiKey }: { report: BatchReport; apiKey: s
                   <Label>请求体 JSON</Label>
                   {viewingBodyObj != null && <CopyBtn text={JSON.stringify(viewingBodyObj, null, 2)} />}
                 </div>
-                <pre className="rounded-xl p-3 text-xs overflow-auto" style={{ background: 'var(--code)', border: '1px solid var(--inputBorder)', fontFamily: '"SF Mono", "Fira Code", "Fira Mono", "Roboto Mono", "Droid Sans Mono", "Cascadia Code", Consolas, "Courier New", monospace', lineHeight: 1.7, maxHeight: '30vh' }}>
+                <pre className="rounded-xl p-3 text-xs overflow-auto" style={{ background: 'var(--code)', border: '1px solid var(--inputBorder)', fontFamily: '"JetBrainsMono Nerd Font", "SF Mono", "Fira Code", "Fira Mono", "Roboto Mono", "Droid Sans Mono", "Cascadia Code", Consolas, "Courier New", monospace', lineHeight: 1.7, maxHeight: '30vh' }}>
                   {viewingBodyObj != null ? JSON.stringify(viewingBodyObj, null, 2) : '（请求体解析失败）'}
                 </pre>
               </div>
@@ -2670,7 +2716,7 @@ function LlmBatchReportView({ report, apiKey }: { report: BatchReport; apiKey: s
                   <Label>cURL 命令</Label>
                   {viewingBodyObj != null && <CopyBtn text={buildCurlCommand(report, viewingBodyObj, apiKey)} />}
                 </div>
-                <pre className="rounded-xl p-3 text-xs overflow-auto whitespace-pre-wrap" style={{ background: 'var(--code)', border: '1px solid var(--inputBorder)', fontFamily: '"SF Mono", "Fira Code", "Fira Mono", "Roboto Mono", "Droid Sans Mono", "Cascadia Code", Consolas, "Courier New", monospace', lineHeight: 1.7, maxHeight: '30vh', wordBreak: 'break-all' }}>
+                <pre className="rounded-xl p-3 text-xs overflow-auto whitespace-pre-wrap" style={{ background: 'var(--code)', border: '1px solid var(--inputBorder)', fontFamily: '"JetBrainsMono Nerd Font", "SF Mono", "Fira Code", "Fira Mono", "Roboto Mono", "Droid Sans Mono", "Cascadia Code", Consolas, "Courier New", monospace', lineHeight: 1.7, maxHeight: '30vh', wordBreak: 'break-all' }}>
                   {viewingBodyObj != null ? buildCurlCommand(report, viewingBodyObj, apiKey) : '（请求体解析失败）'}
                 </pre>
                 <p className="text-xs mt-1.5" style={{ color: 'var(--warn)' }}>⚠ cURL 命令含明文 API Key，注意妥善保管，不要粘贴到公开场合</p>
@@ -3605,7 +3651,7 @@ function UrlInput({ onSubmit }: { onSubmit: (text: string) => void }) {
           background: 'var(--inputBg)', color: 'var(--text)',
           border: `1px solid ${focused ? 'var(--accent)' : 'var(--inputBorder)'}`,
           boxShadow: focused ? '0 0 0 3px var(--accentSub)' : 'none',
-          fontFamily: '"SF Mono", "Fira Code", "Fira Mono", "Roboto Mono", "Droid Sans Mono", "Cascadia Code", Consolas, "Courier New", monospace', minHeight: 80,
+          fontFamily: '"JetBrainsMono Nerd Font", "SF Mono", "Fira Code", "Fira Mono", "Roboto Mono", "Droid Sans Mono", "Cascadia Code", Consolas, "Courier New", monospace', minHeight: 80,
         }}
         onKeyDown={e => { if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) { onSubmit(value); setValue('') } }}
       />
@@ -4048,7 +4094,7 @@ function IdGenTool() {
             <div>
               <div className="flex items-center justify-between mb-1.5">
                 <Label>长度</Label>
-                <span className="text-sm font-semibold tabular-nums" style={{ color: 'var(--accent)', fontFamily: '"SF Mono", "Fira Code", "Fira Mono", "Roboto Mono", "Droid Sans Mono", "Cascadia Code", Consolas, "Courier New", monospace' }}>{opts.rand.len}</span>
+                <span className="text-sm font-semibold tabular-nums" style={{ color: 'var(--accent)', fontFamily: '"JetBrainsMono Nerd Font", "SF Mono", "Fira Code", "Fira Mono", "Roboto Mono", "Droid Sans Mono", "Cascadia Code", Consolas, "Courier New", monospace' }}>{opts.rand.len}</span>
               </div>
               <input
                 type="range" min={1} max={256} value={opts.rand.len}
@@ -4124,13 +4170,13 @@ function IdGenTool() {
         {first && (
           <div className="flex items-center gap-3 px-4 py-3 rounded-xl mb-3" style={{ background: 'var(--s1)', border: '1px solid var(--border)' }}>
             <Badge color="ok">首条</Badge>
-            <code className="flex-1 text-sm font-semibold" style={{ fontFamily: '"SF Mono", "Fira Code", "Fira Mono", "Roboto Mono", "Droid Sans Mono", "Cascadia Code", Consolas, "Courier New", monospace', color: 'var(--text)', overflowWrap: 'anywhere' }}>{first}</code>
+            <code className="flex-1 text-sm font-semibold" style={{ fontFamily: '"JetBrainsMono Nerd Font", "SF Mono", "Fira Code", "Fira Mono", "Roboto Mono", "Droid Sans Mono", "Cascadia Code", Consolas, "Courier New", monospace', color: 'var(--text)', overflowWrap: 'anywhere' }}>{first}</code>
             <CopyBtn text={first} />
           </div>
         )}
         <div
           className="idgen-result rounded-xl overflow-auto p-4 text-xs leading-relaxed"
-          style={{ background: 'var(--code)', border: '1px solid var(--inputBorder)', fontFamily: '"SF Mono", "Fira Code", "Fira Mono", "Roboto Mono", "Droid Sans Mono", "Cascadia Code", Consolas, "Courier New", monospace', color: 'var(--text)', whiteSpace: 'pre', maxHeight: 460 }}
+          style={{ background: 'var(--code)', border: '1px solid var(--inputBorder)', fontFamily: '"JetBrainsMono Nerd Font", "SF Mono", "Fira Code", "Fira Mono", "Roboto Mono", "Droid Sans Mono", "Cascadia Code", Consolas, "Courier New", monospace', color: 'var(--text)', whiteSpace: 'pre', maxHeight: 460 }}
         >
           {text}
         </div>
@@ -4319,9 +4365,801 @@ function UnicodeTool() {
   )
 }
 
+// ─── GraphQL Utilities ────────────────────────────────────────────────────
+
+const GQL_KEYWORDS = new Set([
+  'query', 'mutation', 'subscription', 'fragment', 'on', 'type', 'input',
+  'enum', 'union', 'interface', 'scalar', 'extend', 'implements', 'schema',
+  'directive', 'repeatable',
+])
+
+interface GqlToken {
+  type: 'keyword' | 'type' | 'string' | 'blockstring' | 'number' | 'boolean' | 'null'
+    | 'comment' | 'variable' | 'directive' | 'spread' | 'punc' | 'name' | 'argname' | 'ws'
+  value: string
+}
+
+function graphqlTokenize(text: string): GqlToken[] {
+  const tokens: GqlToken[] = []
+  let i = 0
+  const len = text.length
+
+  while (i < len) {
+    const ch = text[i]
+
+    // Whitespace
+    if (ch === ' ' || ch === '\t' || ch === '\n' || ch === '\r') {
+      let ws = ''
+      while (i < len && (text[i] === ' ' || text[i] === '\t' || text[i] === '\n' || text[i] === '\r')) {
+        ws += text[i]; i++
+      }
+      tokens.push({ type: 'ws', value: ws })
+      continue
+    }
+
+    // Comment
+    if (ch === '#') {
+      let comment = ''
+      while (i < len && text[i] !== '\n') { comment += text[i]; i++ }
+      tokens.push({ type: 'comment', value: comment })
+      continue
+    }
+
+    // String (single-line or block)
+    if (ch === '"') {
+      if (text.slice(i, i + 3) === '"""') {
+        let s = '"""'
+        i += 3
+        while (i < len) {
+          if (text.slice(i, i + 3) === '"""') { s += '"""'; i += 3; break }
+          s += text[i]; i++
+        }
+        tokens.push({ type: 'blockstring', value: s })
+      } else {
+        let s = '"'
+        i++
+        while (i < len && text[i] !== '"') {
+          if (text[i] === '\\') { s += '\\'; i++; if (i < len) { s += text[i]; i++ } }
+          else { s += text[i]; i++ }
+        }
+        if (i < len) { s += '"'; i++ }
+        tokens.push({ type: 'string', value: s })
+      }
+      continue
+    }
+
+    // Numbers
+    if (/\d/.test(ch) || (ch === '-' && /\d/.test(text[i + 1]))) {
+      let num = ''
+      if (ch === '-') { num += '-'; i++ }
+      while (i < len && /\d/.test(text[i])) { num += text[i]; i++ }
+      if (text[i] === '.') { num += '.'; i++; while (i < len && /\d/.test(text[i])) { num += text[i]; i++ } }
+      if (text[i] === 'e' || text[i] === 'E') {
+        num += text[i]; i++
+        if (text[i] === '+' || text[i] === '-') { num += text[i]; i++ }
+        while (i < len && /\d/.test(text[i])) { num += text[i]; i++ }
+      }
+      tokens.push({ type: 'number', value: num })
+      continue
+    }
+
+    // Spread operator
+    if (text.slice(i, i + 3) === '...') {
+      tokens.push({ type: 'spread', value: '...' }); i += 3; continue
+    }
+
+    // Variable
+    if (ch === '$') {
+      let v = '$'; i++
+      while (i < len && /[A-Za-z0-9_]/.test(text[i])) { v += text[i]; i++ }
+      tokens.push({ type: 'variable', value: v })
+      continue
+    }
+
+    // Directive
+    if (ch === '@') {
+      let d = '@'; i++
+      while (i < len && /[A-Za-z0-9_]/.test(text[i])) { d += text[i]; i++ }
+      tokens.push({ type: 'directive', value: d })
+      continue
+    }
+
+    // Punctuation
+    if ('{}()[]:,!='.includes(ch)) {
+      tokens.push({ type: 'punc', value: ch }); i++; continue
+    }
+
+    // Identifiers & keywords
+    if (/[A-Za-z_]/.test(ch)) {
+      let word = ''
+      while (i < len && /[A-Za-z0-9_]/.test(text[i])) { word += text[i]; i++ }
+
+      if (word === 'true' || word === 'false') {
+        tokens.push({ type: 'boolean', value: word })
+      } else if (word === 'null') {
+        tokens.push({ type: 'null', value: word })
+      } else if (GQL_KEYWORDS.has(word)) {
+        tokens.push({ type: 'keyword', value: word })
+      } else if (/[A-Z]/.test(word[0])) {
+        tokens.push({ type: 'type', value: word })
+      } else {
+        // Check if this is an argument name (identifier followed by colon, ignoring whitespace)
+        // We'll do a lookahead for this
+        let j = i
+        while (j < len && (text[j] === ' ' || text[j] === '\t' || text[j] === '\n' || text[j] === '\r')) j++
+        if (j < len && text[j] === ':') {
+          tokens.push({ type: 'argname', value: word })
+        } else {
+          tokens.push({ type: 'name', value: word })
+        }
+      }
+      continue
+    }
+
+    // Skip any other character
+    tokens.push({ type: 'punc', value: ch }); i++
+  }
+
+  return tokens
+}
+
+function formatGraphql(text: string): string {
+  const tokens = graphqlTokenize(text)
+  const out: string[] = []
+  let indent = 0
+  const INDENT_STR = '  '
+
+  // Helper to determine if we should add a newline before closing bracket
+  const shouldBreak = (tokens: GqlToken[], idx: number): boolean => {
+    // If the matching open bracket was on a different line, break
+    if (idx <= 0) return false
+    // Check if there's content between the brackets
+    let depth = 1
+    let j = idx - 1
+    while (j >= 0 && depth > 0) {
+      const t = tokens[j]
+      if (t.type === 'punc' && (t.value === '}' || t.value === ')' || t.value === ']')) depth++
+      if (t.type === 'punc' && (t.value === '{' || t.value === '(' || t.value === '[')) depth--
+      if (depth === 0) break
+      j--
+    }
+    // Found matching open bracket at j
+    // Check if there are any non-ws tokens between j and idx
+    let k = j + 1
+    while (k < idx) {
+      if (tokens[k].type !== 'ws') return true
+      k++
+    }
+    return false
+  }
+
+  for (let i = 0; i < tokens.length; i++) {
+    const t = tokens[i]
+
+    if (t.type === 'ws') {
+      // Skip whitespace — we'll add our own
+      continue
+    }
+
+    if (t.type === 'comment') {
+      out.push('\n' + INDENT_STR.repeat(indent) + t.value)
+      continue
+    }
+
+    if (t.type === 'punc') {
+      if (t.value === '{' || t.value === '(' || t.value === '[') {
+        // Check if next non-ws token is a closing bracket
+        let nextNonWs = -1
+        for (let j = i + 1; j < tokens.length; j++) {
+          if (tokens[j].type !== 'ws') { nextNonWs = j; break }
+        }
+        const closeMap: Record<string, string> = { '{': '}', '(': ')', '[': ']' }
+        if (nextNonWs >= 0 && tokens[nextNonWs].value === closeMap[t.value]) {
+          // Empty brackets — keep on same line
+          out.push(t.value)
+          continue
+        }
+        out.push(t.value)
+        indent++
+        out.push('\n' + INDENT_STR.repeat(indent))
+        continue
+      }
+      if (t.value === '}' || t.value === ')' || t.value === ']') {
+        indent = Math.max(0, indent - 1)
+        // Check if the content inside was empty
+        if (shouldBreak(tokens, i)) {
+          out.push('\n' + INDENT_STR.repeat(indent))
+        }
+        out.push(t.value)
+        // Look ahead — if next non-ws is not a closing bracket/comma, add newline
+        let nextNonWs = -1
+        for (let j = i + 1; j < tokens.length; j++) {
+          if (tokens[j].type !== 'ws') { nextNonWs = j; break }
+        }
+        if (nextNonWs >= 0 && tokens[nextNonWs].type === 'punc' && tokens[nextNonWs].value === ',') {
+          // comma will be handled below
+        } else if (nextNonWs >= 0 && tokens[nextNonWs].type !== 'punc') {
+          out.push('\n' + INDENT_STR.repeat(indent))
+        } else if (nextNonWs >= 0 && tokens[nextNonWs].type === 'punc' && '}])'.includes(tokens[nextNonWs].value)) {
+          // Multiple closing brackets — no newline between them
+        } else if (nextNonWs >= 0) {
+          out.push('\n' + INDENT_STR.repeat(indent))
+        }
+        continue
+      }
+      if (t.value === ',') {
+        // Skip commas in formatted output (we use newlines instead)
+        continue
+      }
+      if (t.value === ':') {
+        out.push(': ')
+        continue
+      }
+      out.push(t.value)
+      continue
+    }
+
+    // Add space before value if previous output doesn't end with whitespace or opening bracket
+    const last = out[out.length - 1] || ''
+    if (last.length > 0 && !last.endsWith(' ') && !last.endsWith('\n') && !last.endsWith('(') && !last.endsWith('[') && !last.endsWith('{') && !last.endsWith(':') && !last.endsWith('!') && !last.endsWith(',')) {
+      out.push(' ')
+    }
+
+    out.push(t.value)
+  }
+
+  return out.join('').trim()
+}
+
+function compressGraphql(text: string): string {
+  const tokens = graphqlTokenize(text)
+  const out: string[] = []
+
+  for (let i = 0; i < tokens.length; i++) {
+    const t = tokens[i]
+    if (t.type === 'comment' || t.type === 'ws') continue
+
+    // Add space between identifiers/keywords/types/etc
+    if (out.length > 0) {
+      const prev = tokens[i - 1]
+      if (prev && prev.type !== 'ws' && prev.type !== 'comment') {
+        const needSpace = (
+          (t.type === 'name' || t.type === 'keyword' || t.type === 'type' || t.type === 'boolean' || t.type === 'null' || t.type === 'variable' || t.type === 'argname') &&
+          (prev.type === 'name' || prev.type === 'keyword' || prev.type === 'type' || prev.type === 'boolean' || prev.type === 'null' || prev.type === 'variable' || prev.type === 'argname' || prev.type === 'number' || prev.type === 'string' || prev.type === 'blockstring')
+        )
+        if (needSpace || (t.type === 'spread' && prev.type === 'name') || (t.type === 'name' && prev.type === 'spread')) {
+          out.push(' ')
+        }
+      }
+    }
+
+    out.push(t.value)
+  }
+
+  return out.join('').trim()
+}
+
+function highlightGraphql(text: string): string {
+  const tokens = graphqlTokenize(text)
+  let html = ''
+
+  for (const t of tokens) {
+    if (t.type === 'ws') {
+      html += t.value
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/\n/g, '<br>')
+        .replace(/ /g, '&nbsp;')
+      continue
+    }
+    const safe = t.value
+      .replace(/&/g, '&amp;')
+      .replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;')
+    html += `<span class="gql-${t.type}">${safe}</span>`
+  }
+
+  return html
+}
+
+function unescapeString(text: string): string {
+  let result = ''
+  let i = 0
+  while (i < text.length) {
+    if (text[i] === '\\' && i + 1 < text.length) {
+      const next = text[i + 1]
+      switch (next) {
+        case '"':  result += '"'; break
+        case '\\': result += '\\'; break
+        case 'n':  result += '\n'; break
+        case 't':  result += '\t'; break
+        case 'r':  result += '\r'; break
+        case '/':  result += '/'; break
+        case 'b':  result += '\b'; break
+        case 'f':  result += '\f'; break
+        default:   result += '\\' + next; break
+      }
+      i += 2
+    } else {
+      result += text[i]; i++
+    }
+  }
+  // Check if result is valid JSON and format it
+  try {
+    const parsed = JSON.parse(result)
+    if (typeof parsed === 'object' && parsed !== null) {
+      return JSON.stringify(parsed, null, 2)
+    }
+  } catch { /* not JSON */ }
+  return result
+}
+
+// ─── Tool: GraphQL 格式化 ───────────────────────────────────────────────────
+
+const GQL_HISTORY_MAX = 80
+
+function useGqlHistory(initial: string) {
+  const undoStack = useRef<string[]>([initial])
+  const redoStack = useRef<string[]>([])
+  const saveTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
+
+  const save = useCallback((val: string) => {
+    if (saveTimer.current) clearTimeout(saveTimer.current)
+    saveTimer.current = setTimeout(() => {
+      const last = undoStack.current[undoStack.current.length - 1]
+      if (last !== val) {
+        undoStack.current.push(val)
+        if (undoStack.current.length > GQL_HISTORY_MAX) undoStack.current.shift()
+        redoStack.current = []
+      }
+    }, 400)
+  }, [])
+
+  const undo = useCallback((current: string, setVal: (v: string) => void) => {
+    if (undoStack.current.length > 1) {
+      redoStack.current.push(current)
+      const prev = undoStack.current.pop()!
+      setVal(prev)
+    }
+  }, [])
+
+  const redo = useCallback((current: string, setVal: (v: string) => void) => {
+    if (redoStack.current.length > 0) {
+      undoStack.current.push(current)
+      const next = redoStack.current.pop()!
+      setVal(next)
+    }
+  }, [])
+
+  return { save, undo, redo }
+}
+
+function GraphqlTool() {
+  const [leftText, setLeftText] = useState('')
+  const [rightText, setRightText] = useState('')
+  const [leftPreUnescape, setLeftPreUnescape] = useState<string | null>(null)
+  const [rightPreUnescape, setRightPreUnescape] = useState<string | null>(null)
+  const [leftFocused, setLeftFocused] = useState(false)
+  const [rightFocused, setRightFocused] = useState(false)
+  const [split, setSplit] = useState(50) // percentage for left panel
+  const [dragging, setDragging] = useState(false)
+  const [toast, setToast] = useState<string | null>(null)
+  const containerRef = useRef<HTMLDivElement>(null)
+  const leftTaRef = useRef<HTMLTextAreaElement>(null)
+  const rightTaRef = useRef<HTMLTextAreaElement>(null)
+
+  // History hooks
+  const leftHistory = useGqlHistory('')
+  const rightHistory = useGqlHistory('')
+
+  const showToast = useCallback((msg: string) => {
+    setToast(msg)
+    setTimeout(() => setToast(null), 1800)
+  }, [])
+
+  // Shared operation: apply function to a panel
+  const applyToPanel = useCallback((
+    side: 'left' | 'right',
+    fn: (text: string) => string,
+    extra?: { preUnescape?: string | null }
+  ) => {
+    const text = side === 'left' ? leftText : rightText
+    const result = fn(text)
+    if (side === 'left') {
+      setLeftText(result)
+      if (extra?.preUnescape !== undefined) setLeftPreUnescape(extra.preUnescape)
+    } else {
+      setRightText(result)
+      if (extra?.preUnescape !== undefined) setRightPreUnescape(extra.preUnescape)
+    }
+  }, [leftText, rightText])
+
+  const formatLeft = useCallback(() => {
+    applyToPanel('left', formatGraphql)
+    showToast('格式化完成')
+  }, [applyToPanel, showToast])
+  const formatRight = useCallback(() => {
+    applyToPanel('right', formatGraphql)
+    showToast('格式化完成')
+  }, [applyToPanel, showToast])
+
+  const compressLeft = useCallback(() => {
+    applyToPanel('left', compressGraphql)
+    showToast('压缩完成')
+  }, [applyToPanel, showToast])
+  const compressRight = useCallback(() => {
+    applyToPanel('right', compressGraphql)
+    showToast('压缩完成')
+  }, [applyToPanel, showToast])
+
+  const unescapeLeft = useCallback(() => {
+    const text = leftText
+    const result = unescapeString(text)
+    setLeftText(result)
+    setLeftPreUnescape(text)
+    showToast('反转义完成')
+  }, [leftText, showToast])
+  const unescapeRight = useCallback(() => {
+    const text = rightText
+    const result = unescapeString(text)
+    setRightText(result)
+    setRightPreUnescape(text)
+    showToast('反转义完成')
+  }, [rightText, showToast])
+
+  const restoreLeft = useCallback(() => {
+    if (leftPreUnescape != null) {
+      setLeftText(leftPreUnescape)
+      setLeftPreUnescape(null)
+      showToast('已还原转义')
+    }
+  }, [leftPreUnescape, showToast])
+  const restoreRight = useCallback(() => {
+    if (rightPreUnescape != null) {
+      setRightText(rightPreUnescape)
+      setRightPreUnescape(null)
+      showToast('已还原转义')
+    }
+  }, [rightPreUnescape, showToast])
+
+  const copyLeft = useCallback(() => {
+    if (!leftText) { showToast('编辑器为空'); return }
+    navigator.clipboard.writeText(leftText).then(() => showToast('已复制'))
+  }, [leftText, showToast])
+  const copyRight = useCallback(() => {
+    if (!rightText) { showToast('编辑器为空'); return }
+    navigator.clipboard.writeText(rightText).then(() => showToast('已复制'))
+  }, [rightText, showToast])
+
+  const clearLeft = useCallback(() => {
+    setLeftText('')
+    setLeftPreUnescape(null)
+  }, [])
+  const clearRight = useCallback(() => {
+    setRightText('')
+    setRightPreUnescape(null)
+  }, [])
+
+  // Undo/Redo
+  const undoLeft = useCallback(() => {
+    leftHistory.undo(leftText, setLeftText)
+  }, [leftHistory, leftText])
+  const redoLeft = useCallback(() => {
+    leftHistory.redo(leftText, setLeftText)
+  }, [leftHistory, leftText])
+  const undoRight = useCallback(() => {
+    rightHistory.undo(rightText, setRightText)
+  }, [rightHistory, rightText])
+  const redoRight = useCallback(() => {
+    rightHistory.redo(rightText, setRightText)
+  }, [rightHistory, rightText])
+
+  // Keyboard shortcuts for undo/redo
+  useEffect(() => {
+    const handler = (e: KeyboardEvent) => {
+      const isLeft = leftFocused
+      const isRight = rightFocused
+      if (!isLeft && !isRight) return
+
+      if ((e.metaKey || e.ctrlKey) && e.key === 'z' && !e.shiftKey) {
+        e.preventDefault()
+        if (isLeft) undoLeft()
+        else undoRight()
+      }
+      if ((e.metaKey || e.ctrlKey) && (e.key === 'y' || (e.key === 'z' && e.shiftKey))) {
+        e.preventDefault()
+        if (isLeft) redoLeft()
+        else redoRight()
+      }
+    }
+    window.addEventListener('keydown', handler)
+    return () => window.removeEventListener('keydown', handler)
+  }, [leftFocused, rightFocused, undoLeft, undoRight, redoLeft, redoRight])
+
+  // Smart indentation and paste auto-format
+  const handleKeyDown = (side: 'left' | 'right', e: React.KeyboardEvent<HTMLTextAreaElement>) => {
+    const ta = e.currentTarget
+    const { selectionStart, selectionEnd } = ta
+    const val = side === 'left' ? leftText : rightText
+    const setVal = side === 'left' ? setLeftText : setRightText
+
+    if (e.key === 'Tab') {
+      e.preventDefault()
+      if (e.shiftKey) {
+        // Shift+Tab: remove 2 spaces from start of line
+        const startLine = val.slice(0, selectionStart).lastIndexOf('\n') + 1
+        const lineStart = val.slice(startLine, selectionStart)
+        const remove = lineStart.startsWith('  ') ? 2 : lineStart.startsWith(' ') ? 1 : 0
+        const newVal = val.slice(0, startLine) + lineStart.slice(remove) + val.slice(selectionStart)
+        setVal(newVal)
+        requestAnimationFrame(() => {
+          ta.selectionStart = ta.selectionEnd = selectionStart - remove
+        })
+      } else {
+        // Tab: insert 2 spaces
+        const newVal = val.slice(0, selectionStart) + '  ' + val.slice(selectionEnd)
+        setVal(newVal)
+        requestAnimationFrame(() => {
+          ta.selectionStart = ta.selectionEnd = selectionStart + 2
+        })
+      }
+      return
+    }
+
+    if (e.key === 'Enter') {
+      e.preventDefault()
+      const lineStart = val.slice(0, selectionStart).lastIndexOf('\n') + 1
+      const currentLine = val.slice(lineStart, selectionStart)
+      const indent = currentLine.match(/^\s*/)?.[0] || ''
+      // Check if previous line ends with opening bracket
+      const trimmed = currentLine.trimEnd()
+      const extraIndent = trimmed.endsWith('{') || trimmed.endsWith('(') || trimmed.endsWith('[') ? '  ' : ''
+      const newVal = val.slice(0, selectionStart) + '\n' + indent + extraIndent + val.slice(selectionEnd)
+      setVal(newVal)
+      requestAnimationFrame(() => {
+        const pos = selectionStart + 1 + indent.length + extraIndent.length
+        ta.selectionStart = ta.selectionEnd = pos
+      })
+      return
+    }
+
+    // Auto-dedent for closing brackets
+    if ('}])'.includes(e.key)) {
+      const lineStart = val.slice(0, selectionStart).lastIndexOf('\n') + 1
+      const beforeCursor = val.slice(lineStart, selectionStart)
+      if (beforeCursor.trim() === '' && beforeCursor.length >= 2) {
+        e.preventDefault()
+        const dedented = beforeCursor.slice(0, -2)
+        const newVal = val.slice(0, lineStart) + dedented + e.key + val.slice(selectionEnd)
+        setVal(newVal)
+        requestAnimationFrame(() => {
+          const pos = lineStart + dedented.length + 1
+          ta.selectionStart = ta.selectionEnd = pos
+        })
+        return
+      }
+    }
+  }
+
+  // Paste auto-format via native paste
+  const handlePaste = (side: 'left' | 'right', e: React.ClipboardEvent<HTMLTextAreaElement>) => {
+    // Let the paste happen naturally, then after a tick, try to format
+    const setVal = side === 'left' ? setLeftText : setRightText
+    const ta = e.currentTarget
+    requestAnimationFrame(() => {
+      const formatted = formatGraphql(ta.value)
+      if (formatted !== ta.value) {
+        setVal(formatted)
+      }
+    })
+  }
+
+  // Draggable splitter
+  const handleSplitMouseDown = useCallback((e: React.PointerEvent) => {
+    e.preventDefault()
+    setDragging(true)
+    const startX = e.clientX
+    const startSplit = split
+    const container = containerRef.current
+    if (!container) return
+
+    const onMove = (ev: PointerEvent) => {
+      const rect = container.getBoundingClientRect()
+      const pct = ((ev.clientX - rect.left) / rect.width) * 100
+      const clamped = Math.max(2, Math.min(98, pct))
+      setSplit(clamped)
+    }
+
+    const onUp = () => {
+      setDragging(false)
+      window.removeEventListener('pointermove', onMove)
+      window.removeEventListener('pointerup', onUp)
+    }
+
+    window.addEventListener('pointermove', onMove)
+    window.addEventListener('pointerup', onUp)
+  }, [split])
+
+  const handleSplitDoubleClick = useCallback(() => {
+    setSplit(50)
+  }, [])
+
+  // Line/char count
+  const leftLines = leftText ? leftText.split('\n').length : 0
+  const leftChars = leftText.length
+  const rightLines = rightText ? rightText.split('\n').length : 0
+  const rightChars = rightText.length
+
+  // Save history on text change
+  useEffect(() => { leftHistory.save(leftText) }, [leftText, leftHistory])
+  useEffect(() => { rightHistory.save(rightText) }, [rightText, rightHistory])
+
+  // Compute highlight HTML outside of renderPanel to avoid hooks-in-regular-function issue
+  const leftHighlightHtml = useMemo(() => highlightGraphql(leftText), [leftText])
+  const rightHighlightHtml = useMemo(() => highlightGraphql(rightText), [rightText])
+
+  // Render a single panel
+  const renderPanel = (side: 'left' | 'right') => {
+    const text = side === 'left' ? leftText : rightText
+    const setText = side === 'left' ? setLeftText : setRightText
+    const setFocused = side === 'left' ? setLeftFocused : setRightFocused
+    const taRef = side === 'left' ? leftTaRef : rightTaRef
+    const preUnescape = side === 'left' ? leftPreUnescape : rightPreUnescape
+    const highlightHtml = side === 'left' ? leftHighlightHtml : rightHighlightHtml
+    const lines = text ? text.split('\n').length : 0
+    const chars = text.length
+
+    // Scroll sync between textarea and highlight layer
+    const syncScroll = () => {
+      const ta = taRef.current
+      if (!ta) return
+      const highlight = ta.previousElementSibling as HTMLElement | null
+      if (highlight) {
+        highlight.scrollTop = ta.scrollTop
+        highlight.scrollLeft = ta.scrollLeft
+      }
+    }
+
+    return (
+      <div className="flex flex-col h-full" style={{ minWidth: 0 }}>
+        {/* Status bar */}
+        <div className="flex items-center gap-3 px-4 py-1.5 text-xs flex-shrink-0" style={{ color: 'var(--t3)', borderBottom: '1px solid var(--border)' }}>
+          <span className="tabular-nums">{lines} 行 · {chars} 字符</span>
+        </div>
+
+        {/* Action buttons */}
+        <div className="flex items-center gap-1.5 px-3 py-2 flex-shrink-0 flex-wrap" style={{ borderBottom: '1px solid var(--border)' }}>
+          <Btn onClick={side === 'left' ? formatLeft : formatRight} small variant="soft">格式化</Btn>
+          <Btn onClick={side === 'left' ? compressLeft : compressRight} small variant="soft">压缩</Btn>
+          <Btn onClick={side === 'left' ? unescapeLeft : unescapeRight} small variant="soft">反转义</Btn>
+          <Btn
+            onClick={side === 'left' ? restoreLeft : restoreRight}
+            small variant="soft"
+            disabled={preUnescape == null}
+          >还原转义</Btn>
+          <div className="ml-auto flex items-center gap-1.5">
+            <Btn onClick={side === 'left' ? copyLeft : copyRight} small variant="ghost">复制</Btn>
+            <Btn onClick={side === 'left' ? clearLeft : clearRight} small variant="ghost">清空</Btn>
+          </div>
+        </div>
+
+        {/* Code editor area */}
+        <div className="flex-1 relative overflow-hidden" style={{ minHeight: 0 }}>
+          {/* Syntax highlight layer */}
+          <div
+            className="absolute inset-0 overflow-auto pointer-events-none"
+            style={{
+              fontFamily: '"JetBrainsMono Nerd Font", "SF Mono", "Fira Code", "Fira Mono", "Roboto Mono", "Droid Sans Mono", "Cascadia Code", Consolas, "Courier New", monospace',
+              fontSize: 13,
+              lineHeight: 1.65,
+              padding: '10px 12px',
+              whiteSpace: 'pre',
+              tabSize: 2,
+              color: 'var(--text)',
+            }}
+            dangerouslySetInnerHTML={{ __html: highlightHtml || '​' }}
+          />
+          {/* Textarea */}
+          <textarea
+            ref={taRef}
+            value={text}
+            onChange={e => setText(e.target.value)}
+            onFocus={() => setFocused(true)}
+            onBlur={() => setFocused(false)}
+            onKeyDown={e => handleKeyDown(side, e)}
+            onPaste={e => handlePaste(side, e)}
+            onScroll={syncScroll}
+            spellCheck={false}
+            autoComplete="off"
+            className="absolute inset-0 resize-none outline-none"
+            style={{
+              width: '100%',
+              height: '100%',
+              padding: '10px 12px',
+              background: 'transparent',
+              border: 'none',
+              outline: 'none',
+              fontSize: 13,
+              fontFamily: '"JetBrainsMono Nerd Font", "SF Mono", "Fira Code", "Fira Mono", "Roboto Mono", "Droid Sans Mono", "Cascadia Code", Consolas, "Courier New", monospace',
+              lineHeight: 1.65,
+              color: 'transparent',
+              caretColor: 'var(--text)',
+              whiteSpace: 'pre',
+              tabSize: 2,
+              overflow: 'auto',
+              WebkitTextFillColor: 'transparent',
+            }}
+          />
+        </div>
+      </div>
+    )
+  }
+
+  return (
+    <div className="flex flex-col h-full">
+      {/* Header */}
+      <div className="glass flex items-center px-6 py-3 flex-shrink-0" style={{ borderBottom: '1px solid var(--border)' }}>
+        <SectionTitle>GraphQL 格式化</SectionTitle>
+      </div>
+
+      {/* Panels area */}
+      <div ref={containerRef} className="flex-1 flex overflow-hidden" style={{ position: 'relative' }}>
+        {/* Left panel */}
+        <div style={{ width: `${split}%`, flexShrink: 0, overflow: 'hidden', borderRight: dragging ? 'none' : '1px solid var(--border)' }}>
+          {renderPanel('left')}
+        </div>
+
+        {/* Splitter */}
+        <div
+          className="flex-shrink-0 cursor-col-resize select-none"
+          style={{
+            width: 6,
+            cursor: 'col-resize',
+            position: 'relative',
+            zIndex: 10,
+            background: dragging ? 'var(--accent)' : 'transparent',
+            transition: dragging ? 'none' : 'background 0.15s ease',
+          }}
+          onPointerDown={handleSplitMouseDown}
+          onDoubleClick={handleSplitDoubleClick}
+          onPointerEnter={e => { if (!dragging) (e.currentTarget as HTMLElement).style.background = 'var(--accentSub)' }}
+          onPointerLeave={e => { if (!dragging) (e.currentTarget as HTMLElement).style.background = 'transparent' }}
+        >
+          <div
+            className="absolute inset-0 flex items-center justify-center"
+            style={{ pointerEvents: 'none' }}
+          >
+            <div style={{ width: 2, height: 24, borderRadius: 1, background: 'var(--t3)', opacity: 0.5 }} />
+          </div>
+        </div>
+
+        {/* Right panel */}
+        <div style={{ flex: 1, overflow: 'hidden' }}>
+          {renderPanel('right')}
+        </div>
+      </div>
+
+      {/* Toast */}
+      {toast && (
+        <div
+          className="fixed bottom-8 left-1/2 -translate-x-1/2 z-50 px-5 py-2.5 rounded-xl text-sm font-medium pointer-events-none"
+          style={{
+            background: 'var(--text)',
+            color: 'var(--bg)',
+            boxShadow: 'var(--shadowMd)',
+            animation: 'ia-ti .35s cubic-bezier(.34,1.56,.64,1) both',
+          }}
+        >
+          {toast}
+        </div>
+      )}
+    </div>
+  )
+}
+
 // ─── App ──────────────────────────────────────────────────────────────────────
 
-const FULLHEIGHT_TOOLS: ToolKey[] = ['json', 'aiconvert', 'llmbatch', 'base64', 'unicode']
+const FULLHEIGHT_TOOLS: ToolKey[] = ['json', 'aiconvert', 'llmbatch', 'base64', 'unicode', 'graphql']
 
 export default function App() {
   const [theme, setTheme] = useState<ThemeKey>(() => {
@@ -4368,6 +5206,7 @@ export default function App() {
     idgen: <IdGenTool />,
     base64: <Base64Tool />,
     unicode: <UnicodeTool />,
+    graphql: <GraphqlTool />,
   }
 
   return (
