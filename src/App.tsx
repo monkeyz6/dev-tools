@@ -1,10 +1,11 @@
-import React, { useState, useCallback, useRef, useEffect, useMemo } from 'react'
+import React, { useState, useCallback, useRef, useEffect, useLayoutEffect, useMemo, useDeferredValue } from 'react'
 import { BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, Cell, LabelList, ReferenceLine } from 'recharts'
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
 type ThemeKey = 'light' | 'dark' | 'claude' | 'green'
 type ToolKey = 'seedance' | 'json' | 'timestamp' | 'aiconvert' | 'llmbatch' | 'imganalyze'
+  | 'idgen' | 'base64' | 'unicode'
 
 interface ImageItem {
   id: string; order: number; source: 'local' | 'url'; name: string
@@ -117,6 +118,9 @@ const TOOLS: { key: ToolKey; label: string; sub: string; icon: React.ReactNode }
   { key: 'aiconvert', label: 'AI 格式转换', sub: 'OpenAI · Anthropic', icon: <IconConvert /> },
   { key: 'llmbatch', label: 'LLM 批量测试', sub: '并发请求 · 验真', icon: <IconBatch /> },
   { key: 'imganalyze', label: '图片信息识别', sub: '分辨率 · 格式 · 等级', icon: <IconImage /> },
+  { key: 'idgen', label: 'ID 生成器', sub: 'UUID · 随机串 · 批量', icon: <IconId /> },
+  { key: 'base64', label: 'Base64 编解码', sub: 'UTF-8 · URL-safe', icon: <IconCode /> },
+  { key: 'unicode', label: 'Unicode 转换', sub: '\\u · &#x · U+', icon: <IconType /> },
 ]
 
 // ─── Icon Components ──────────────────────────────────────────────────────────
@@ -161,6 +165,27 @@ function IconImage() {
   return (
     <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round">
       <rect x="3" y="4" width="18" height="16" rx="3"/><circle cx="8.5" cy="9.5" r="1.6"/><path d="m4 17 4.5-4.5 3 3L15 11l5 5"/>
+    </svg>
+  )
+}
+function IconId() {
+  return (
+    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round">
+      <path d="M21 2l-2 2m-7.61 7.61a5.5 5.5 0 1 1-7.778 7.778 5.5 5.5 0 0 1 7.777-7.777zm0 0L15.5 7.5m0 0l3 3L22 7l-3-3m-3.5 3.5L19 4"/>
+    </svg>
+  )
+}
+function IconCode() {
+  return (
+    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round">
+      <polyline points="16 18 22 12 16 6"/><polyline points="8 6 2 12 8 18"/>
+    </svg>
+  )
+}
+function IconType() {
+  return (
+    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round">
+      <polyline points="4 7 4 4 20 4 20 7"/><line x1="9" y1="20" x2="15" y2="20"/><line x1="12" y1="4" x2="12" y2="20"/>
     </svg>
   )
 }
@@ -1122,11 +1147,19 @@ function SeedanceTool() {
 
 // ─── Tool: JSON 可视化 ─────────────────────────────────────────────────────────
 
+const JSON_ROW = 20        // 单行高度：查看态/编辑态统一，切换时不跳
+const JSON_PAD_TB = 14     // 内容区上下内边距
+const JSON_PAD_L = 8       // 内容区左内边距（行号列之前）
+const JSON_LINE_NO_W = 24  // 行号列宽度（右对齐，容纳 3 位行号）
+const JSON_FOLD_W = 16     // 折叠箭头位宽
+const JSON_GUTTER_W = JSON_LINE_NO_W + JSON_FOLD_W // 行号(24) + 折叠箭头位(16)
+const JSON_CONTENT_X = JSON_PAD_L + JSON_GUTTER_W // 48px：两态内容真正起始的 x 坐标，必须完全一致，否则悬停切换会横向跳动
+
 const JSON_EDITOR_STYLE: React.CSSProperties = {
   fontFamily: '"JetBrains Mono", monospace',
   fontSize: '12.5px',
-  lineHeight: '20px',
-  padding: '14px 16px',
+  lineHeight: JSON_ROW + 'px',
+  padding: `${JSON_PAD_TB}px 16px ${JSON_PAD_TB}px ${JSON_CONTENT_X}px`,
   tabSize: 2,
   whiteSpace: 'pre',
   margin: 0,
@@ -1161,83 +1194,116 @@ function getVisibleLines(lines: string[], ranges: Map<number, number>, collapsed
   return out
 }
 
-/** 查看态：虚拟滚动 + 行号 + 折叠 + diff 高亮（只读） */
-function JsonTreeView({ text, types, onEdit }: {
-  text: string; types?: ('same' | 'add' | 'rm')[]; onEdit: () => void
+/**
+ * 查看态：虚拟滚动 + 行号 + 折叠 + diff 高亮（只读）。
+ * 行号/折叠箭头列（gutter）悬停不触发编辑；内容列悬停即让父组件切到编辑态。
+ */
+function JsonTreeView({ text, types, collapsed, toggleFold, scrollRef, onContentEnter, onContentActivate }: {
+  text: string; types?: ('same' | 'add' | 'rm')[]
+  collapsed: Set<number>; toggleFold: (line: number) => void
+  scrollRef: React.MutableRefObject<{ top: number; left: number }>
+  onContentEnter: () => void; onContentActivate: (e: React.PointerEvent) => void
 }) {
-  const ROW = 20
   const OVERSCAN = 10
   const lines = useMemo(() => text.split('\n'), [text])
   const ranges = useMemo(() => computeFoldRanges(lines), [lines])
-  const [collapsed, setCollapsed] = useState<Set<number>>(new Set())
-  const [scrollTop, setScrollTop] = useState(0)
+  const [scrollTop, setScrollTop] = useState(scrollRef.current.top)
+  const [viewportH, setViewportH] = useState(0)
   const containerRef = useRef<HTMLDivElement>(null)
 
+  // 挂载时把上次记录的滚动位置带回来，避免悬停切回查看态时视口跳变
+  useLayoutEffect(() => {
+    const el = containerRef.current
+    if (!el) return
+    el.scrollTop = scrollRef.current.top
+    el.scrollLeft = scrollRef.current.left
+    setViewportH(el.clientHeight)
+  }, [])
+
+  useEffect(() => {
+    const el = containerRef.current
+    if (!el) return
+    const ro = new ResizeObserver(() => setViewportH(el.clientHeight))
+    ro.observe(el)
+    return () => ro.disconnect()
+  }, [])
+
   const visible = useMemo(() => getVisibleLines(lines, ranges, collapsed), [lines, ranges, collapsed])
-  const viewportH = containerRef.current?.clientHeight ?? 0
-  const start = Math.max(0, Math.floor(scrollTop / ROW) - OVERSCAN)
-  const end = Math.min(visible.length, Math.ceil((scrollTop + viewportH) / ROW) + OVERSCAN)
+  const start = Math.max(0, Math.floor(scrollTop / JSON_ROW) - OVERSCAN)
+  const end = Math.min(visible.length, Math.ceil((scrollTop + viewportH) / JSON_ROW) + OVERSCAN)
   const slice = visible.slice(start, end)
 
-  const toggle = (line: number) => {
-    setCollapsed(prev => {
-      const next = new Set(prev)
-      if (next.has(line)) next.delete(line); else next.add(line)
-      return next
-    })
+  const onScroll = () => {
+    const el = containerRef.current
+    if (!el) return
+    scrollRef.current = { top: el.scrollTop, left: el.scrollLeft }
+    setScrollTop(el.scrollTop)
   }
 
   return (
     <div className="relative flex-1 min-h-0 overflow-hidden">
-      <div ref={containerRef} onScroll={() => setScrollTop(containerRef.current?.scrollTop ?? 0)}
+      <div ref={containerRef} onScroll={onScroll}
         className="absolute inset-0 overflow-auto"
-        style={{ fontFamily: '"JetBrains Mono", monospace', fontSize: '12.5px', lineHeight: '20px', padding: '14px 16px', tabSize: 2 }}>
-        <div style={{ height: visible.length * ROW, position: 'relative' }}>
-          {slice.map(vi => {
-            const i = visible[vi]
+        style={{ fontFamily: '"JetBrains Mono", monospace', fontSize: '12.5px', lineHeight: JSON_ROW + 'px', padding: `${JSON_PAD_TB}px 16px ${JSON_PAD_TB}px ${JSON_PAD_L}px`, tabSize: 2 }}>
+        <div style={{ height: visible.length * JSON_ROW, position: 'relative' }}>
+          {slice.map((i, k) => {
+            const vi = start + k // 可见序位（用于绝对定位），i 才是真实行号（用于取值/折叠区间）
             const t = types?.[i]
             const bg = t === 'add' ? 'var(--addBg)' : t === 'rm' ? 'var(--rmBg)' : 'transparent'
-            const end = ranges.get(i)
-            const foldable = end != null && end > i
+            const foldEnd = ranges.get(i)
+            const foldable = foldEnd != null && foldEnd > i
             const isCollapsed = collapsed.has(i)
             return (
-              <div key={i} style={{ position: 'absolute', top: vi * ROW, left: 0, right: 0, height: ROW, display: 'flex', alignItems: 'center', background: bg }}>
-                <span className="select-none" style={{ width: 40, flexShrink: 0, textAlign: 'right', paddingRight: 8, color: 'var(--t3)', fontSize: '11px' }}>{i + 1}</span>
+              <div key={i} style={{ position: 'absolute', top: vi * JSON_ROW, left: 0, right: 0, height: JSON_ROW, display: 'flex', alignItems: 'center', background: bg }}>
+                <span data-testid="json-gutter" className="select-none" style={{ width: JSON_LINE_NO_W, flexShrink: 0, textAlign: 'right', paddingRight: 4, color: 'var(--t3)', fontSize: '11px', position: 'sticky', left: 0, background: 'var(--code)' }}>{i + 1}</span>
                 {foldable ? (
-                  <button onClick={() => toggle(i)} aria-label={isCollapsed ? '展开' : '折叠'}
+                  <button onClick={() => toggleFold(i)} aria-label={isCollapsed ? '展开' : '折叠'}
                     className="flex-shrink-0 border-0 bg-transparent cursor-pointer outline-none"
-                    style={{ width: 18, height: 18, display: 'flex', alignItems: 'center', justifyContent: 'center', color: 'var(--t2)', padding: 0, fontFamily: 'inherit', fontSize: '10px' }}>
+                    style={{ width: JSON_FOLD_W, height: JSON_FOLD_W, display: 'flex', alignItems: 'center', justifyContent: 'center', color: 'var(--t2)', padding: 0, fontFamily: 'inherit', fontSize: '10px', position: 'sticky', left: JSON_LINE_NO_W, background: 'var(--code)' }}>
                     {isCollapsed ? '▸' : '▾'}
                   </button>
-                ) : <span className="flex-shrink-0" style={{ width: 18 }} />}
-                <span style={{ whiteSpace: 'pre', color: 'var(--text)' }} dangerouslySetInnerHTML={{ __html: highlightJson(lines[i]) || '​' }} />
+                ) : <span className="flex-shrink-0" style={{ width: JSON_FOLD_W, position: 'sticky', left: JSON_LINE_NO_W, background: 'var(--code)' }} />}
+                <span data-testid="json-content" onMouseEnter={onContentEnter} onPointerDown={onContentActivate}
+                  style={{ whiteSpace: 'pre', color: 'var(--text)', flex: 1, height: '100%' }}
+                  dangerouslySetInnerHTML={{ __html: highlightJson(lines[i]) || '​' }} />
               </div>
             )
           })}
         </div>
       </div>
-      {/* 编辑入口 */}
-      <button onClick={onEdit} className="absolute top-2 right-3"
-        style={{ background: 'var(--bg)', border: '1px solid var(--border)', borderRadius: 999, color: 'var(--t2)', fontSize: 11, padding: '3px 10px', cursor: 'pointer', boxShadow: 'var(--shadow)' }}>
-        ✎ 编辑
-      </button>
     </div>
   )
 }
 
-function DiffEditor({ value, onChange, placeholder, lineTypes, onFocus, onBlur, autoFocus }: {
+function DiffEditor({ value, onChange, placeholder, lineTypes, scrollRef, onFocus, onBlur, autoFocus, onGutterEnter }: {
   value: string; onChange: (v: string) => void
   placeholder?: string; lineTypes?: ('same' | 'add' | 'rm')[]
+  scrollRef: React.MutableRefObject<{ top: number; left: number }>
   onFocus?: () => void; onBlur?: () => void; autoFocus?: boolean
+  onGutterEnter: () => void
 }) {
   const taRef = useRef<HTMLTextAreaElement>(null)
   const backRef = useRef<HTMLPreElement>(null)
+  const gutterRef = useRef<HTMLDivElement>(null)
   const lines = value.length ? value.split('\n') : ['']
 
   const sync = () => {
-    const ta = taRef.current, back = backRef.current
-    if (ta && back) { back.scrollTop = ta.scrollTop; back.scrollLeft = ta.scrollLeft }
+    const ta = taRef.current, back = backRef.current, gutter = gutterRef.current
+    if (!ta) return
+    if (back) { back.scrollTop = ta.scrollTop; back.scrollLeft = ta.scrollLeft }
+    if (gutter) gutter.style.transform = `translateY(${-ta.scrollTop}px)`
+    scrollRef.current = { top: ta.scrollTop, left: ta.scrollLeft }
   }
+
+  // 挂载时把查看态留下的滚动位置带回来，避免悬停切换时视口跳变
+  useLayoutEffect(() => {
+    const ta = taRef.current
+    if (!ta) return
+    ta.scrollTop = scrollRef.current.top
+    ta.scrollLeft = scrollRef.current.left
+    sync()
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [])
 
   return (
     <div className="relative flex-1 min-h-0 overflow-hidden">
@@ -1249,10 +1315,8 @@ function DiffEditor({ value, onChange, placeholder, lineTypes, onFocus, onBlur, 
         ) : lines.map((ln, i) => {
           const t = lineTypes?.[i]
           const bg = t === 'add' ? 'var(--addBg)' : t === 'rm' ? 'var(--rmBg)' : 'transparent'
-          const mark = t === 'add' ? { c: 'var(--ok)', s: '+' } : t === 'rm' ? { c: 'var(--err)', s: '−' } : null
           return (
             <div key={i} style={{ background: bg, position: 'relative' }}>
-              {mark && <span className="absolute select-none" style={{ left: -12, color: mark.c, fontWeight: 700 }}>{mark.s}</span>}
               <span dangerouslySetInnerHTML={{ __html: highlightJson(ln) || '​' }} />
             </div>
           )
@@ -1262,31 +1326,81 @@ function DiffEditor({ value, onChange, placeholder, lineTypes, onFocus, onBlur, 
         ref={taRef} value={value} onChange={e => onChange(e.target.value)} onScroll={sync}
         spellCheck={false} wrap="off" autoFocus={autoFocus}
         onFocus={onFocus} onBlur={onBlur}
+        data-testid="json-content"
         className="absolute inset-0 w-full h-full resize-none outline-none overflow-auto"
         style={{ ...JSON_EDITOR_STYLE, background: 'transparent', color: 'transparent', caretColor: 'var(--accent)', border: 0, zIndex: 1 }}
       />
+      {/* 只读行号列：宽度与查看态一致，悬停即切回查看态，与内容区构成双向通道 */}
+      <div onMouseEnter={onGutterEnter} data-testid="json-gutter"
+        className="absolute top-0 bottom-0 left-0 overflow-hidden select-none"
+        style={{ width: JSON_CONTENT_X, zIndex: 2, background: 'var(--code)' }}>
+        <div ref={gutterRef} style={{ position: 'absolute', top: JSON_PAD_TB, left: 0, right: 0 }}>
+          {lines.map((_, i) => {
+            const t = lineTypes?.[i]
+            const bg = t === 'add' ? 'var(--addBg)' : t === 'rm' ? 'var(--rmBg)' : 'transparent'
+            const mark = t === 'add' ? { c: 'var(--ok)', s: '+' } : t === 'rm' ? { c: 'var(--err)', s: '−' } : null
+            return (
+              <div key={i} style={{ height: JSON_ROW, lineHeight: JSON_ROW + 'px', display: 'flex', alignItems: 'center', background: bg }}>
+                <span style={{ width: JSON_LINE_NO_W, flexShrink: 0, textAlign: 'right', paddingRight: 4, color: 'var(--t3)', fontSize: '11px', marginLeft: JSON_PAD_L }}>{i + 1}</span>
+                <span style={{ width: JSON_FOLD_W, flexShrink: 0, display: 'flex', alignItems: 'center', justifyContent: 'center', color: mark?.c ?? 'transparent', fontWeight: 700, fontSize: '11px' }}>{mark?.s ?? ''}</span>
+              </div>
+            )
+          })}
+        </div>
+      </div>
     </div>
   )
 }
 
-/** 单侧面板：查看态（虚拟滚动折叠树）/ 编辑态（textarea 叠层高亮） */
-function JsonPane({ value, onChange, fmt, types, focus, setFocus, editLock, setEditLock, placeholder, style }: {
+/**
+ * 单侧面板：鼠标进入内容区即编辑（不改写内容、不抢焦点），行号列悬停/移出面板/失焦则回到查看态。
+ * 折叠状态与滚动位置提升到本组件持有，避免查看态/编辑态互相切换时被重置。
+ */
+function JsonPane({ value, onChange, fmt, types, placeholder, style, paneId }: {
   value: string; onChange: (v: string) => void; fmt: { ok: boolean; text: string }
-  types?: ('same' | 'add' | 'rm')[]; focus: boolean; setFocus: (v: boolean) => void
-  editLock: boolean; setEditLock: (v: boolean) => void; placeholder: string; style?: React.CSSProperties
+  types?: ('same' | 'add' | 'rm')[]; placeholder: string; style?: React.CSSProperties
+  paneId: 'a' | 'b'
 }) {
-  // 查看态：未在编辑（未聚焦且未手动锁定编辑）且 JSON 合法且非空
-  const viewMode = !editLock && !focus && fmt.ok && value.trim() !== ''
+  const [focus, setFocus] = useState(false)
+  const [contentHover, setContentHover] = useState(false)
+  const [wantFocus, setWantFocus] = useState(false)
+  const [collapsed, setCollapsed] = useState<Set<number>>(new Set())
+  const scrollRef = useRef({ top: 0, left: 0 })
+  const isTouchRef = useRef(false)
+
+  // 查看态：JSON 合法且非空，且鼠标未停留在内容区、textarea 未聚焦
+  const viewMode = fmt.ok && value.trim() !== '' && !focus && !contentHover
+
+  const toggleFold = (line: number) => {
+    setCollapsed(prev => {
+      const next = new Set(prev)
+      if (next.has(line)) next.delete(line); else next.add(line)
+      return next
+    })
+  }
+
   return (
-    <div className="flex-1 min-w-0 flex flex-col overflow-hidden" style={style}>
+    <div data-testid={`json-pane-${paneId}`} className="flex-1 min-w-0 flex flex-col overflow-hidden" style={style}
+      onMouseLeave={() => setContentHover(false)}>
       {viewMode ? (
-        <JsonTreeView text={fmt.text} types={types}
-          onEdit={() => { onChange(fmt.text); setEditLock(true) }} />
+        <JsonTreeView text={value} types={types} collapsed={collapsed} toggleFold={toggleFold} scrollRef={scrollRef}
+          onContentEnter={() => setContentHover(true)}
+          onContentActivate={(e) => {
+            if (e.pointerType !== 'mouse') isTouchRef.current = true
+            setContentHover(true)
+            setWantFocus(true)
+          }} />
       ) : (
-        <DiffEditor value={value} onChange={onChange} placeholder={placeholder} lineTypes={types}
-          onFocus={() => setFocus(true)}
-          onBlur={() => { setFocus(false); setEditLock(false) }}
-          autoFocus={editLock} />
+        <DiffEditor value={value} onChange={onChange} placeholder={placeholder} lineTypes={types} scrollRef={scrollRef}
+          onFocus={() => { setFocus(true); setWantFocus(false) }}
+          onBlur={() => {
+            setFocus(false)
+            setWantFocus(false)
+            // 触屏无「悬停移出」概念，失焦即视为退出编辑，避免卡在编辑态出不来
+            if (isTouchRef.current) { setContentHover(false); isTouchRef.current = false }
+          }}
+          onGutterEnter={() => setContentHover(false)}
+          autoFocus={wantFocus} />
       )}
     </div>
   )
@@ -1296,10 +1410,6 @@ function JsonTool() {
   const [left, setLeft] = useState('')
   const [right, setRight] = useState('')
   const [showDiff, setShowDiff] = useState(false)
-  const [leftFocus, setLeftFocus] = useState(false)
-  const [rightFocus, setRightFocus] = useState(false)
-  const [leftEdit, setLeftEdit] = useState(false)
-  const [rightEdit, setRightEdit] = useState(false)
   const [leftW, setLeftW] = useState(50)
   const containerRef = useRef<HTMLDivElement>(null)
   const dragRef = useRef<{ startX: number; startW: number } | null>(null)
@@ -1369,8 +1479,7 @@ function JsonTool() {
       </div>
       <div className="flex-1 flex overflow-hidden" ref={containerRef} style={{ background: 'var(--code)' }}>
         <div style={{ flex: `0 0 ${leftW}%`, minWidth: 0 }} className="flex flex-col overflow-hidden">
-          <JsonPane value={left} onChange={setLeft} fmt={leftFmt} types={leftTypes}
-            focus={leftFocus} setFocus={setLeftFocus} editLock={leftEdit} setEditLock={setLeftEdit}
+          <JsonPane paneId="a" value={left} onChange={setLeft} fmt={leftFmt} types={leftTypes}
             placeholder={'{\n  "name": "Alice",\n  "age": 30\n}'} />
         </div>
         <div onPointerDown={onDividerDown} className="flex-shrink-0"
@@ -1378,8 +1487,7 @@ function JsonTool() {
           <div className="h-full w-px" style={{ background: 'var(--border)' }} />
         </div>
         <div className="flex-1 min-w-0 flex flex-col overflow-hidden">
-          <JsonPane value={right} onChange={setRight} fmt={rightFmt} types={rightTypes}
-            focus={rightFocus} setFocus={setRightFocus} editLock={rightEdit} setEditLock={setRightEdit}
+          <JsonPane paneId="b" value={right} onChange={setRight} fmt={rightFmt} types={rightTypes}
             placeholder={'{\n  "name": "Bob",\n  "age": 25\n}'} />
         </div>
       </div>
@@ -3354,9 +3462,653 @@ function Sidebar({ tool, setTool, theme, setTheme }: {
   )
 }
 
+// ─── ID / 编码 纯函数 ──────────────────────────────────────────────────────────
+
+// 随机字节源：crypto.getRandomValues（密码学安全，禁止 Math.random）。单次上限 65536，超限自动分块。
+function randomBytes(n: number): Uint8Array {
+  const out = new Uint8Array(n)
+  for (let filled = 0; filled < n; filled += 65536) {
+    crypto.getRandomValues(out.subarray(filled, Math.min(filled + 65536, n)))
+  }
+  return out
+}
+
+// 256 项 hex 查表：避免 toString(16).padStart 在批量生成下的开销
+const HEX_LUT: string[] = Array.from({ length: 256 }, (_, i) => i.toString(16).padStart(2, '0'))
+
+type UuidFmt = 'standard' | 'compact' | 'braced' | 'urn'
+
+// 生成 count 条 UUID 的原始字节（每条 16 字节、扁平排布），并打好版本位/variant 位
+function uuidBytes(count: number, version: 'v4' | 'v7'): Uint8Array {
+  const n = Math.max(1, Math.floor(count))
+  const raw = randomBytes(n * 16)
+  let v7Ms = 0
+  let v7Counter = -1
+  for (let i = 0; i < n; i++) {
+    const b = i * 16
+    if (version === 'v4') {
+      raw[b + 6] = (raw[b + 6] & 0x0f) | 0x40 // version 4
+      raw[b + 8] = (raw[b + 8] & 0x3f) | 0x80 // variant 10xx
+    } else {
+      // v7（RFC 9562）：前 48 bit 为大端毫秒时间戳；同一毫秒内用 12 bit 计数器保证批内单调递增
+      const now = Date.now()
+      if (now !== v7Ms) { v7Ms = now; v7Counter = ((raw[b + 6] & 0x0f) << 8) | raw[b + 7] }
+      else { v7Counter = (v7Counter + 1) & 0x0fff }
+      raw[b + 0] = (v7Ms / 2 ** 40) & 0xff
+      raw[b + 1] = (v7Ms / 2 ** 32) & 0xff
+      raw[b + 2] = (v7Ms / 2 ** 24) & 0xff
+      raw[b + 3] = (v7Ms / 2 ** 16) & 0xff
+      raw[b + 4] = (v7Ms / 2 ** 8) & 0xff
+      raw[b + 5] = v7Ms & 0xff
+      raw[b + 6] = 0x70 | ((v7Counter >> 8) & 0x0f) // version 7 + 12 bit rand_a 高 4 位
+      raw[b + 7] = v7Counter & 0xff
+      raw[b + 8] = (raw[b + 8] & 0x3f) | 0x80 // variant 10xx
+    }
+  }
+  return raw
+}
+
+// 将原始字节按格式排版为 UUID 字符串（大小写在最后一次性处理）
+function formatUuids(raw: Uint8Array, fmt: UuidFmt, upper: boolean): string[] {
+  const out: string[] = new Array(raw.length / 16)
+  for (let i = 0; i < raw.length; i += 16) {
+    let s = ''
+    for (let j = 0; j < 16; j++) s += HEX_LUT[raw[i + j]]
+    if (fmt !== 'compact') {
+      s = s.slice(0, 8) + '-' + s.slice(8, 12) + '-' + s.slice(12, 16) + '-' + s.slice(16, 20) + '-' + s.slice(20)
+    }
+    if (fmt === 'braced') s = '{' + s + '}'
+    else if (fmt === 'urn') s = 'urn:uuid:' + s
+    out[i / 16] = upper ? s.toUpperCase() : s
+  }
+  return out
+}
+
+interface RandOpts {
+  len: number
+  upper: boolean
+  lower: boolean
+  digit: boolean
+  symbol: boolean
+  custom: string
+  excludeAmbiguous: boolean
+  requireEach: boolean
+}
+
+const RAND_UPPER = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ'
+const RAND_LOWER = 'abcdefghijklmnopqrstuvwxyz'
+const RAND_DIGIT = '0123456789'
+const RAND_SYMBOL = '!@#$%^&*()_+-=[]{}|;:,.<>?'
+const RAND_AMBIGUOUS = '0O1lI'
+
+function randActiveClasses(o: RandOpts): number {
+  let n = 0
+  if (o.upper) n++
+  if (o.lower) n++
+  if (o.digit) n++
+  if (o.symbol) n++
+  if (o.custom) n++
+  return n
+}
+
+// 生成 count 条随机字符串：无模偏采样 + 每类至少 1 个（Fisher-Yates 洗牌打散占位字符）
+function genRandomStrings(opts: RandOpts, count: number): string[] {
+  const n = Math.max(1, Math.floor(count))
+  const len = Math.max(1, Math.floor(opts.len))
+
+  const classes: string[] = []
+  if (opts.upper) classes.push(RAND_UPPER)
+  if (opts.lower) classes.push(RAND_LOWER)
+  if (opts.digit) classes.push(RAND_DIGIT)
+  if (opts.symbol) classes.push(RAND_SYMBOL)
+  const custom = [...new Set(opts.custom.split(''))].join('')
+  if (custom) classes.push(custom)
+
+  // 剔除易混淆字符（对池与各字符集同时生效）
+  const clean = (s: string) =>
+    opts.excludeAmbiguous ? [...s].filter(ch => !RAND_AMBIGUOUS.includes(ch)).join('') : s
+  let pool = [...new Set(classes.map(clean).join('').split(''))]
+  if (pool.length === 0) pool = [...RAND_UPPER] // 全被剔除时的兜底
+  const effectiveClasses = classes.map(clean).filter(s => s.length > 0)
+  const requireEach = opts.requireEach && len >= effectiveClasses.length && effectiveClasses.length > 0
+
+  let bytes = randomBytes(65536)
+  let pos = 0
+  // 无模偏采样：丢弃 ≥ max 的字节，避免 % 引入偏差；耗尽自动换一块
+  const randByte = (divisor: number): number => {
+    const max = Math.floor(256 / divisor) * divisor
+    while (true) {
+      if (pos >= bytes.length) { bytes = randomBytes(65536); pos = 0 }
+      const b = bytes[pos++]
+      if (b < max) return b
+    }
+  }
+
+  const out: string[] = new Array(n)
+  for (let k = 0; k < n; k++) {
+    const arr: string[] = new Array(len)
+    let idx = 0
+    if (requireEach) {
+      for (const s of effectiveClasses) arr[idx++] = s[randByte(s.length) % s.length]
+    }
+    while (idx < len) arr[idx++] = pool[randByte(pool.length) % pool.length]
+    for (let i = arr.length - 1; i > 0; i--) {
+      const j = randByte(i + 1) % (i + 1)
+      const tmp = arr[i]; arr[i] = arr[j]; arr[j] = tmp
+    }
+    out[k] = arr.join('')
+  }
+  return out
+}
+
+type B64DecodeResult = { ok: true; text: string; valid: boolean } | { ok: false; error: string }
+
+function encodeB64(s: string, urlSafe: boolean): string {
+  const bytes = new TextEncoder().encode(s)
+  let binary = ''
+  const CHUNK = 0x8000 // 32K 分块：避免一次 apply 超大数组导致栈溢出
+  for (let i = 0; i < bytes.length; i += CHUNK) {
+    binary += String.fromCharCode.apply(null, bytes.subarray(i, i + CHUNK) as unknown as number[])
+  }
+  let b64 = btoa(binary)
+  if (urlSafe) b64 = b64.replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '')
+  return b64
+}
+
+function decodeB64(s: string, lenient: boolean): B64DecodeResult {
+  let clean = s
+  if (lenient) {
+    clean = clean.replace(/\s+/g, '')
+    clean = clean.replace(/-/g, '+').replace(/_/g, '/')
+    if (clean.length % 4 === 2) clean += '=='
+    else if (clean.length % 4 === 3) clean += '='
+  }
+  let binary: string
+  try {
+    binary = atob(clean)
+  } catch {
+    return { ok: false, error: '无效的 Base64：字符集不合法或长度错误' }
+  }
+  const bytes = new Uint8Array(binary.length)
+  for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i)
+  try {
+    return { ok: true, text: new TextDecoder('utf-8', { fatal: true }).decode(bytes), valid: true }
+  } catch {
+    return { ok: true, text: new TextDecoder('utf-8', { fatal: false }).decode(bytes), valid: false }
+  }
+}
+
+type UniFmt = 'js' | 'es6' | 'htmlHex' | 'htmlDec' | 'codePoint' | 'percent'
+
+const UNI_FORMATS: { value: UniFmt; label: string; hint: string }[] = [
+  { value: 'js', label: '\\uXXXX（JS / JSON）', hint: 'UTF-16 单元，非 BMP 字符拆为代理对' },
+  { value: 'es6', label: '\\u{XXXXX}（ES6）', hint: '按码点输出，直接支持 emoji' },
+  { value: 'htmlHex', label: '&#x4E2D;（HTML 十六进制）', hint: 'HTML 实体，十六进制码点' },
+  { value: 'htmlDec', label: '&#20013;（HTML 十进制）', hint: 'HTML 实体，十进制码点' },
+  { value: 'codePoint', label: 'U+4E2D（标准记法）', hint: 'Unicode 标准码点记法' },
+  { value: 'percent', label: '%u4E2D（旧 escape）', hint: 'UTF-16 单元，%u 旧式 URL 编码' },
+]
+
+const uniHex = (n: number, lower: boolean) => (lower ? n.toString(16) : n.toString(16).toUpperCase())
+const uniHex4 = (n: number, lower: boolean) => uniHex(n, lower).padStart(4, '0')
+
+// 编码：按码点迭代，正确处理代理对；结果 push 进数组，避免字符串 += 累加
+function encodeUnicode(s: string, fmt: UniFmt, onlyNonAscii: boolean, lowerHex: boolean): string {
+  const parts: string[] = []
+  for (const ch of s) {
+    const cp = ch.codePointAt(0)!
+    if (onlyNonAscii && cp < 0x80) { parts.push(ch); continue }
+    if (fmt === 'js' || fmt === 'percent') {
+      const hi = ch.charCodeAt(0)
+      const escaped = fmt === 'js' ? '\\u' : '%u'
+      if (hi >= 0xd800 && hi <= 0xdbff && ch.length === 2) {
+        parts.push(escaped + uniHex4(hi, lowerHex) + escaped + uniHex4(ch.charCodeAt(1), lowerHex))
+      } else {
+        parts.push(escaped + uniHex4(hi, lowerHex))
+      }
+    } else if (fmt === 'es6') {
+      parts.push('\\u{' + uniHex(cp, lowerHex) + '}')
+    } else if (fmt === 'htmlHex') {
+      parts.push('&#x' + uniHex(cp, lowerHex) + ';')
+    } else if (fmt === 'htmlDec') {
+      parts.push('&#' + cp + ';')
+    } else {
+      parts.push('U+' + uniHex(cp, lowerHex) + ' ')
+    }
+  }
+  return parts.join('')
+}
+
+// 解码：单趟正则混合识别 6 种写法，可混在同一段文本
+const UNI_DECODE_RE = /\\u\{([0-9a-fA-F]{1,6})\}|\\u([0-9a-fA-F]{4})|%u([0-9a-fA-F]{4})|&#x([0-9a-fA-F]{1,6});|&#(\d{1,7});|U\+([0-9a-fA-F]{4,6})\s?/g
+
+function decodeUnicode(s: string): string {
+  const parts: string[] = []
+  let last = 0
+  UNI_DECODE_RE.lastIndex = 0
+  let m: RegExpExecArray | null
+  while ((m = UNI_DECODE_RE.exec(s)) !== null) {
+    if (m.index > last) parts.push(s.slice(last, m.index))
+    if (m[1] !== undefined) parts.push(String.fromCodePoint(parseInt(m[1], 16)))
+    else if (m[2] !== undefined || m[3] !== undefined) parts.push(String.fromCharCode(parseInt((m[2] ?? m[3])!, 16)))
+    else if (m[4] !== undefined) parts.push(String.fromCodePoint(parseInt(m[4], 16)))
+    else if (m[5] !== undefined) parts.push(String.fromCodePoint(parseInt(m[5], 10)))
+    else if (m[6] !== undefined) parts.push(String.fromCodePoint(parseInt(m[6], 16)))
+    last = m.index + m[0].length
+  }
+  if (last < s.length) parts.push(s.slice(last))
+  return parts.join('')
+}
+
+// ─── Tool: ID 生成器 ───────────────────────────────────────────────────────────
+
+const ID_COUNTS = [1, 10, 50, 100, 1000]
+
+const RAND_PRESETS: { label: string; patch: Partial<RandOpts> }[] = [
+  { label: '强密码', patch: { len: 24, upper: true, lower: true, digit: true, symbol: true, custom: '', excludeAmbiguous: true, requireEach: true } },
+  { label: 'API Key', patch: { len: 32, upper: true, lower: true, digit: true, symbol: false, custom: '', excludeAmbiguous: true, requireEach: true } },
+  { label: '纯数字 ID', patch: { len: 20, upper: false, lower: false, digit: true, symbol: false, custom: '', excludeAmbiguous: false, requireEach: false } },
+  { label: '短码', patch: { len: 8, upper: true, lower: false, digit: true, symbol: false, custom: '', excludeAmbiguous: true, requireEach: false } },
+]
+
+type IdMode = 'uuid' | 'rand'
+
+interface IdGenOpts {
+  mode: IdMode
+  uuidVersion: 'v4' | 'v7'
+  uuidFmt: UuidFmt
+  upper: boolean
+  count: number
+  rand: RandOpts
+}
+
+const DEFAULT_IDGEN_OPTS: IdGenOpts = {
+  mode: 'uuid', uuidVersion: 'v4', uuidFmt: 'standard', upper: false, count: 10,
+  rand: { len: 24, upper: true, lower: true, digit: true, symbol: true, custom: '', excludeAmbiguous: true, requireEach: true },
+}
+
+function loadIdGenOpts(): IdGenOpts {
+  if (typeof window === 'undefined') return DEFAULT_IDGEN_OPTS
+  try {
+    const raw = localStorage.getItem('idgen-opts')
+    if (!raw) return DEFAULT_IDGEN_OPTS
+    const p = JSON.parse(raw)
+    return { ...DEFAULT_IDGEN_OPTS, ...p, rand: { ...DEFAULT_IDGEN_OPTS.rand, ...(p.rand ?? {}) } }
+  } catch { return DEFAULT_IDGEN_OPTS }
+}
+function saveIdGenOpts(o: IdGenOpts) { try { localStorage.setItem('idgen-opts', JSON.stringify(o)) } catch { /* ignore */ } }
+
+function IdGenTool() {
+  const [opts, setOpts] = useState<IdGenOpts>(loadIdGenOpts)
+  const [seed, setSeed] = useState(0)
+  const [customCount, setCustomCount] = useState('')
+  const deferredCount = useDeferredValue(opts.count)
+
+  useEffect(() => { saveIdGenOpts(opts) }, [opts])
+
+  const set = <K extends keyof IdGenOpts>(k: K, v: IdGenOpts[K]) => setOpts(o => ({ ...o, [k]: v }))
+  const setRand = (patch: Partial<RandOpts>) => setOpts(o => ({ ...o, rand: { ...o.rand, ...patch } }))
+
+  const count = Math.min(1000, Math.max(1, opts.count || 1))
+
+  // 熵与格式分离：切格式/大小写只重新排版，不重新取随机数
+  const raw = useMemo(() => uuidBytes(count, opts.uuidVersion), [count, opts.uuidVersion, seed])
+  const uuidLines = useMemo(() => formatUuids(raw, opts.uuidFmt, opts.upper), [raw, opts.uuidFmt, opts.upper])
+  const uuidText = useMemo(() => uuidLines.join('\n'), [uuidLines])
+  const randLines = useMemo(() => genRandomStrings(opts.rand, deferredCount), [opts.rand, deferredCount, seed])
+  const randText = useMemo(() => randLines.join('\n'), [randLines])
+
+  const lines = opts.mode === 'uuid' ? uuidLines : randLines
+  const text = opts.mode === 'uuid' ? uuidText : randText
+  const first = lines[0] ?? ''
+
+  const download = () => {
+    const blob = new Blob([text], { type: 'text/plain' })
+    const url = URL.createObjectURL(blob)
+    const a = document.createElement('a')
+    a.href = url
+    a.download = opts.mode === 'uuid' ? 'uuids.txt' : 'random-strings.txt'
+    a.click()
+    URL.revokeObjectURL(url)
+  }
+
+  const setCount = (n: number) => set('count', Math.min(1000, Math.max(1, Math.floor(n))))
+
+  return (
+    <div className="mx-auto max-w-2xl px-6 py-12">
+      <SectionTitle>ID 生成器</SectionTitle>
+      <p className="text-sm mb-8" style={{ color: 'var(--t2)' }}>UUID 与随机字符串批量生成，全部本地计算</p>
+
+      <div className="mb-6">
+        <SegmentedControl
+          value={opts.mode}
+          options={[{ value: 'uuid', label: 'UUID' }, { value: 'rand', label: '随机字符串' }]}
+          onChange={v => set('mode', v as IdMode)}
+        />
+      </div>
+
+      {opts.mode === 'uuid' ? (
+        <Card>
+          <div className="flex flex-col gap-5">
+            <div>
+              <Label className="block mb-1.5">版本</Label>
+              <SegmentedControl
+                value={opts.uuidVersion}
+                options={[{ value: 'v4', label: 'v4 随机' }, { value: 'v7', label: 'v7 时间有序' }]}
+                onChange={v => set('uuidVersion', v as 'v4' | 'v7')}
+              />
+              <p className="text-xs mt-2 leading-relaxed" style={{ color: 'var(--t3)' }}>
+                {opts.uuidVersion === 'v4'
+                  ? 'v4 纯随机生成，适合通用标识符'
+                  : 'v7 前 48 位为毫秒时间戳，批量结果按生成顺序递增，适合数据库主键'}
+              </p>
+            </div>
+            <div>
+              <Label className="block mb-1.5">输出格式</Label>
+              <CustomSelect
+                value={opts.uuidFmt}
+                onChange={v => set('uuidFmt', v as UuidFmt)}
+                options={[
+                  { value: 'standard', label: '标准（带横杠）' },
+                  { value: 'compact', label: '无横杠' },
+                  { value: 'braced', label: '大括号' },
+                  { value: 'urn', label: 'urn:uuid:' },
+                ]}
+              />
+            </div>
+            <Toggle value={opts.upper} onChange={v => set('upper', v)} label="大写字母" />
+          </div>
+        </Card>
+      ) : (
+        <Card>
+          <div className="flex items-center gap-3 mb-5">
+            <h3 className="font-semibold text-sm" style={{ color: 'var(--text)' }}>规则</h3>
+            <div className="ml-auto">
+              <SegmentedControl
+                value=""
+                options={RAND_PRESETS.map(p => ({ value: p.label, label: p.label }))}
+                onChange={v => { const p = RAND_PRESETS.find(x => x.label === v); if (p) setRand(p.patch) }}
+              />
+            </div>
+          </div>
+          <div className="flex flex-col gap-5">
+            <div>
+              <div className="flex items-center justify-between mb-1.5">
+                <Label>长度</Label>
+                <span className="text-sm font-semibold tabular-nums" style={{ color: 'var(--accent)', fontFamily: '"JetBrains Mono", monospace' }}>{opts.rand.len}</span>
+              </div>
+              <input
+                type="range" min={1} max={256} value={opts.rand.len}
+                onChange={e => setRand({ len: parseInt(e.target.value, 10) })}
+                className="w-full cursor-pointer"
+                style={{ accentColor: 'var(--accent)' }}
+              />
+            </div>
+            <div>
+              <Label className="block mb-2">字符集</Label>
+              <div className="grid grid-cols-2 gap-x-6 gap-y-2">
+                <Toggle value={opts.rand.upper} onChange={v => setRand({ upper: v })} label="大写 A-Z" />
+                <Toggle value={opts.rand.lower} onChange={v => setRand({ lower: v })} label="小写 a-z" />
+                <Toggle value={opts.rand.digit} onChange={v => setRand({ digit: v })} label="数字 0-9" />
+                <Toggle value={opts.rand.symbol} onChange={v => setRand({ symbol: v })} label="符号 !@#$%^&*" />
+              </div>
+            </div>
+            <div>
+              <Label className="block mb-1.5">自定义追加字符</Label>
+              <CustomInput value={opts.rand.custom} onChange={v => setRand({ custom: v })} placeholder="如 -_ 或自定义字符集" mono />
+            </div>
+            <div className="flex flex-col gap-2.5">
+              <Toggle value={opts.rand.excludeAmbiguous} onChange={v => setRand({ excludeAmbiguous: v })} label="排除易混淆字符 (0 O 1 l I)" />
+              <div className="flex items-center gap-2">
+                <Toggle value={opts.rand.requireEach} onChange={v => setRand({ requireEach: v })} label="每类至少包含 1 个" />
+                {opts.rand.requireEach && opts.rand.len < randActiveClasses(opts.rand) && (
+                  <Badge color="warn">长度小于启用字符集数，已自动降级</Badge>
+                )}
+              </div>
+            </div>
+          </div>
+        </Card>
+      )}
+
+      <Card className="mt-5">
+        <div className="flex items-center gap-3 mb-4">
+          <h3 className="font-semibold text-sm" style={{ color: 'var(--text)' }}>生成数量</h3>
+          <Badge>{count} 条</Badge>
+        </div>
+        <div className="flex items-center gap-3 flex-wrap">
+          <SegmentedControl
+            value={ID_COUNTS.includes(count) ? String(count) : ''}
+            options={ID_COUNTS.map(c => ({ value: String(c), label: c === 1 ? '1' : String(c) }))}
+            onChange={v => { setCount(parseInt(v, 10)); setCustomCount('') }}
+          />
+          <div className="flex items-center gap-2">
+            <span className="text-xs flex-shrink-0" style={{ color: 'var(--t3)' }}>自定义</span>
+            <CustomInput
+              value={customCount}
+              onChange={v => {
+                const digits = v.replace(/\D/g, '')
+                setCustomCount(digits)
+                const n = parseInt(digits, 10)
+                if (!isNaN(n) && n > 0) setCount(n)
+              }}
+              placeholder="1–1000"
+              mono
+              className="w-24"
+            />
+          </div>
+        </div>
+      </Card>
+
+      <Card className="mt-5">
+        <div className="flex items-center mb-3">
+          <h3 className="font-semibold text-sm" style={{ color: 'var(--text)' }}>生成结果</h3>
+          <div className="ml-auto flex items-center gap-2">
+            <Btn onClick={() => setSeed(s => s + 1)} variant="accent" small>重新生成</Btn>
+            <CopyBtn text={text} />
+            <Btn onClick={download} variant="soft" small>下载 .txt</Btn>
+          </div>
+        </div>
+        {first && (
+          <div className="flex items-center gap-3 px-4 py-3 rounded-xl mb-3" style={{ background: 'var(--s1)', border: '1px solid var(--border)' }}>
+            <Badge color="ok">首条</Badge>
+            <code className="flex-1 text-sm font-semibold" style={{ fontFamily: '"JetBrains Mono", monospace', color: 'var(--text)', overflowWrap: 'anywhere' }}>{first}</code>
+            <CopyBtn text={first} />
+          </div>
+        )}
+        <div
+          className="idgen-result rounded-xl overflow-auto p-4 text-xs leading-relaxed"
+          style={{ background: 'var(--code)', border: '1px solid var(--inputBorder)', fontFamily: '"JetBrains Mono", monospace', color: 'var(--text)', whiteSpace: 'pre', maxHeight: 460 }}
+        >
+          {text}
+        </div>
+      </Card>
+    </div>
+  )
+}
+
+// ─── Tool: Base64 编解码 ───────────────────────────────────────────────────────
+
+function loadBase64Opts(): { urlSafe: boolean; lenient: boolean } {
+  try {
+    const raw = localStorage.getItem('base64-opts')
+    if (!raw) return { urlSafe: false, lenient: true }
+    const p = JSON.parse(raw)
+    return { urlSafe: !!p.urlSafe, lenient: p.lenient !== false }
+  } catch { return { urlSafe: false, lenient: true } }
+}
+function saveBase64Opts(o: { urlSafe: boolean; lenient: boolean }) {
+  try { localStorage.setItem('base64-opts', JSON.stringify(o)) } catch { /* ignore */ }
+}
+
+function Base64Tool() {
+  const [opts, setOpts] = useState(loadBase64Opts)
+  const [src, setSrc] = useState<'text' | 'b64'>('text')
+  const [text, setText] = useState('')
+  const [b64, setB64] = useState('')
+  const deferredText = useDeferredValue(text)
+  const deferredB64 = useDeferredValue(b64)
+
+  useEffect(() => { saveBase64Opts(opts) }, [opts])
+
+  const setOpt = <K extends keyof typeof opts>(k: K, v: boolean) => setOpts(o => ({ ...o, [k]: v }))
+
+  const enc = useMemo(() => encodeB64(deferredText, opts.urlSafe), [deferredText, opts.urlSafe])
+  const dec = useMemo(() => decodeB64(deferredB64, opts.lenient), [deferredB64, opts.lenient])
+
+  const showText = src === 'text' ? deferredText : (dec.ok ? dec.text : '')
+  const showB64 = src === 'b64' ? deferredB64 : enc
+
+  const editText = (v: string) => { setText(v); setSrc('text') }
+  const editB64 = (v: string) => { setB64(v); setSrc('b64') }
+  const clear = () => { setText(''); setB64(''); setSrc('text') }
+  const exchange = () => {
+    const t = showText, b = showB64
+    setText(b); setB64(t)
+    setSrc(src === 'text' ? 'b64' : 'text')
+  }
+
+  const textBytes = useMemo(() => new TextEncoder().encode(text).length, [text])
+  const ratio = enc.length > 0 && textBytes > 0 ? ((enc.length / textBytes) * 100).toFixed(1) : '—'
+
+  return (
+    <div className="flex flex-col h-full">
+      <div className="glass flex items-center gap-4 px-6 py-3 flex-shrink-0" style={{ borderBottom: '1px solid var(--border)' }}>
+        <SectionTitle>Base64 编解码</SectionTitle>
+        <div className="ml-auto flex items-center gap-4">
+          <Toggle value={opts.urlSafe} onChange={v => setOpt('urlSafe', v)} label="URL-safe" />
+          <Toggle value={opts.lenient} onChange={v => setOpt('lenient', v)} label="宽容解码" />
+          <Btn onClick={exchange} small variant="ghost">⇄ 互换</Btn>
+          <Btn onClick={clear} small variant="ghost">清空</Btn>
+        </div>
+      </div>
+
+      <div className="flex-1 grid grid-cols-2 gap-0 overflow-hidden">
+        <div className="flex flex-col p-4 overflow-hidden" style={{ borderRight: '1px solid var(--border)' }}>
+          <div className="flex items-center mb-2">
+            <Label>原文</Label>
+            <div className="ml-auto"><CopyBtn text={showText} /></div>
+          </div>
+          <CustomTextarea value={showText} onChange={editText} stretch className="flex-1" style={{ minHeight: 0 }} />
+        </div>
+        <div className="flex flex-col p-4 overflow-hidden">
+          <div className="flex items-center mb-2">
+            <Label>Base64</Label>
+            <div className="ml-auto"><CopyBtn text={showB64} /></div>
+          </div>
+          <CustomTextarea value={showB64} onChange={editB64} mono stretch className="flex-1" style={{ minHeight: 0 }} />
+          {src === 'b64' && !dec.ok && (
+            <div className="mt-2 flex items-center gap-2">
+              <Badge color="err">错误</Badge>
+              <span className="text-xs" style={{ color: 'var(--err)' }}>{dec.error}</span>
+            </div>
+          )}
+          {src === 'b64' && dec.ok && !dec.valid && (
+            <div className="mt-2 flex items-center gap-2">
+              <Badge color="warn">非 UTF-8 文本</Badge>
+              <span className="text-xs" style={{ color: 'var(--warn)' }}>解码成功但不是合法 UTF-8 文本（可能是二进制数据）</span>
+            </div>
+          )}
+        </div>
+      </div>
+
+      <div className="glass flex items-center gap-4 px-6 py-2.5 flex-shrink-0 text-xs" style={{ borderTop: '1px solid var(--border)', color: 'var(--t3)' }}>
+        <span>原文 {text.length} 字符</span>
+        <span>UTF-8 {textBytes} 字节</span>
+        <span>Base64 {showB64.length} 字符</span>
+        <span>膨胀率 {ratio}%</span>
+      </div>
+    </div>
+  )
+}
+
+// ─── Tool: Unicode 转换 ─────────────────────────────────────────────────────────
+
+function loadUnicodeOpts(): { fmt: UniFmt; onlyNonAscii: boolean; lowerHex: boolean } {
+  try {
+    const raw = localStorage.getItem('unicode-opts')
+    if (!raw) return { fmt: 'js', onlyNonAscii: true, lowerHex: true }
+    const p = JSON.parse(raw)
+    const fmt = UNI_FORMATS.some(f => f.value === p.fmt) ? (p.fmt as UniFmt) : 'js'
+    return { fmt, onlyNonAscii: p.onlyNonAscii !== false, lowerHex: p.lowerHex !== false }
+  } catch { return { fmt: 'js', onlyNonAscii: true, lowerHex: true } }
+}
+function saveUnicodeOpts(o: { fmt: UniFmt; onlyNonAscii: boolean; lowerHex: boolean }) {
+  try { localStorage.setItem('unicode-opts', JSON.stringify(o)) } catch { /* ignore */ }
+}
+
+function UnicodeTool() {
+  const [opts, setOpts] = useState(loadUnicodeOpts)
+  const [src, setSrc] = useState<'plain' | 'esc'>('plain')
+  const [plain, setPlain] = useState('')
+  const [esc, setEsc] = useState('')
+  const deferredPlain = useDeferredValue(plain)
+  const deferredEsc = useDeferredValue(esc)
+
+  useEffect(() => { saveUnicodeOpts(opts) }, [opts])
+  const setOpt = <K extends keyof typeof opts>(k: K, v: typeof opts[K]) => setOpts(o => ({ ...o, [k]: v }))
+
+  const enc = useMemo(() => encodeUnicode(deferredPlain, opts.fmt, opts.onlyNonAscii, opts.lowerHex), [deferredPlain, opts.fmt, opts.onlyNonAscii, opts.lowerHex])
+  const dec = useMemo(() => decodeUnicode(deferredEsc), [deferredEsc])
+
+  const showPlain = src === 'plain' ? deferredPlain : dec
+  const showEsc = src === 'esc' ? deferredEsc : enc
+
+  const editPlain = (v: string) => { setPlain(v); setSrc('plain') }
+  const editEsc = (v: string) => { setEsc(v); setSrc('esc') }
+  const clear = () => { setPlain(''); setEsc(''); setSrc('plain') }
+  const exchange = () => {
+    const p = showPlain, e = showEsc
+    setPlain(e); setEsc(p)
+    setSrc(src === 'plain' ? 'esc' : 'plain')
+  }
+
+  return (
+    <div className="flex flex-col h-full">
+      <div className="glass flex items-center gap-4 px-6 py-3 flex-shrink-0" style={{ borderBottom: '1px solid var(--border)' }}>
+        <SectionTitle>Unicode 转换</SectionTitle>
+        <div className="ml-auto flex items-center gap-3">
+          <Btn onClick={exchange} small variant="ghost">⇄ 互换</Btn>
+          <Btn onClick={clear} small variant="ghost">清空</Btn>
+        </div>
+      </div>
+
+      <div className="glass flex items-end gap-4 px-6 py-3 flex-shrink-0" style={{ borderBottom: '1px solid var(--border)' }}>
+        <div className="w-72 flex-shrink-0">
+          <Label className="block mb-1.5">编码为</Label>
+          <CustomSelect value={opts.fmt} onChange={v => setOpt('fmt', v as UniFmt)} options={UNI_FORMATS.map(f => ({ value: f.value, label: f.label }))} />
+        </div>
+        <div className="flex items-center gap-4 pb-0.5">
+          <Toggle value={opts.onlyNonAscii} onChange={v => setOpt('onlyNonAscii', v)} label="仅转非 ASCII" />
+          <Toggle value={opts.lowerHex} onChange={v => setOpt('lowerHex', v)} label="十六进制小写" />
+        </div>
+        <p className="ml-auto text-xs leading-snug pb-0.5 text-right" style={{ color: 'var(--t3)' }}>
+          {'解码自动识别：\\uXXXX · \\u{…} · %uXXXX · &#x…; · &#…; · U+…'}
+        </p>
+      </div>
+
+      <div className="flex-1 grid grid-cols-2 gap-0 overflow-hidden">
+        <div className="flex flex-col p-4 overflow-hidden" style={{ borderRight: '1px solid var(--border)' }}>
+          <div className="flex items-center mb-2">
+            <Label>原文</Label>
+            <div className="ml-auto"><CopyBtn text={showPlain} /></div>
+          </div>
+          <CustomTextarea value={showPlain} onChange={editPlain} stretch className="flex-1" style={{ minHeight: 0 }} />
+        </div>
+        <div className="flex flex-col p-4 overflow-hidden">
+          <div className="flex items-center mb-2">
+            <Label>转义结果</Label>
+            <div className="ml-auto"><CopyBtn text={showEsc} /></div>
+          </div>
+          <CustomTextarea value={showEsc} onChange={editEsc} mono stretch className="flex-1" style={{ minHeight: 0 }} />
+        </div>
+      </div>
+    </div>
+  )
+}
+
 // ─── App ──────────────────────────────────────────────────────────────────────
 
-const FULLHEIGHT_TOOLS: ToolKey[] = ['json', 'aiconvert', 'llmbatch']
+const FULLHEIGHT_TOOLS: ToolKey[] = ['json', 'aiconvert', 'llmbatch', 'base64', 'unicode']
 
 export default function App() {
   const [theme, setTheme] = useState<ThemeKey>(() => {
@@ -3400,6 +4152,9 @@ export default function App() {
     aiconvert: <AiConvertTool />,
     llmbatch: <LlmBatchTool />,
     imganalyze: <ImageAnalyzerTool />,
+    idgen: <IdGenTool />,
+    base64: <Base64Tool />,
+    unicode: <UnicodeTool />,
   }
 
   return (

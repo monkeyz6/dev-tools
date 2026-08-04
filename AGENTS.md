@@ -1,6 +1,6 @@
 # dev-toolkit
 
-一个纯前端开发者工具集合站：React + Vite + Tailwind CSS v4。包含 6 个工具（Seedance 计费、JSON 可视化/Diff、时间戳转换、AI 请求体格式转换、LLM 批量测试 & Token 计费口径核查、图片信息识别）与 4 套主题。
+一个纯前端开发者工具集合站：React + Vite + Tailwind CSS v4。包含 9 个工具（Seedance 计费、JSON 可视化/Diff、时间戳转换、AI 请求体格式转换、LLM 批量测试 & Token 计费口径核查、图片信息识别、ID 生成器、Base64 编解码、Unicode 转换）与 4 套主题。
 
 ## 开发命令
 
@@ -14,7 +14,7 @@ npm run test:e2e   # 运行 Playwright 端到端测试
 ## 项目结构
 
 - `src/main.tsx` - React 入口，挂载 `src/App.tsx`
-- `src/App.tsx` - 单文件应用（6 个工具 + 主题系统 + 侧边栏导航，约 3300 行）
+- `src/App.tsx` - 单文件应用（9 个工具 + 主题系统 + 侧边栏导航，约 4200 行）
 - `src/index.css` - 全局样式 + Tailwind CSS v4 import + 毛玻璃/主题过渡工具类
 - `playwright.config.ts` - Playwright 端到端测试配置
 - `e2e/` - 端到端测试用例（按工具拆分）
@@ -24,7 +24,7 @@ npm run test:e2e   # 运行 Playwright 端到端测试
 - 运行时：React 19 + Vite 8 + Tailwind CSS v4（`@tailwindcss/vite` 插件）+ recharts（LLM 批量测试的输出 Token 波动图）
 - 样式：Tailwind 工具类 + CSS 变量主题（`--bg`/`--accent` 等，见 `THEMES`），毛玻璃用 `.glass`/`.glass-sidebar`
 - 字体：Inter + JetBrains Mono（Google Fonts 引入），主题数据在 App.tsx
-- 状态持久化：localStorage（主题 `dev-toolkit-theme`、Seedance 汇率/海外 2.5 单价、LLM 批量测试配置 `llmbatch-config` 与历史报告 `llmbatch-history` 等）。LLM 批量测试的 API Key（`llmbatch-key`）用 Web Crypto（AES-GCM）加密后落盘，读取时解密回填；纯前端工具没有服务端，密钥必然内嵌在代码里，这只是避免明文直接躺在 localStorage 里，不是抵御可执行页面 JS 的攻击者的真正机密保护
+- 状态持久化：localStorage（主题 `dev-toolkit-theme`、Seedance 汇率/海外 2.5 单价、ID 生成器配置 `idgen-opts`、Base64 选项 `base64-opts`、Unicode 选项 `unicode-opts`、LLM 批量测试配置 `llmbatch-config` 与历史报告 `llmbatch-history` 等）。LLM 批量测试的 API Key（`llmbatch-key`）用 Web Crypto（AES-GCM）加密后落盘，读取时解密回填；纯前端工具没有服务端，密钥必然内嵌在代码里，这只是避免明文直接躺在 localStorage 里，不是抵御可执行页面 JS 的攻击者的真正机密保护
 
 ## 代码质量
 

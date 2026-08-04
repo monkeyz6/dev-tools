@@ -6,7 +6,7 @@ test.beforeEach(async ({ page }) => {
 })
 
 test.describe('全局导航与主题', () => {
-  test('侧栏 6 个工具可逐个切换且渲染对应标题', async ({ page }) => {
+  test('侧栏 9 个工具可逐个切换且渲染对应标题', async ({ page }) => {
     const tools: [RegExp, string][] = [
       [/Seedance 计费/, 'Seedance 计费计算器'],
       [/JSON 可视化/, 'JSON 可视化 & Diff'],
@@ -14,6 +14,9 @@ test.describe('全局导航与主题', () => {
       [/AI 格式转换/, 'AI 请求体格式转换'],
       [/LLM 批量测试/, 'LLM 批量测试 & 验真'],
       [/图片信息识别/, '图片信息识别器'],
+      [/ID 生成器/, 'ID 生成器'],
+      [/Base64 编解码/, 'Base64 编解码'],
+      [/Unicode 转换/, 'Unicode 转换'],
     ]
     for (const [nav, title] of tools) {
       await goto(page, nav)
