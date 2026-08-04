@@ -328,47 +328,6 @@ function findMatchingBracket(text: string, cursorPos: number): number | null {
 }
 
 /** 计算光标位置对应的 JSON 路径（如 root > name > first） */
-function getJsonPath(text: string, line: number, col: number): string | null {
-  if (!text.trim()) return null
-  const lines = text.split('\n')
-  let charIdx = 0
-  for (let i = 0; i < Math.min(line, lines.length); i++) charIdx += lines[i].length + 1
-  charIdx += Math.min(col, lines[line]?.length || 0)
-
-  const segments: string[] = ['root']
-  let inStr = false, currentKey = '', arrIdx = 0, escape = false
-
-  for (let i = 0; i < text.length && i < charIdx; i++) {
-    const ch = text[i]
-    if (escape) { escape = false; continue }
-    if (inStr) {
-      if (ch === '\\') { escape = true; continue }
-      if (ch === '"') {
-        inStr = false
-        const after = text.slice(i + 1).match(/\S/)
-        if (after && text[i + 1 + after.index!] === ':' && segments.length > 0) {
-          segments[segments.length - 1] = currentKey
-        }
-        currentKey = ''
-      } else { currentKey += ch }
-      continue
-    }
-    if (ch === '"') { inStr = true; currentKey = ''; continue }
-    if (ch === '{') { segments.push('?'); continue }
-    if (ch === '}') { if (segments.length > 1) segments.pop(); continue }
-    if (ch === '[') { arrIdx = 0; segments.push('[0]'); continue }
-    if (ch === ']') { if (segments.length > 1) segments.pop(); continue }
-    if (ch === ',') {
-      const last = segments[segments.length - 1]
-      if (last && /^\[\d+\]$/.test(last)) {
-        arrIdx++
-        segments[segments.length - 1] = `[${arrIdx}]`
-      }
-    }
-  }
-  return segments.join(' > ')
-}
-
 // ─── Image Analyzer Utilities ────────────────────────────────────────────────────
 
 const IMG_STANDARDS = [
@@ -1370,13 +1329,12 @@ function JsonTreeView({ text, types, collapsed, toggleFold, scrollRef, onContent
   )
 }
 
-function DiffEditor({ value, onChange, placeholder, lineTypes, scrollRef, onFocus, onBlur, autoFocus, onGutterEnter, onCursorChange }: {
+function DiffEditor({ value, onChange, placeholder, lineTypes, scrollRef, onFocus, onBlur, autoFocus, onGutterEnter }: {
   value: string; onChange: (v: string) => void
   placeholder?: string; lineTypes?: ('same' | 'add' | 'rm')[]
   scrollRef: React.MutableRefObject<{ top: number; left: number }>
   onFocus?: () => void; onBlur?: () => void; autoFocus?: boolean
   onGutterEnter: () => void
-  onCursorChange?: (line: number, col: number) => void
 }) {
   const taRef = useRef<HTMLTextAreaElement>(null)
   const backRef = useRef<HTMLPreElement>(null)
@@ -1398,12 +1356,6 @@ function DiffEditor({ value, onChange, placeholder, lineTypes, scrollRef, onFocu
     if (!ta) return
     const pos = ta.selectionStart
     const text = ta.value
-    // 计算行列
-    const before = text.slice(0, pos)
-    const line = before.split('\n').length - 1
-    const lastNL = before.lastIndexOf('\n')
-    const col = lastNL === -1 ? pos : pos - lastNL - 1
-    onCursorChange?.(line, col)
     // 括号匹配高亮
     const matchIdx = findMatchingBracket(text, pos)
     if (matchIdx != null) {
@@ -1595,11 +1547,10 @@ function DiffEditor({ value, onChange, placeholder, lineTypes, scrollRef, onFocu
  * 单侧面板：鼠标进入内容区即编辑（不改写内容、不抢焦点），行号列悬停/移出面板/失焦则回到查看态。
  * 折叠状态与滚动位置提升到本组件持有，避免查看态/编辑态互相切换时被重置。
  */
-function JsonPane({ value, onChange, fmt, types, placeholder, style, paneId, onCursorChange }: {
+function JsonPane({ value, onChange, fmt, types, placeholder, style, paneId }: {
   value: string; onChange: (v: string) => void; fmt: { ok: boolean; text: string }
   types?: ('same' | 'add' | 'rm')[]; placeholder: string; style?: React.CSSProperties
   paneId: 'a' | 'b'
-  onCursorChange?: (line: number, col: number) => void
 }) {
   const [focus, setFocus] = useState(false)
   const [contentHover, setContentHover] = useState(false)
@@ -1640,7 +1591,7 @@ function JsonPane({ value, onChange, fmt, types, placeholder, style, paneId, onC
             if (isTouchRef.current) { setContentHover(false); isTouchRef.current = false }
           }}
           onGutterEnter={() => setContentHover(false)}
-          autoFocus={wantFocus} onCursorChange={onCursorChange} />
+          autoFocus={wantFocus} />
       )}
     </div>
   )
@@ -1653,8 +1604,6 @@ function JsonTool() {
   const [leftW, setLeftW] = useState(50)
   const containerRef = useRef<HTMLDivElement>(null)
   const dragRef = useRef<{ startX: number; startW: number } | null>(null)
-  const [cursorPath, setCursorPath] = useState<string | null>(null)
-  const [cursorPane, setCursorPane] = useState<'a' | 'b'>('a')
 
   const leftFmt = useMemo(() => formatJson(left), [left])
   const rightFmt = useMemo(() => formatJson(right), [right])
@@ -1673,17 +1622,6 @@ function JsonTool() {
   const formatBoth = () => {
     if (leftFmt.ok) setLeft(leftFmt.text)
     if (rightFmt.ok) setRight(rightFmt.text)
-  }
-
-  const handleCursorChange = (pane: 'a' | 'b') => (line: number, col: number) => {
-    setCursorPane(pane)
-    const text = pane === 'a' ? left : right
-    const fmt = pane === 'a' ? leftFmt : rightFmt
-    if (fmt.ok && text.trim()) {
-      setCursorPath(getJsonPath(text, line, col))
-    } else {
-      setCursorPath(null)
-    }
   }
 
   // 中间分隔条拖拽调宽
@@ -1711,13 +1649,6 @@ function JsonTool() {
     <div className="flex flex-col h-full">
       <div className="glass flex items-center gap-2 px-6 py-3.5 flex-shrink-0" style={{ borderBottom: '1px solid var(--border)' }}>
         <SectionTitle>JSON 可视化 & Diff</SectionTitle>
-        {cursorPath && (
-          <span className="text-xs font-mono truncate max-w-[300px]" style={{ color: 'var(--t2)' }} title={cursorPath}>
-            <span className="opacity-50 mr-1">📎</span>
-            {cursorPane === 'b' && <span className="opacity-50">右: </span>}
-            {cursorPath}
-          </span>
-        )}
         {left.trim() && (
           <Badge color={leftFmt.ok ? 'ok' : 'err'}>{leftFmt.ok ? '左 ✓' : '左 格式错误'}</Badge>
         )}
@@ -1740,8 +1671,7 @@ function JsonTool() {
       <div className="flex-1 flex overflow-hidden" ref={containerRef} style={{ background: 'var(--code)' }}>
         <div style={{ flex: `0 0 ${leftW}%`, minWidth: 0 }} className="flex flex-col overflow-hidden">
           <JsonPane paneId="a" value={left} onChange={setLeft} fmt={leftFmt} types={leftTypes}
-            placeholder={'{\n  "name": "Alice",\n  "age": 30\n}'}
-            onCursorChange={handleCursorChange('a')} />
+            placeholder={'{\n  "name": "Alice",\n  "age": 30\n}'} />
         </div>
         <div onPointerDown={onDividerDown} className="flex-shrink-0"
           style={{ width: 10, cursor: 'col-resize', touchAction: 'none', display: 'flex', justifyContent: 'center' }}>
@@ -1749,8 +1679,7 @@ function JsonTool() {
         </div>
         <div className="flex-1 min-w-0 flex flex-col overflow-hidden">
           <JsonPane paneId="b" value={right} onChange={setRight} fmt={rightFmt} types={rightTypes}
-            placeholder={'{\n  "name": "Bob",\n  "age": 25\n}'}
-            onCursorChange={handleCursorChange('b')} />
+            placeholder={'{\n  "name": "Bob",\n  "age": 25\n}'} />
         </div>
       </div>
     </div>
