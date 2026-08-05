@@ -1,5 +1,8 @@
 import React, { useState, useCallback, useRef, useEffect, useLayoutEffect, useMemo, useDeferredValue } from 'react'
 import { BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, Cell, LabelList, ReferenceLine } from 'recharts'
+import { DndContext, PointerSensor, useSensor, useSensors, closestCenter, type DragEndEvent } from '@dnd-kit/core'
+import { SortableContext, useSortable, verticalListSortingStrategy, arrayMove } from '@dnd-kit/sortable'
+import { CSS } from '@dnd-kit/utilities'
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -719,7 +722,7 @@ function CustomInput({ value, onChange, placeholder, className = '', type = 'tex
           outline: 'none',
           fontSize: 14,
           color: 'var(--text)',
-          fontFamily: mono ? '"JetBrainsMono Nerd Font", "SF Mono", "Fira Code", "Fira Mono", "Roboto Mono", "Droid Sans Mono", "Cascadia Code", Consolas, "Courier New", monospace' : 'inherit',
+          fontFamily: mono ? '"JetBrains Mono", "JetBrainsMono Nerd Font", "SF Mono", "Fira Code", "Fira Mono", "Roboto Mono", "Droid Sans Mono", "Cascadia Code", Consolas, "Courier New", monospace' : 'inherit',
           WebkitAppearance: 'none',
           MozAppearance: 'none',
         }}
@@ -824,6 +827,103 @@ function CustomSelect({ value, onChange, options, className = '' }: {
   )
 }
 
+// 带搜索框的下拉选择器：视觉/交互结构对齐 CustomSelect，仅在浮层顶部加一个 sticky 搜索框按 label 过滤选项
+function SearchableSelect({ value, onChange, options, placeholder, className = '' }: {
+  value: string | null; onChange: (v: string) => void
+  options: { value: string; label: string }[]; placeholder?: string; className?: string
+}) {
+  const [open, setOpen] = useState(false)
+  const [focused, setFocused] = useState(false)
+  const [search, setSearch] = useState('')
+  const ref = useRef<HTMLDivElement>(null)
+  const searchRef = useRef<HTMLInputElement>(null)
+  const selected = options.find(o => o.value === value)
+  const filtered = options.filter(o => o.label.toLowerCase().includes(search.trim().toLowerCase()))
+
+  useEffect(() => {
+    if (!open) return
+    const handler = (e: PointerEvent) => {
+      if (ref.current && !ref.current.contains(e.target as Node)) setOpen(false)
+    }
+    window.addEventListener('pointerdown', handler)
+    return () => window.removeEventListener('pointerdown', handler)
+  }, [open])
+
+  useEffect(() => {
+    if (open) { setSearch(''); requestAnimationFrame(() => searchRef.current?.focus()) }
+  }, [open])
+
+  return (
+    <div ref={ref} className={`relative ${className}`}>
+      <button
+        onClick={() => setOpen(o => !o)}
+        onFocus={() => setFocused(true)}
+        onBlur={() => setFocused(false)}
+        className="w-full flex items-center justify-between overflow-hidden min-w-0 rounded-xl transition-all duration-150 cursor-pointer border-0 outline-none active:scale-[0.99]"
+        style={{
+          padding: '10px 12px',
+          background: 'var(--inputBg)',
+          border: `1px solid ${open || focused ? 'var(--accent)' : 'var(--inputBorder)'}`,
+          boxShadow: open || focused ? '0 0 0 3px var(--accentSub)' : '0 1px 2px rgba(0,0,0,0.03)',
+          color: 'var(--text)',
+          fontSize: 14,
+          fontFamily: 'inherit',
+        }}
+      >
+        <span className="truncate" style={{ color: selected ? 'var(--text)' : 'var(--t3)' }} title={selected?.label ?? ''}>{selected?.label ?? placeholder ?? '选择…'}</span>
+        <span style={{ color: 'var(--t3)', marginLeft: 8, flexShrink: 0 }}>
+          <IconChevron open={open} />
+        </span>
+      </button>
+
+      {open && (
+        <div
+          className="absolute left-0 right-0 z-50 rounded-2xl overflow-hidden"
+          style={{ top: 'calc(100% + 5px)', background: 'var(--bg)', border: '1px solid var(--border)', boxShadow: 'var(--shadowMd)' }}
+        >
+          <div className="sticky top-0" style={{ padding: 6, borderBottom: '1px solid var(--border)', background: 'var(--bg)' }}>
+            <input
+              ref={searchRef}
+              value={search}
+              onChange={e => setSearch(e.target.value)}
+              placeholder="搜索…"
+              className="w-full outline-none border-0"
+              style={{ padding: '6px 8px', background: 'var(--inputBg)', borderRadius: 8, color: 'var(--text)', fontSize: 13, fontFamily: 'inherit' }}
+            />
+          </div>
+          <div style={{ maxHeight: 260, overflowY: 'auto', padding: 4 }}>
+            {filtered.length === 0 ? (
+              <div className="px-2.5 py-2 text-xs" style={{ color: 'var(--t3)' }}>无匹配结果</div>
+            ) : filtered.map((o, idx) => {
+              const isActive = o.value === value
+              return (
+                <button
+                  key={o.value}
+                  onClick={() => { onChange(o.value); setOpen(false) }}
+                  className="w-full flex items-center gap-2.5 rounded-xl transition-all duration-100 cursor-pointer border-0 outline-none text-left"
+                  style={{
+                    padding: '8px 10px',
+                    background: isActive ? 'var(--accentSubHard)' : 'transparent',
+                    color: isActive ? 'var(--accent)' : 'var(--text)',
+                    fontSize: 14,
+                    fontFamily: 'inherit',
+                    marginBottom: idx < filtered.length - 1 ? 1 : 0,
+                  }}
+                  onPointerEnter={e => { if (!isActive) (e.currentTarget as HTMLButtonElement).style.background = 'var(--s1)' }}
+                  onPointerLeave={e => { if (!isActive) (e.currentTarget as HTMLButtonElement).style.background = 'transparent' }}
+                >
+                  <span className="flex-1 truncate" title={o.label}>{o.label}</span>
+                  {isActive && <span style={{ color: 'var(--accent)', flexShrink: 0 }}><IconCheck /></span>}
+                </button>
+              )
+            })}
+          </div>
+        </div>
+      )}
+    </div>
+  )
+}
+
 // Fully custom Textarea
 function CustomTextarea({ value, onChange, placeholder, rows, className = '', mono, style, stretch }: {
   value: string; onChange: (v: string) => void; placeholder?: string
@@ -861,7 +961,7 @@ function CustomTextarea({ value, onChange, placeholder, rows, className = '', mo
           outline: 'none',
           fontSize: 13,
           color: 'var(--text)',
-          fontFamily: mono ? '"JetBrainsMono Nerd Font", "SF Mono", "Fira Code", "Fira Mono", "Roboto Mono", "Droid Sans Mono", "Cascadia Code", Consolas, "Courier New", monospace' : 'inherit',
+          fontFamily: mono ? '"JetBrains Mono", "JetBrainsMono Nerd Font", "SF Mono", "Fira Code", "Fira Mono", "Roboto Mono", "Droid Sans Mono", "Cascadia Code", Consolas, "Courier New", monospace' : 'inherit',
           lineHeight: 1.65,
           display: 'block',
         }}
@@ -968,7 +1068,7 @@ function MiniNumInput({ value, placeholder, onChange }: {
         border: `1px solid ${focused ? 'var(--accent)' : 'var(--inputBorder)'}`,
         boxShadow: focused ? '0 0 0 3px var(--accentSub)' : 'none',
         color: 'var(--text)',
-        fontFamily: '"JetBrainsMono Nerd Font", "SF Mono", "Fira Code", "Fira Mono", "Roboto Mono", "Droid Sans Mono", "Cascadia Code", Consolas, "Courier New", monospace',
+        fontFamily: '"JetBrains Mono", "JetBrainsMono Nerd Font", "SF Mono", "Fira Code", "Fira Mono", "Roboto Mono", "Droid Sans Mono", "Cascadia Code", Consolas, "Courier New", monospace',
         WebkitAppearance: 'none', MozAppearance: 'none',
       }}
     />
@@ -1218,7 +1318,7 @@ const JSON_GUTTER_W = JSON_LINE_NO_W + JSON_FOLD_W // 行号(24) + 折叠箭头�
 const JSON_CONTENT_X = JSON_PAD_L + JSON_GUTTER_W // 48px：两态内容真正起始的 x 坐标，必须完全一致，否则悬停切换会横向跳动
 
 const JSON_EDITOR_STYLE: React.CSSProperties = {
-  fontFamily: '"JetBrainsMono Nerd Font", "SF Mono", "Fira Code", "Fira Mono", "Roboto Mono", "Droid Sans Mono", "Cascadia Code", Consolas, "Courier New", monospace',
+  fontFamily: '"JetBrains Mono", "JetBrainsMono Nerd Font", "SF Mono", "Fira Code", "Fira Mono", "Roboto Mono", "Droid Sans Mono", "Cascadia Code", Consolas, "Courier New", monospace',
   fontSize: '12.5px',
   lineHeight: JSON_ROW + 'px',
   padding: `${JSON_PAD_TB}px 16px ${JSON_PAD_TB}px ${JSON_CONTENT_X}px`,
@@ -1306,7 +1406,7 @@ function JsonTreeView({ text, types, collapsed, toggleFold, scrollRef, onContent
     <div className="relative flex-1 min-h-0 overflow-hidden">
       <div ref={containerRef} onScroll={onScroll}
         className="absolute inset-0 overflow-auto"
-        style={{ fontFamily: '"JetBrainsMono Nerd Font", "SF Mono", "Fira Code", "Fira Mono", "Roboto Mono", "Droid Sans Mono", "Cascadia Code", Consolas, "Courier New", monospace', fontSize: '12.5px', lineHeight: JSON_ROW + 'px', padding: `${JSON_PAD_TB}px 16px ${JSON_PAD_TB}px ${JSON_PAD_L}px`, tabSize: 2 }}>
+        style={{ fontFamily: '"JetBrains Mono", "JetBrainsMono Nerd Font", "SF Mono", "Fira Code", "Fira Mono", "Roboto Mono", "Droid Sans Mono", "Cascadia Code", Consolas, "Courier New", monospace', fontSize: '12.5px', lineHeight: JSON_ROW + 'px', padding: `${JSON_PAD_TB}px 16px ${JSON_PAD_TB}px ${JSON_PAD_L}px`, tabSize: 2 }}>
         <div style={{ height: visible.length * JSON_ROW, position: 'relative' }}>
           {slice.map((i, k) => {
             const vi = start + k // 可见序位（用于绝对定位），i 才是真实行号（用于取值/折叠区间）
@@ -1746,9 +1846,9 @@ function TimestampTool() {
       {/* Current timestamp pill */}
       <div className="flex items-center gap-3 px-4 py-3 rounded-xl mb-6 text-sm" style={{ background: 'var(--s1)', border: '1px solid var(--border)' }}>
         <span style={{ color: 'var(--t2)' }}>当前时间戳</span>
-        <code style={{ fontFamily: '"JetBrainsMono Nerd Font", "SF Mono", "Fira Code", "Fira Mono", "Roboto Mono", "Droid Sans Mono", "Cascadia Code", Consolas, "Courier New", monospace', color: 'var(--text)', fontWeight: 600 }}>{now}</code>
+        <code style={{ fontFamily: '"JetBrains Mono", "JetBrainsMono Nerd Font", "SF Mono", "Fira Code", "Fira Mono", "Roboto Mono", "Droid Sans Mono", "Cascadia Code", Consolas, "Courier New", monospace', color: 'var(--text)', fontWeight: 600 }}>{now}</code>
         <span style={{ color: 'var(--t3)' }}>ms</span>
-        <code style={{ fontFamily: '"JetBrainsMono Nerd Font", "SF Mono", "Fira Code", "Fira Mono", "Roboto Mono", "Droid Sans Mono", "Cascadia Code", Consolas, "Courier New", monospace', color: 'var(--text)', fontWeight: 600, marginLeft: 4 }}>{nowTs}</code>
+        <code style={{ fontFamily: '"JetBrains Mono", "JetBrainsMono Nerd Font", "SF Mono", "Fira Code", "Fira Mono", "Roboto Mono", "Droid Sans Mono", "Cascadia Code", Consolas, "Courier New", monospace', color: 'var(--text)', fontWeight: 600, marginLeft: 4 }}>{nowTs}</code>
         <span style={{ color: 'var(--t3)' }}>s</span>
         <Btn small onClick={() => setTsInput(String(now))} className="ml-auto">使用当前</Btn>
       </div>
@@ -1788,7 +1888,7 @@ function TimestampTool() {
                   ].map(([label, val]) => (
                     <div key={label} className="flex items-center gap-3 px-3 py-2 rounded-xl" style={{ background: 'var(--s1)', border: '1px solid var(--border)' }}>
                       <span className="text-xs w-24 flex-shrink-0" style={{ color: 'var(--t2)' }}>{label}</span>
-                      <code className="flex-1 text-sm" style={{ fontFamily: '"JetBrainsMono Nerd Font", "SF Mono", "Fira Code", "Fira Mono", "Roboto Mono", "Droid Sans Mono", "Cascadia Code", Consolas, "Courier New", monospace', color: 'var(--text)' }}>{val}</code>
+                      <code className="flex-1 text-sm" style={{ fontFamily: '"JetBrains Mono", "JetBrainsMono Nerd Font", "SF Mono", "Fira Code", "Fira Mono", "Roboto Mono", "Droid Sans Mono", "Cascadia Code", Consolas, "Courier New", monospace', color: 'var(--text)' }}>{val}</code>
                       <CopyBtn text={val ?? ''} />
                     </div>
                   ))}
@@ -1817,7 +1917,7 @@ function TimestampTool() {
                   ].map(([label, val]) => (
                     <div key={label} className="flex items-center gap-3 px-3 py-2 rounded-xl" style={{ background: 'var(--s1)', border: '1px solid var(--border)' }}>
                       <span className="text-xs w-36 flex-shrink-0" style={{ color: 'var(--t2)' }}>{label}</span>
-                      <code className="flex-1 text-sm font-semibold" style={{ fontFamily: '"JetBrainsMono Nerd Font", "SF Mono", "Fira Code", "Fira Mono", "Roboto Mono", "Droid Sans Mono", "Cascadia Code", Consolas, "Courier New", monospace', color: 'var(--text)' }}>{val}</code>
+                      <code className="flex-1 text-sm font-semibold" style={{ fontFamily: '"JetBrains Mono", "JetBrainsMono Nerd Font", "SF Mono", "Fira Code", "Fira Mono", "Roboto Mono", "Droid Sans Mono", "Cascadia Code", Consolas, "Courier New", monospace', color: 'var(--text)' }}>{val}</code>
                       <CopyBtn text={val ?? ''} />
                     </div>
                   ))}
@@ -1916,7 +2016,7 @@ function AiConvertTool() {
             </div>
           </div>
           <div className="flex-1 rounded-xl overflow-auto p-3 text-xs"
-            style={{ background: 'var(--code)', border: '1px solid var(--inputBorder)', fontFamily: '"JetBrainsMono Nerd Font", "SF Mono", "Fira Code", "Fira Mono", "Roboto Mono", "Droid Sans Mono", "Cascadia Code", Consolas, "Courier New", monospace', lineHeight: 1.7, whiteSpace: 'pre' }}>
+            style={{ background: 'var(--code)', border: '1px solid var(--inputBorder)', fontFamily: '"JetBrains Mono", "JetBrainsMono Nerd Font", "SF Mono", "Fira Code", "Fira Mono", "Roboto Mono", "Droid Sans Mono", "Cascadia Code", Consolas, "Courier New", monospace', lineHeight: 1.7, whiteSpace: 'pre' }}>
             <div dangerouslySetInnerHTML={{ __html: highlightJson(outputWithCache) }} />
           </div>
         </div>
@@ -1949,6 +2049,9 @@ interface BatchResult {
   inputTokens: number | null
   outputTokens: number | null
   error: string | null
+  responseHeaders?: Record<string, string> | null
+  responseBody?: string | null
+  responseBodyTruncated?: boolean
 }
 
 interface BatchReport {
@@ -1958,7 +2061,10 @@ interface BatchReport {
   durationMs: number
   apiType: ApiType
   endpoint: string
+  baseUrl?: string
+  timeout?: number
   bodyText: string
+  promptId?: string | null
   models: string[]
   n: number
   c: number
@@ -1975,6 +2081,16 @@ interface LlmBatchCfg {
   apiKey: string
   timeout: number
   bodyText: string
+  storeResponseBody: boolean
+}
+
+// ── 提示词库：可管理、可搜索、可拖拽排序的请求体来源 ──
+interface LlmPrompt {
+  id: string
+  title: string
+  body: string
+  createdAt: number
+  updatedAt: number
 }
 
 // ── 协议适配 ──
@@ -1998,8 +2114,20 @@ function llmEndpointOf(apiType: ApiType, baseUrl: string): string {
   return b.endsWith('/v1') ? b + p.replace(/^\/v1/, '') : b + p
 }
 
-// {{model}} 占位符：兼容带引号 "{{model}}" 和不带引号 {{model}} 两种写法
-const MODEL_PLACEHOLDER_RE = /"\{\{model\}\}"|\{\{model\}\}/g
+// 反向推导：从拼接好的端点剥离协议路径后缀还原 baseUrl，用于历史「复用」在老数据（未存 baseUrl 字段）
+// 上的兜底；两种剥离方式都对不上就返回 null，调用方保留当前 baseUrl 不变。
+function llmBaseUrlFromEndpoint(apiType: ApiType, endpoint: string): string | null {
+  const p = LLM_API_PATHS[apiType]
+  const e = endpoint.trim().replace(/\/+$/, '')
+  if (e.endsWith(p)) return e.slice(0, e.length - p.length)
+  const shortSuffix = p.replace(/^\/v1/, '')
+  if (shortSuffix && e.endsWith(shortSuffix)) return e.slice(0, e.length - shortSuffix.length)
+  return null
+}
+
+// 占位符：{{model}}（旧，双花括号）与 ${[model]}（新，方括号内允许可选空白）两种写法并存，
+// 均兼容带引号 "..." 和不带引号两种形式。
+const MODEL_PLACEHOLDER_RE = /"\{\{model\}\}"|\{\{model\}\}|"\$\{\[\s*model\s*\]\}"|\$\{\[\s*model\s*\]\}/g
 function fillModelPlaceholder(text: string, jsonStringLiteral: string): string {
   return text.replace(MODEL_PLACEHOLDER_RE, jsonStringLiteral)
 }
@@ -2007,13 +2135,182 @@ function bodyHasModelPlaceholder(text: string): boolean {
   MODEL_PLACEHOLDER_RE.lastIndex = 0
   return MODEL_PLACEHOLDER_RE.test(text)
 }
-// Body 写了 {{model}} 就替换占位符；没写就在顶层自动注入 model 字段，两种写法都能跑
+// Body 写了占位符就替换；没写就在顶层自动注入 model 字段，两种写法都能跑
 function buildRequestBody(bodyText: string, model: string): Record<string, unknown> {
   if (bodyHasModelPlaceholder(bodyText)) {
     return JSON.parse(fillModelPlaceholder(bodyText, JSON.stringify(model)))
   }
   const obj = JSON.parse(bodyText) as Record<string, unknown>
   return { ...obj, model }
+}
+// 请求体 JSON 语法校验（占位符替换后再 parse），供左侧预览、提示词编辑器、runBatch() 校验共用。
+// 成功返回空字符串，失败返回错误信息。
+function validateLlmBodyJson(text: string): string {
+  try {
+    JSON.parse(fillModelPlaceholder(text, '"__MODEL__"'))
+    return ''
+  } catch (e) {
+    return 'JSON 语法错误：' + ((e as Error)?.message || String(e))
+  }
+}
+
+// ── 提示词请求体协议自动识别 + 转换 ──
+// ApiType（下划线拼写，LLM 批量测试用）与 AiFmt（连字符拼写，AI 格式转换工具用）值域相同、字面量不同，
+// 用一张映射表适配，不合并成同一类型（避免牵连 AiConvertTool 及其一整套下游）。
+const API_TYPE_TO_AI_FMT: Record<ApiType, AiFmt> = {
+  anthropic: 'anthropic',
+  openai_chat: 'openai-chat',
+  openai_responses: 'openai-responses',
+}
+
+// 结构兼容性判定：读取请求体里的结构性字段，判断它跟三种协议里的哪些"结构上说得通"。
+// 返回 0~2 个协议（Anthropic/Chat 都要求 messages 存在、Responses 要求 messages 不存在，
+// 二者互斥，故最多同时命中 Anthropic 和 Chat 两个，不会三个同时命中）。
+function compatiblePromptApiTypes(obj: Record<string, unknown>): ApiType[] {
+  const hasMessages = Array.isArray(obj.messages)
+  const hasTopSystem = typeof obj.system === 'string' || Array.isArray(obj.system)
+  const messagesHasSystemRole = hasMessages && (obj.messages as { role?: unknown }[]).some(m => m?.role === 'system')
+  const hasInput = obj.input !== undefined
+  const hasInstructions = typeof obj.instructions === 'string'
+  const hasMaxOutputTokens = typeof obj.max_output_tokens === 'number'
+  const hasMaxCompletionTokens = typeof obj.max_completion_tokens === 'number'
+  const hasStreamOptions = typeof obj.stream_options === 'object' && obj.stream_options !== undefined && obj.stream_options !== null
+
+  const systemConflict = hasTopSystem && messagesHasSystemRole // 顶层 system 与 messages 里的 system 消息同时出现，规则冲突
+
+  const anthropicOk = hasMessages && !hasInput && !hasInstructions && !hasMaxOutputTokens
+    && !hasMaxCompletionTokens && !hasStreamOptions && !messagesHasSystemRole && !systemConflict
+  const chatOk = hasMessages && !hasInput && !hasInstructions && !hasMaxOutputTokens && !hasTopSystem && !systemConflict
+  const responsesOk = !hasMessages && !hasTopSystem && !hasMaxCompletionTokens && !hasStreamOptions
+    && (hasInput || hasInstructions || hasMaxOutputTokens)
+
+  const out: ApiType[] = []
+  if (anthropicOk) out.push('anthropic')
+  if (chatOk) out.push('openai_chat')
+  if (responsesOk) out.push('openai_responses')
+  return out
+}
+
+// 单一归约：真正需要发起转换时才用（候选为 0 个→无法识别；候选为 2 个时固定选 anthropic——
+// 可证明这种二义性只发生在请求体完全不含 system 信息时，此时后续的有损判定/展平预处理对
+// Anthropic 和 Chat 两条分支检查的是同一批 messages[].content，选哪个不影响最终结果）。
+function detectPromptApiType(obj: Record<string, unknown>): ApiType | null {
+  const c = compatiblePromptApiTypes(obj)
+  if (c.length === 0) return null
+  if (c.length === 1) return c[0]
+  return 'anthropic'
+}
+
+// content 是否"纯文本"：字符串本身算，或者数组且每个 block 的 type 都等于约定类型（text / input_text）。
+// 其它情况（image/tool_use/tool_result 等非文本 block、混合数组、非字符串非数组如仅 tool_calls 的轮次）一律不算。
+function isTextOnlyContent(content: unknown, allowedType: string): boolean {
+  if (typeof content === 'string') return true
+  if (!Array.isArray(content)) return false
+  return content.every(b => b && typeof b === 'object' && (b as { type?: unknown }).type === allowedType)
+}
+
+// 有损判定：返回 null 表示可以无损转换，否则返回人类可读的丢失原因，调用方据此直接拒绝转换。
+function assessContentLoss(srcApiType: ApiType, obj: Record<string, unknown>): string | null {
+  const toolField = ['tools', 'tool_choice', 'functions', 'function_call'].find(f => obj[f] !== undefined)
+  if (toolField) return `工具调用相关字段 "${toolField}"（转换逻辑不支持迁移，会被静默丢弃）`
+
+  if (srcApiType === 'anthropic') {
+    if (obj.system !== undefined && !isTextOnlyContent(obj.system, 'text')) return '顶层 system 字段中的非纯文本内容块'
+    for (const m of (obj.messages as { role?: unknown; content?: unknown }[]) ?? []) {
+      if (!isTextOnlyContent(m?.content, 'text')) return `messages 中角色为 "${String(m?.role)}" 的消息使用了非纯文本 content block（如 image / tool_use / tool_result）`
+    }
+    return null
+  }
+  if (srcApiType === 'openai_chat') {
+    for (const m of (obj.messages as { role?: unknown; content?: unknown }[]) ?? []) {
+      if (!isTextOnlyContent(m?.content, 'text')) return `messages 中角色为 "${String(m?.role)}" 的消息使用了非纯文本 content parts（如 image_url / input_audio）`
+    }
+    return null
+  }
+  // openai_responses
+  const input = obj.input
+  if (typeof input === 'string' || input === undefined) return null
+  if (Array.isArray(input)) {
+    for (const item of input as { role?: unknown; content?: unknown }[]) {
+      if (!isTextOnlyContent(item?.content, 'input_text')) return `input 中角色为 "${String(item?.role)}" 的条目使用了非 input_text 内容（如 input_image / input_file）`
+    }
+  }
+  return null
+}
+
+// 把纯文本 content block 数组折叠成字符串，供转换前预处理用
+function joinTextBlocks(content: unknown): string {
+  if (typeof content === 'string') return content
+  return ((content as { text?: unknown }[]) ?? []).map(b => typeof b?.text === 'string' ? b.text : '').join('\n')
+}
+
+// 展平预处理：assessContentLoss 判定无损之后才调用。convertFormat 的 anthropic/openai-chat 来源分支
+// 对数组 content 处理不正确（会整体 JSON.stringify 或直接透传，而不是提取纯文本），必须先在这里把
+// 纯文本 block 数组折叠成字符串再交给它，否则会产出"看似成功实则语义已错"的转换结果。
+// openai_responses 来源不需要展平，convertFormat 的对应分支本身处理正确。
+function flattenForConversion(srcApiType: ApiType, obj: Record<string, unknown>): Record<string, unknown> {
+  if (srcApiType === 'anthropic') {
+    return {
+      ...obj,
+      system: Array.isArray(obj.system) ? joinTextBlocks(obj.system) : obj.system,
+      messages: Array.isArray(obj.messages)
+        ? (obj.messages as { content?: unknown }[]).map(m => Array.isArray(m?.content) ? { ...m, content: joinTextBlocks(m.content) } : m)
+        : obj.messages,
+    }
+  }
+  if (srcApiType === 'openai_chat') {
+    return {
+      ...obj,
+      messages: Array.isArray(obj.messages)
+        ? (obj.messages as { content?: unknown }[]).map(m => Array.isArray(m?.content) ? { ...m, content: joinTextBlocks(m.content) } : m)
+        : obj.messages,
+    }
+  }
+  return obj
+}
+
+// 唯一对外入口：给定提示词原文和目标 API 类型，识别原文协议、按需转换。
+// 结果只在运行时使用，从不写回提示词库；识别失败或有损一律拒绝，不输出任何转换结果。
+function convertPromptBodyForApiType(bodyText: string, targetApiType: ApiType): { ok: true; body: string } | { ok: false; error: string } {
+  let obj: Record<string, unknown>
+  try {
+    obj = JSON.parse(fillModelPlaceholder(bodyText, '"__MODEL__"')) as Record<string, unknown>
+  } catch (e) {
+    // 防御性分支：正常情况下调用方只在 validateLlmBodyJson 通过后才会调用本函数
+    return { ok: false, error: '请求体不是合法 JSON：' + ((e as Error)?.message || String(e)) }
+  }
+
+  // 先算出"这段请求体到底是哪种协议"的单一归约判断（detectPromptApiType 内部已经处理了
+  // 0/1/2 个候选的所有情况），再拿它跟目标协议比较——只有当归约结果就是目标协议本身时，
+  // 才是"无需转换、原样透传"，此时不做任何有损检查（因为压根没有发生任何结构重组，
+  // image/tool_use 等复杂 content block 原样保留，不存在丢失的问题）。
+  // 注意：不能用"结构上是否兼容目标协议"（candidates.includes(targetApiType)）来判断是否透传——
+  // 结构兼容只保证顶层字段（messages/system 等）说得通，不代表 content 里的非文本 block
+  // 就是该目标协议的原生写法（比如 Anthropic 的 image block 结构和 OpenAI 的 image_url 完全不同，
+  // 但顶层 messages 数组本身两边都认，会被误判为"结构兼容"）。
+  const srcApiType = detectPromptApiType(obj)
+  if (srcApiType === null) {
+    return { ok: false, error: `无法识别该提示词请求体所属的 API 协议格式（既不符合 Anthropic、也不符合 OpenAI Chat、也不符合 OpenAI Responses 的结构特征），因此无法自动转换为「${LLM_API_LABELS[targetApiType]}」。请检查请求体结构，或手动调整为该协议对应的格式。` }
+  }
+  if (srcApiType === targetApiType) {
+    return { ok: true, body: bodyText } // 归约结果就是目标协议本身，无需任何转换，原样透传
+  }
+
+  const lossReason = assessContentLoss(srcApiType, obj)
+  if (lossReason) {
+    return { ok: false, error: `识别到该提示词请求体是「${LLM_API_LABELS[srcApiType]}」格式，但其中包含${lossReason}，无法无损转换为「${LLM_API_LABELS[targetApiType]}」，已阻止自动转换。请手动调整请求体，或切换回「${LLM_API_LABELS[srcApiType]}」。` }
+  }
+
+  const flatText = JSON.stringify(flattenForConversion(srcApiType, obj))
+  const convertedSentinelText = convertFormat(flatText, API_TYPE_TO_AI_FMT[srcApiType], API_TYPE_TO_AI_FMT[targetApiType], false)
+  if (convertedSentinelText.startsWith('// JSON 解析失败')) {
+    return { ok: false, error: '内部转换异常，请检查请求体格式。' } // 防御性分支，正常不会触发
+  }
+
+  const useNewPlaceholder = /\$\{\[\s*model\s*\]\}/.test(bodyText)
+  const restoreLiteral = useNewPlaceholder ? '"${[model]}"' : '"{{model}}"'
+  const finalBody = convertedSentinelText.split('"__MODEL__"').join(restoreLiteral)
+  return { ok: true, body: finalBody }
 }
 
 // 单引号内的单引号需要转义成 '\''，保证生成的 curl 命令在 shell 里语法安全
@@ -2055,11 +2352,13 @@ function extractUsageNonStream(json: any): { inTok: number | null; outTok: numbe
   return { inTok, outTok, model }
 }
 
-// ── Token / model 提取（SSE 流式）──
+// ── Token / model / 正文提取（SSE 流式）──
+// 正文（text）只用于「存储响应体」功能：把各协议的文本增量拼接成完整回复，与 usage/model 提取互不影响。
 function makeStreamExtractor(apiType: ApiType) {
   let inTok: number | null = null
   let outTok: number | null = null
   let model: string | null = null
+  let text = ''
   return {
     onData(o: any) {
       if (apiType === 'anthropic') {
@@ -2068,22 +2367,42 @@ function makeStreamExtractor(apiType: ApiType) {
           if (typeof o.message.model === 'string') model = o.message.model
         }
         if (o?.type === 'message_delta' && o.usage?.output_tokens != null) outTok = o.usage.output_tokens
+        if (o?.type === 'content_block_delta' && o.delta?.type === 'text_delta' && typeof o.delta.text === 'string') text += o.delta.text
       } else if (apiType === 'openai_chat') {
         if (typeof o?.model === 'string') model = o.model
         if (o?.usage) {
           if (o.usage.prompt_tokens != null) inTok = o.usage.prompt_tokens
           if (o.usage.completion_tokens != null) outTok = o.usage.completion_tokens
         }
+        const delta = o?.choices?.[0]?.delta?.content
+        if (typeof delta === 'string') text += delta
       } else {
         if (o?.type === 'response.completed' && o.response) {
           if (typeof o.response.model === 'string') model = o.response.model
           if (o.response.usage?.input_tokens != null) inTok = o.response.usage.input_tokens
           if (o.response.usage?.output_tokens != null) outTok = o.response.usage.output_tokens
         }
+        if (o?.type === 'response.output_text.delta' && typeof o.delta === 'string') text += o.delta
       }
     },
-    result() { return { inTok, outTok, model } },
+    result() { return { inTok, outTok, model, text } },
   }
+}
+
+// ── 响应体存储（可选）：单条响应正文超过阈值就截断，避免历史记录把 localStorage 撑爆 ──
+const LLM_RESPONSE_BODY_MAX = 20000
+function truncateResponseBody(text: string): { body: string; truncated: boolean } {
+  if (text.length <= LLM_RESPONSE_BODY_MAX) return { body: text, truncated: false }
+  return { body: text.slice(0, LLM_RESPONSE_BODY_MAX), truncated: true }
+}
+// cfg.storeResponseBody 为真时才写入响应头/正文，关闭时完全不做任何事（不产生多余开销）。
+// bodyText 由调用方传入：非流式/错误分支传原始响应文本，流式分支传拼接好的正文增量。
+function llmApplyResponseCapture(rec: BatchResult, cfg: LlmBatchCfg, res: Response, bodyText: string) {
+  if (!cfg.storeResponseBody) return
+  rec.responseHeaders = Object.fromEntries(res.headers.entries())
+  const { body, truncated } = truncateResponseBody(bodyText)
+  rec.responseBody = body
+  rec.responseBodyTruncated = truncated
 }
 
 // ── 单次请求 ──
@@ -2136,6 +2455,7 @@ async function doLlmRequest(cfg: LlmBatchCfg, task: BatchTask): Promise<BatchRes
       rec.httpStatus = res.status
       rec.error = `HTTP ${res.status}` + (detail ? '：' + detail : '')
       rec.elapsed = Date.now() - start
+      llmApplyResponseCapture(rec, cfg, res, txt)
       return rec
     }
 
@@ -2167,6 +2487,7 @@ async function doLlmRequest(cfg: LlmBatchCfg, task: BatchTask): Promise<BatchRes
       rec.inputTokens = r.inTok
       rec.outputTokens = r.outTok
       rec.returnedModel = r.model
+      llmApplyResponseCapture(rec, cfg, res, r.text)
     } else {
       tFirst = Date.now() - start
       const txt = await res.text()
@@ -2177,6 +2498,7 @@ async function doLlmRequest(cfg: LlmBatchCfg, task: BatchTask): Promise<BatchRes
         rec.error = '响应解析失败（非 JSON）：' + txt.slice(0, 200)
         rec.httpStatus = res.status
         rec.elapsed = Date.now() - start
+        llmApplyResponseCapture(rec, cfg, res, txt)
         return rec
       }
       const u = extractUsageNonStream(json)
@@ -2187,6 +2509,7 @@ async function doLlmRequest(cfg: LlmBatchCfg, task: BatchTask): Promise<BatchRes
       rec.inputTokens = u.inTok
       rec.outputTokens = u.outTok
       rec.returnedModel = u.model
+      llmApplyResponseCapture(rec, cfg, res, txt)
     }
   } catch (e: unknown) {
     rec.elapsed = Date.now() - start
@@ -2249,21 +2572,23 @@ function llmDownload(name: string, content: string, mime: string) {
   setTimeout(() => { URL.revokeObjectURL(a.href); a.remove() }, 500)
 }
 function reportToCsv(report: BatchReport): string {
-  const rows: (string | number)[][] = [['序号', '模型', '状态', '输入Token', '输出Token', '总Token', '首字(ms)', '耗时(ms)', '错误信息']]
+  const rows: (string | number)[][] = [['序号', '模型', '状态', '输入Token', '输出Token', '总Token', '首字(ms)', '耗时(ms)', '错误信息', '响应体']]
   report.results.forEach(r => rows.push([
     r.seq, r.model, r.status === 'ok' ? '成功' : '失败',
     r.inputTokens ?? '-', r.outputTokens ?? '-',
     (r.inputTokens != null && r.outputTokens != null) ? r.inputTokens + r.outputTokens : '-',
     r.tFirst ?? '-', r.elapsed ?? '-', r.error ?? '',
+    r.responseBody ?? '',
   ]))
   return '﻿' + rows.map(r => r.map(v => '"' + String(v).replace(/"/g, '""') + '"').join(',')).join('\r\n')
 }
 
-// ── 持久化：配置、加密后的 API Key、历史报告（最多 20 条）──
+// ── 持久化：配置、加密后的 API Key、历史报告（最多 20 条）、提示词库 ──
 const LLM_CFG_KEY = 'llmbatch-config'
 const LLM_KEY_STORAGE_KEY = 'llmbatch-key'
 const LLM_HIST_KEY = 'llmbatch-history'
 const LLM_HIST_MAX = 20
+const LLM_PROMPTS_KEY = 'llmbatch-prompts'
 
 interface LlmBatchCfgStored {
   apiType?: ApiType
@@ -2272,7 +2597,9 @@ interface LlmBatchCfgStored {
   models?: string
   n?: string
   c?: string
-  body?: string
+  body?: string                 // 旧字段：请求体已迁移到 llmbatch-prompts，这里仅保留供一次性迁移读取，不再写入
+  promptId?: string             // 上次选中的提示词 id
+  storeResponseBody?: boolean   // 是否存储响应体，默认 true
 }
 function loadLlmCfg(): LlmBatchCfgStored {
   if (typeof window === 'undefined') return {}
@@ -2369,6 +2696,40 @@ const DEFAULT_LLM_BODY = `{
   "messages": [{"role": "user", "content": "Say hello."}]
 }`
 
+// ── 提示词库持久化：结构/读写模式对齐上面的历史报告（loadLlmHistory/saveLlmHistory）──
+function loadLlmPromptsRaw(): LlmPrompt[] {
+  if (typeof window === 'undefined') return []
+  try {
+    const raw = localStorage.getItem(LLM_PROMPTS_KEY)
+    if (!raw) return []
+    const list = JSON.parse(raw)
+    if (!Array.isArray(list)) return []
+    return list.filter((p): p is LlmPrompt =>
+      p && typeof p === 'object' && typeof p.id === 'string' && typeof p.title === 'string' && typeof p.body === 'string')
+  } catch { return [] }
+}
+function saveLlmPrompts(list: LlmPrompt[]) {
+  if (typeof window === 'undefined') return
+  try { localStorage.setItem(LLM_PROMPTS_KEY, JSON.stringify(list)) } catch { /* ignore */ }
+}
+function makeLlmPrompt(title: string, body: string): LlmPrompt {
+  const now = Date.now()
+  return { id: 'p' + now + '_' + Math.random().toString(36).slice(2, 7), title, body, createdAt: now, updatedAt: now }
+}
+// 首次加载时的迁移/兜底种子：老版本的请求体存在 llmbatch-config.body 里，迁移成一条提示词；
+// 全新用户则用 DEFAULT_LLM_BODY 种一条示例，保证下拉框永远至少有一个选项可用。
+// 必须是同步函数（用作 useState 懒初始化器），保证首帧渲染前 prompts 已就绪。
+function loadOrMigrateLlmPrompts(): LlmPrompt[] {
+  const existing = loadLlmPromptsRaw()
+  if (existing.length > 0) return existing
+  const legacyBody = loadLlmCfg().body
+  const seed = legacyBody && legacyBody.trim()
+    ? makeLlmPrompt('默认提示词', legacyBody)
+    : makeLlmPrompt('示例提示词', DEFAULT_LLM_BODY)
+  saveLlmPrompts([seed])
+  return [seed]
+}
+
 // 表格里的长文本单元格（模型名等）：单行截断 + 原生 title 提示，鼠标悬浮可见完整内容
 function TruncatedCell({ text, maxWidth = 160, color }: { text: string; maxWidth?: number; color?: string }) {
   return (
@@ -2426,6 +2787,7 @@ function LlmTokenChart({ model, results, field, title }: {
 // ── 报告渲染（当前报告 / 历史「查看」共用）──
 function LlmBatchReportView({ report, apiKey }: { report: BatchReport; apiKey: string }) {
   const [viewingModel, setViewingModel] = useState<string | null>(null)
+  const [viewingResult, setViewingResult] = useState<BatchResult | null>(null)
   const viewingBodyObj = useMemo(() => {
     if (viewingModel == null) return null
     try { return buildRequestBody(report.bodyText, viewingModel) } catch { return null }
@@ -2595,7 +2957,7 @@ function LlmBatchReportView({ report, apiKey }: { report: BatchReport; apiKey: s
             <table className="w-full text-sm min-w-[920px]">
               <thead style={{ background: 'var(--s1)', position: 'sticky', top: 0 }}>
                 <tr className="text-xs" style={{ color: 'var(--t2)' }}>
-                  {['序号', '模型', '状态', '返回模型', '输入Token', '输出Token', '总Token', '首字(ms)', '耗时', '错误信息'].map(h => (
+                  {['序号', '模型', '状态', '返回模型', '输入Token', '输出Token', '总Token', '首字(ms)', '耗时', '错误信息', '响应'].map(h => (
                     <th key={h} className="text-left px-4 py-2.5 font-semibold whitespace-nowrap">{h}</th>
                   ))}
                 </tr>
@@ -2622,6 +2984,11 @@ function LlmBatchReportView({ report, apiKey }: { report: BatchReport; apiKey: s
                     <td className="px-4 py-2 tabular-nums">{r.tFirst ?? '—'}</td>
                     <td className="px-4 py-2 tabular-nums">{r.elapsed != null ? (r.elapsed / 1000).toFixed(2) + 's' : '—'}</td>
                     <td className="px-4 py-2 text-xs" style={{ color: 'var(--err)', maxWidth: 280, wordBreak: 'break-all' }}>{r.error ?? ''}</td>
+                    <td className="px-4 py-2 whitespace-nowrap">
+                      {r.responseBody != null
+                        ? <Btn small variant="ghost" onClick={() => setViewingResult(r)}>响应</Btn>
+                        : <span className="text-xs" style={{ color: 'var(--t3)' }}>未存储响应体</span>}
+                    </td>
                   </tr>
                 ))}
               </tbody>
@@ -2644,7 +3011,7 @@ function LlmBatchReportView({ report, apiKey }: { report: BatchReport; apiKey: s
                   <Label>请求体 JSON</Label>
                   {viewingBodyObj != null && <CopyBtn text={JSON.stringify(viewingBodyObj, null, 2)} />}
                 </div>
-                <pre className="rounded-xl p-3 text-xs overflow-auto" style={{ background: 'var(--code)', border: '1px solid var(--inputBorder)', fontFamily: '"JetBrainsMono Nerd Font", "SF Mono", "Fira Code", "Fira Mono", "Roboto Mono", "Droid Sans Mono", "Cascadia Code", Consolas, "Courier New", monospace', lineHeight: 1.7, maxHeight: '30vh' }}>
+                <pre className="rounded-xl p-3 text-xs overflow-auto" style={{ background: 'var(--code)', border: '1px solid var(--inputBorder)', fontFamily: '"JetBrains Mono", "JetBrainsMono Nerd Font", "SF Mono", "Fira Code", "Fira Mono", "Roboto Mono", "Droid Sans Mono", "Cascadia Code", Consolas, "Courier New", monospace', lineHeight: 1.7, maxHeight: '30vh' }}>
                   {viewingBodyObj != null ? JSON.stringify(viewingBodyObj, null, 2) : '（请求体解析失败）'}
                 </pre>
               </div>
@@ -2653,7 +3020,7 @@ function LlmBatchReportView({ report, apiKey }: { report: BatchReport; apiKey: s
                   <Label>cURL 命令</Label>
                   {viewingBodyObj != null && <CopyBtn text={buildCurlCommand(report, viewingBodyObj, apiKey)} />}
                 </div>
-                <pre className="rounded-xl p-3 text-xs overflow-auto whitespace-pre-wrap" style={{ background: 'var(--code)', border: '1px solid var(--inputBorder)', fontFamily: '"JetBrainsMono Nerd Font", "SF Mono", "Fira Code", "Fira Mono", "Roboto Mono", "Droid Sans Mono", "Cascadia Code", Consolas, "Courier New", monospace', lineHeight: 1.7, maxHeight: '30vh', wordBreak: 'break-all' }}>
+                <pre className="rounded-xl p-3 text-xs overflow-auto whitespace-pre-wrap" style={{ background: 'var(--code)', border: '1px solid var(--inputBorder)', fontFamily: '"JetBrains Mono", "JetBrainsMono Nerd Font", "SF Mono", "Fira Code", "Fira Mono", "Roboto Mono", "Droid Sans Mono", "Cascadia Code", Consolas, "Courier New", monospace', lineHeight: 1.7, maxHeight: '30vh', wordBreak: 'break-all' }}>
                   {viewingBodyObj != null ? buildCurlCommand(report, viewingBodyObj, apiKey) : '（请求体解析失败）'}
                 </pre>
                 <p className="text-xs mt-1.5" style={{ color: 'var(--warn)' }}>⚠ cURL 命令含明文 API Key，注意妥善保管，不要粘贴到公开场合</p>
@@ -2662,6 +3029,169 @@ function LlmBatchReportView({ report, apiKey }: { report: BatchReport; apiKey: s
           </div>
         </div>
       )}
+
+      {/* 查看响应头 / 响应正文 */}
+      {viewingResult != null && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-6" style={{ background: 'rgba(0,0,0,0.5)' }} onClick={() => setViewingResult(null)}>
+          <div className="rounded-2xl p-5 w-full flex flex-col" style={{ background: 'var(--bg)', border: '1px solid var(--border)', boxShadow: 'var(--shadowMd)', maxWidth: 640, maxHeight: '82vh' }} onClick={e => e.stopPropagation()}>
+            <div className="flex items-center justify-between mb-3 flex-shrink-0">
+              <b className="text-sm" style={{ color: 'var(--text)' }}>[#{viewingResult.seq} {viewingResult.model}] 响应</b>
+              <Btn small variant="ghost" onClick={() => setViewingResult(null)}>✕ 关闭</Btn>
+            </div>
+            <div className="overflow-y-auto flex flex-col gap-4">
+              <div>
+                <div className="flex items-center justify-between mb-1.5">
+                  <Label>响应头</Label>
+                  <CopyBtn text={JSON.stringify(viewingResult.responseHeaders ?? {}, null, 2)} />
+                </div>
+                <pre className="rounded-xl p-3 text-xs overflow-auto" style={{ background: 'var(--code)', border: '1px solid var(--inputBorder)', fontFamily: '"JetBrains Mono", "JetBrainsMono Nerd Font", "SF Mono", "Fira Code", "Fira Mono", "Roboto Mono", "Droid Sans Mono", "Cascadia Code", Consolas, "Courier New", monospace', lineHeight: 1.7, maxHeight: '20vh' }}>
+                  {JSON.stringify(viewingResult.responseHeaders ?? {}, null, 2)}
+                </pre>
+              </div>
+              <div>
+                <div className="flex items-center justify-between mb-1.5">
+                  <Label>响应正文{viewingResult.responseBodyTruncated ? `（已截断，超过 ${LLM_RESPONSE_BODY_MAX} 字符）` : ''}</Label>
+                  <CopyBtn text={viewingResult.responseBody ?? ''} />
+                </div>
+                <pre className="rounded-xl p-3 text-xs overflow-auto whitespace-pre-wrap" style={{ background: 'var(--code)', border: '1px solid var(--inputBorder)', fontFamily: '"JetBrains Mono", "JetBrainsMono Nerd Font", "SF Mono", "Fira Code", "Fira Mono", "Roboto Mono", "Droid Sans Mono", "Cascadia Code", Consolas, "Courier New", monospace', lineHeight: 1.7, maxHeight: '40vh', wordBreak: 'break-all' }}>
+                  {viewingResult.responseBody ?? ''}
+                </pre>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+    </div>
+  )
+}
+
+// 可拖拽排序的单条提示词行。必须是模块级顶层函数组件（不能嵌套定义在 LlmPromptsPane 内部），
+// 因为 useSortable 依赖跨渲染保持稳定的组件标识，嵌套定义会导致每次渲染都创建新的组件类型、拖拽状态丢失。
+function SortablePromptRow({ prompt, active, onSelect, onDelete }: {
+  prompt: LlmPrompt; active: boolean; onSelect: () => void; onDelete: () => void
+}) {
+  const { attributes, listeners, setNodeRef, transform, transition, isDragging } = useSortable({ id: prompt.id })
+  const style: React.CSSProperties = {
+    transform: CSS.Transform.toString(transform),
+    transition: transition ?? undefined,
+    opacity: isDragging ? 0.6 : 1,
+    background: active ? 'var(--accentSubHard)' : 'transparent',
+  }
+  return (
+    <div ref={setNodeRef} style={style} onClick={onSelect}
+      className="flex items-center gap-2 rounded-xl px-2.5 py-2 cursor-pointer transition-all duration-100"
+    >
+      <div
+        {...attributes} {...listeners}
+        className="flex-shrink-0 cursor-grab active:cursor-grabbing select-none touch-none"
+        style={{ color: 'var(--t3)', fontSize: 14, lineHeight: 1, padding: '2px 2px' }}
+        onClick={e => e.stopPropagation()}
+      >⠿</div>
+      <div className="flex-1 min-w-0">
+        <TruncatedCell text={prompt.title || '（未命名）'} maxWidth={160} color={active ? 'var(--accent)' : 'var(--text)'} />
+        <div className="text-[11px] mt-0.5" style={{ color: 'var(--t3)' }}>{llmFmtTime(prompt.updatedAt)}</div>
+      </div>
+      <button
+        onClick={e => { e.stopPropagation(); onDelete() }}
+        className="flex-shrink-0 rounded-lg border-0 outline-none cursor-pointer px-1.5 py-1 text-xs"
+        style={{ background: 'transparent', color: 'var(--t3)' }}
+      >✕</button>
+    </div>
+  )
+}
+
+function LlmPromptsPane({ prompts, onChange }: {
+  prompts: LlmPrompt[]; onChange: (next: LlmPrompt[]) => void
+}) {
+  const [search, setSearch] = useState('')
+  const [editingId, setEditingId] = useState<string | null>(prompts[0]?.id ?? null)
+  const editing = prompts.find(p => p.id === editingId) ?? null
+  const editingBodyErr = editing ? validateLlmBodyJson(editing.body) : ''
+  const filtered = prompts.filter(p => p.title.toLowerCase().includes(search.trim().toLowerCase()))
+  const searching = search.trim() !== ''
+
+  const sensors = useSensors(useSensor(PointerSensor, { activationConstraint: { distance: 4 } }))
+
+  const updateEditing = (patch: Partial<Pick<LlmPrompt, 'title' | 'body'>>) => {
+    if (!editingId) return
+    onChange(prompts.map(p => p.id === editingId ? { ...p, ...patch, updatedAt: Date.now() } : p))
+  }
+
+  const createPrompt = () => {
+    const np = makeLlmPrompt('未命名提示词', DEFAULT_LLM_BODY)
+    onChange([...prompts, np])
+    setEditingId(np.id)
+    setSearch('')
+  }
+
+  const deletePrompt = (id: string) => {
+    if (!window.confirm('确认删除该条提示词？此操作不可恢复。')) return
+    const next = prompts.filter(p => p.id !== id)
+    onChange(next)
+    if (editingId === id) setEditingId(next[0]?.id ?? null)
+  }
+
+  const handleDragEnd = (e: DragEndEvent) => {
+    if (!e.over || e.active.id === e.over.id) return
+    const oldIdx = prompts.findIndex(p => p.id === e.active.id)
+    const newIdx = prompts.findIndex(p => p.id === e.over!.id)
+    if (oldIdx < 0 || newIdx < 0) return
+    onChange(arrayMove(prompts, oldIdx, newIdx))
+  }
+
+  return (
+    <div className="flex h-full">
+      {/* 左：搜索 + 可拖拽排序的提示词列表 */}
+      <div className="w-72 flex-shrink-0 flex flex-col gap-2.5 p-4 overflow-y-auto" style={{ borderRight: '1px solid var(--border)', background: 'var(--s1)' }}>
+        <div className="flex items-center justify-between gap-2">
+          <span className="text-xs" style={{ color: 'var(--t3)' }}>共 {prompts.length} 条</span>
+          <Btn small variant="primary" onClick={createPrompt}>+ 新建提示词</Btn>
+        </div>
+        <CustomInput value={search} onChange={setSearch} placeholder="搜索提示词标题…" />
+        {searching && <p className="text-[11px]" style={{ color: 'var(--t3)' }}>搜索时暂不支持拖拽排序，清空搜索后可拖拽</p>}
+        {filtered.length === 0 ? (
+          <p className="text-xs mt-2" style={{ color: 'var(--t3)' }}>{prompts.length === 0 ? '还没有提示词，点击上方新建' : '无匹配结果'}</p>
+        ) : searching ? (
+          <div className="flex flex-col gap-1">
+            {filtered.map(p => (
+              <SortablePromptRow key={p.id} prompt={p} active={p.id === editingId}
+                onSelect={() => setEditingId(p.id)} onDelete={() => deletePrompt(p.id)} />
+            ))}
+          </div>
+        ) : (
+          <DndContext sensors={sensors} collisionDetection={closestCenter} onDragEnd={handleDragEnd}>
+            <SortableContext items={prompts.map(p => p.id)} strategy={verticalListSortingStrategy}>
+              <div className="flex flex-col gap-1">
+                {prompts.map(p => (
+                  <SortablePromptRow key={p.id} prompt={p} active={p.id === editingId}
+                    onSelect={() => setEditingId(p.id)} onDelete={() => deletePrompt(p.id)} />
+                ))}
+              </div>
+            </SortableContext>
+          </DndContext>
+        )}
+      </div>
+
+      {/* 右：编辑区，编辑即时保存 */}
+      <div className="flex-1 flex flex-col p-4 min-h-0">
+        {editing ? (
+          <>
+            <Label className="block mb-1.5">标题</Label>
+            <CustomInput value={editing.title} onChange={v => updateEditing({ title: v })} className="mb-3" />
+            <Label className="block mb-1.5">请求体 JSON（占位符：{'{{model}}'} 或 {'${[model]}'}）</Label>
+            <CustomTextarea value={editing.body} onChange={v => updateEditing({ body: v })} mono stretch className="flex-1"
+              style={{ minHeight: 0, ...(editingBodyErr ? { border: '1px solid var(--err)', boxShadow: '0 0 0 3px var(--errBg)' } : {}) }} />
+            {editingBodyErr && <p className="text-xs mt-1.5" style={{ color: 'var(--err)' }}>{editingBodyErr}</p>}
+            <div className="flex gap-2 mt-3 flex-shrink-0">
+              <Btn small variant="danger" onClick={() => deletePrompt(editing.id)}>删除该提示词</Btn>
+            </div>
+          </>
+        ) : (
+          <div className="flex flex-col items-center justify-center h-full" style={{ color: 'var(--t3)' }}>
+            <p className="text-sm">选择或新建一个提示词开始编辑</p>
+          </div>
+        )}
+      </div>
     </div>
   )
 }
@@ -2676,12 +3206,34 @@ function LlmBatchTool() {
   const [modelListText, setModelListText] = useState(() => loadLlmCfg().models ?? 'claude-3-5-sonnet-20241022')
   const [nReq, setNReq] = useState(() => loadLlmCfg().n ?? '5')
   const [concurrency, setConcurrency] = useState(() => loadLlmCfg().c ?? '3')
-  const [body, setBody] = useState(() => loadLlmCfg().body ?? DEFAULT_LLM_BODY)
-  const [bodyErr, setBodyErr] = useState('')
+  // 提示词库：请求体来源。prompts 是单一数据源，selectedPromptId 是本次批量测试实际使用的那条。
+  const [prompts, setPrompts] = useState<LlmPrompt[]>(() => loadOrMigrateLlmPrompts())
+  const [selectedPromptId, setSelectedPromptId] = useState<string | null>(() => loadLlmCfg().promptId ?? null)
+  const [storeResponseBody, setStoreResponseBody] = useState(() => loadLlmCfg().storeResponseBody ?? true)
+  const [reuseNotice, setReuseNotice] = useState('')
+
+  // 选中项失效（首次加载时持久化的 id 已不存在 / 当前选中的提示词被删除 / prompts 变空）时自动回退到第一条
+  useEffect(() => {
+    if (selectedPromptId != null && prompts.some(p => p.id === selectedPromptId)) return
+    setSelectedPromptId(prompts[0]?.id ?? null)
+  }, [prompts, selectedPromptId])
+
+  const selectedPrompt = prompts.find(p => p.id === selectedPromptId) ?? null
+  const promptBodyErr = selectedPrompt ? validateLlmBodyJson(selectedPrompt.body) : ''
+
+  // 根据当前 API 类型自动识别提示词请求体协议并按需转换：级联在 promptBodyErr 之后
+  // （语法都不对就不跑识别，交给 promptBodyErr 展示），只在运行时生效，绝不写回提示词库。
+  const convertedBody = useMemo(() => {
+    if (!selectedPrompt) return null
+    if (promptBodyErr) return null
+    return convertPromptBodyForApiType(selectedPrompt.body, apiType)
+  }, [selectedPrompt?.body, apiType, promptBodyErr])
 
   useEffect(() => {
-    saveLlmCfg({ apiType, baseUrl, timeout: timeoutSec, models: modelListText, n: nReq, c: concurrency, body })
-  }, [apiType, baseUrl, timeoutSec, modelListText, nReq, concurrency, body])
+    saveLlmCfg({ apiType, baseUrl, timeout: timeoutSec, models: modelListText, n: nReq, c: concurrency, promptId: selectedPromptId ?? undefined, storeResponseBody })
+  }, [apiType, baseUrl, timeoutSec, modelListText, nReq, concurrency, selectedPromptId, storeResponseBody])
+
+  useEffect(() => { saveLlmPrompts(prompts) }, [prompts])
 
   // API Key 加密存储：挂载时异步解密回填一次；此后每次变化都异步加密后写回
   useEffect(() => {
@@ -2700,18 +3252,8 @@ function LlmBatchTool() {
     })
   }, [apiKey, apiKeyLoaded])
 
-  const handleBodyChange = (v: string) => {
-    setBody(v)
-    try {
-      JSON.parse(fillModelPlaceholder(v, '"__MODEL__"'))
-      setBodyErr('')
-    } catch (e) {
-      setBodyErr('JSON 语法错误：' + ((e as Error)?.message || String(e)))
-    }
-  }
-
   // ── 运行状态 ──
-  const [pane, setPane] = useState<'live' | 'report' | 'history'>('live')
+  const [pane, setPane] = useState<'live' | 'report' | 'history' | 'prompts'>('live')
   const [running, setRunning] = useState(false)
   const [stopping, setStopping] = useState(false)
   const [startErr, setStartErr] = useState('')
@@ -2730,10 +3272,15 @@ function LlmBatchTool() {
   const runBatch = async () => {
     setStartErr('')
     const errs: string[] = []
-    try {
-      JSON.parse(fillModelPlaceholder(body, '"__MODEL__"'))
-    } catch (e) {
-      errs.push('请求体不是合法 JSON：' + ((e as Error)?.message || String(e)))
+    let finalBodyText: string | null = null
+    if (!selectedPrompt) {
+      errs.push('请先选择一个提示词作为请求体来源。')
+    } else if (promptBodyErr) {
+      errs.push('提示词请求体不是合法 JSON：' + promptBodyErr)
+    } else if (!convertedBody || !convertedBody.ok) {
+      errs.push(convertedBody ? convertedBody.error : '请求体协议识别失败，请检查请求体内容。')
+    } else {
+      finalBodyText = convertedBody.body
     }
     const models = parseModelList(modelListText)
     if (models.length === 0) errs.push('模型列表不能为空。')
@@ -2744,7 +3291,7 @@ function LlmBatchTool() {
     const timeoutNum = Math.max(1, parseFloat(timeoutSec) || 120)
     if (errs.length) { setStartErr(errs.join('\n')); return }
 
-    const cfg: LlmBatchCfg = { apiType, endpoint: llmEndpointOf(apiType, baseUrl), apiKey: apiKey.trim(), timeout: timeoutNum, bodyText: body }
+    const cfg: LlmBatchCfg = { apiType, endpoint: llmEndpointOf(apiType, baseUrl), apiKey: apiKey.trim(), timeout: timeoutNum, bodyText: finalBodyText!, storeResponseBody }
 
     const queue: BatchTask[] = []
     let seqCounter = 0
@@ -2799,7 +3346,8 @@ function LlmBatchTool() {
     const rep: BatchReport = {
       id: 'r' + endTime + '_' + Math.random().toString(36).slice(2, 7),
       startTime, endTime, durationMs: endTime - startTime,
-      apiType, endpoint: cfg.endpoint, bodyText: cfg.bodyText, models, n: N, c: C, stopped: wasStopped,
+      apiType, endpoint: cfg.endpoint, baseUrl: baseUrl.trim(), timeout: timeoutNum,
+      bodyText: cfg.bodyText, promptId: selectedPromptId ?? null, models, n: N, c: C, stopped: wasStopped,
       total: finalResults.length,
       success: finalResults.filter(r => r.status === 'ok').length,
       fail: finalResults.filter(r => r.status === 'error').length,
@@ -2817,6 +3365,34 @@ function LlmBatchTool() {
     setStopping(true)
   }
 
+  // 历史「复用」：把某条历史报告的配置回填到左侧面板。API Key 从不回填（历史本来就不存）。
+  const reuseHistoryReport = (rep: BatchReport) => {
+    setApiType(rep.apiType)
+    const derivedBase = rep.baseUrl ?? llmBaseUrlFromEndpoint(rep.apiType, rep.endpoint)
+    if (derivedBase) setBaseUrl(derivedBase)
+    if (rep.timeout != null) setTimeoutSec(String(rep.timeout))
+    setModelListText(rep.models.join('\n'))
+    setNReq(String(rep.n))
+    setConcurrency(String(rep.c))
+
+    let targetId = rep.promptId && prompts.some(p => p.id === rep.promptId) ? rep.promptId : null
+    if (!targetId) {
+      const np = makeLlmPrompt(`复用于 ${llmFmtTime(rep.startTime)}`, rep.bodyText)
+      setPrompts(prev => [...prev, np])
+      targetId = np.id
+    }
+    setSelectedPromptId(targetId)
+
+    // 让「实时」面板真正回到空状态，而不是残留上一次运行的日志/报告
+    setResults([])
+    setLiveLog([])
+    setReport(null)
+    setPane('live')
+
+    setReuseNotice(`已从「${llmFmtTime(rep.startTime)}」的历史报告回填配置到左侧面板。`)
+    setTimeout(() => setReuseNotice(''), 4000)
+  }
+
   const completed = results.filter(r => r.status === 'ok' || r.status === 'error').length
   const total = results.length
   const pct = total ? Math.round(completed / total * 100) : 0
@@ -2831,7 +3407,7 @@ function LlmBatchTool() {
         <div className="ml-auto flex gap-2">
           {running
             ? <Btn variant="danger" onClick={stopBatch} disabled={stopping}>{stopping ? '正在停止…' : '⏹ 停止'}</Btn>
-            : <Btn variant="primary" onClick={runBatch} disabled={!apiKey.trim() || !baseUrl.trim()}>▶ 开始批量请求</Btn>}
+            : <Btn variant="primary" onClick={runBatch} disabled={!apiKey.trim() || !baseUrl.trim() || prompts.length === 0 || (convertedBody !== null && !convertedBody.ok)}>▶ 开始批量请求</Btn>}
         </div>
       </div>
 
@@ -2858,7 +3434,6 @@ function LlmBatchTool() {
             <Label className="block mb-1.5">请求超时（秒）</Label>
             <CustomInput value={timeoutSec} onChange={setTimeoutSec} type="number" placeholder="120" />
           </div>
-          <p className="text-xs leading-relaxed" style={{ color: 'var(--t3)' }}>实际请求端点：{llmEndpointOf(apiType, baseUrl || '{BaseURL}')}</p>
 
           <div style={{ borderTop: '1px solid var(--border)', paddingTop: 14 }}>
             <Label className="block mb-1.5">模型列表（每行一个，或逗号分隔）</Label>
@@ -2869,11 +3444,30 @@ function LlmBatchTool() {
             <div><Label className="block mb-1.5">每模型次数 N</Label><CustomInput value={nReq} onChange={setNReq} type="number" placeholder="5" /></div>
             <div><Label className="block mb-1.5">全局并发数 C</Label><CustomInput value={concurrency} onChange={setConcurrency} type="number" placeholder="3" /></div>
           </div>
-          <div className="flex-1 flex flex-col min-h-0">
-            <Label className="block mb-1.5">请求体 JSON（{'{{model}}'} 占位，或留空自动注入 model）</Label>
-            <CustomTextarea value={body} onChange={handleBodyChange} mono stretch className="flex-1"
-              style={{ minHeight: 0, ...(bodyErr ? { border: '1px solid var(--err)', boxShadow: '0 0 0 3px var(--errBg)' } : {}) }} />
-            {bodyErr && <p className="text-xs mt-1.5" style={{ color: 'var(--err)' }}>{bodyErr}</p>}
+          <div>
+            <Toggle value={storeResponseBody} onChange={setStoreResponseBody} label="存储响应体" />
+          </div>
+          <div style={{ borderTop: '1px solid var(--border)', paddingTop: 14 }}>
+            <Label className="block mb-1.5">提示词（请求体来源）</Label>
+            {prompts.length === 0 ? (
+              <p className="text-xs" style={{ color: 'var(--err)' }}>⚠ 还没有任何提示词，请切换到右侧「提示词」标签页新建一条。</p>
+            ) : (
+              <>
+                <SearchableSelect value={selectedPromptId} onChange={setSelectedPromptId}
+                  options={prompts.map(p => ({ value: p.id, label: p.title || '（未命名）' }))}
+                  placeholder="选择一个提示词…" />
+                {!selectedPromptId && <p className="text-xs mt-1.5" style={{ color: 'var(--warn)' }}>⚠ 请选择一个提示词作为请求体来源。</p>}
+                {selectedPrompt && (
+                  <>
+                    <pre className="rounded-xl p-2.5 text-xs overflow-auto mt-2" style={{ background: 'var(--code)', border: '1px solid var(--inputBorder)', maxHeight: 140, lineHeight: 1.6, fontFamily: '"JetBrains Mono", "JetBrainsMono Nerd Font", "SF Mono", "Fira Code", "Fira Mono", "Roboto Mono", "Droid Sans Mono", "Cascadia Code", Consolas, "Courier New", monospace' }}>
+                      {convertedBody?.ok ? convertedBody.body : selectedPrompt.body}
+                    </pre>
+                    {promptBodyErr && <p className="text-xs mt-1.5" style={{ color: 'var(--err)' }}>{promptBodyErr}</p>}
+                    {convertedBody && !convertedBody.ok && <p className="text-xs mt-1.5" style={{ color: 'var(--err)' }}>{convertedBody.error}</p>}
+                  </>
+                )}
+              </>
+            )}
           </div>
           {startErr && <p className="text-xs whitespace-pre-wrap" style={{ color: 'var(--err)' }}>{startErr}</p>}
         </div>
@@ -2881,16 +3475,18 @@ function LlmBatchTool() {
         {/* 右侧结果区 */}
         <div className="flex-1 flex flex-col overflow-hidden">
           <div className="glass flex items-center px-6 py-3 flex-shrink-0" style={{ borderBottom: '1px solid var(--border)' }}>
-            <SegmentedControl value={pane} onChange={v => setPane(v as 'live' | 'report' | 'history')} options={[
+            <SegmentedControl value={pane} onChange={v => setPane(v as 'live' | 'report' | 'history' | 'prompts')} options={[
               { value: 'live', label: '实时' },
               { value: 'report', label: '报告' },
               { value: 'history', label: `历史 (${history.length})` },
+              { value: 'prompts', label: `提示词 (${prompts.length})` },
             ]} />
           </div>
 
           <div className="flex-1 overflow-y-auto">
             {pane === 'live' && (
               <div className="flex flex-col">
+                {reuseNotice && <p className="px-6 pt-3 text-xs" style={{ color: 'var(--accent)' }}>{reuseNotice}</p>}
                 {total > 0 && (
                   <div className="px-6 py-3 flex flex-col gap-2 flex-shrink-0" style={{ borderBottom: '1px solid var(--border)' }}>
                     <div className="flex items-center justify-between text-sm">
@@ -3003,6 +3599,7 @@ function LlmBatchTool() {
                         <Btn small variant="ghost" onClick={() => setExpandedHistId(id => id === rep.id ? null : rep.id)}>
                           {expandedHistId === rep.id ? '收起' : '查看'}
                         </Btn>
+                        <Btn small variant="ghost" onClick={() => reuseHistoryReport(rep)}>复用</Btn>
                         <Btn small variant="ghost" onClick={() => llmDownload(`report_${llmTsName(rep.startTime)}.json`, JSON.stringify(rep, null, 2), 'application/json')}>JSON</Btn>
                         <Btn small variant="ghost" onClick={() => llmDownload(`report_${llmTsName(rep.startTime)}.csv`, reportToCsv(rep), 'text/csv;charset=utf-8')}>CSV</Btn>
                         <Btn small variant="danger" onClick={() => {
@@ -3021,6 +3618,12 @@ function LlmBatchTool() {
                     )}
                   </div>
                 ))}
+              </div>
+            )}
+
+            {pane === 'prompts' && (
+              <div className="h-full">
+                <LlmPromptsPane prompts={prompts} onChange={setPrompts} />
               </div>
             )}
           </div>
@@ -3584,7 +4187,7 @@ function UrlInput({ onSubmit }: { onSubmit: (text: string) => void }) {
           background: 'var(--inputBg)', color: 'var(--text)',
           border: `1px solid ${focused ? 'var(--accent)' : 'var(--inputBorder)'}`,
           boxShadow: focused ? '0 0 0 3px var(--accentSub)' : 'none',
-          fontFamily: '"JetBrainsMono Nerd Font", "SF Mono", "Fira Code", "Fira Mono", "Roboto Mono", "Droid Sans Mono", "Cascadia Code", Consolas, "Courier New", monospace', minHeight: 80,
+          fontFamily: '"JetBrains Mono", "JetBrainsMono Nerd Font", "SF Mono", "Fira Code", "Fira Mono", "Roboto Mono", "Droid Sans Mono", "Cascadia Code", Consolas, "Courier New", monospace', minHeight: 80,
         }}
         onKeyDown={e => { if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) { onSubmit(value); setValue('') } }}
       />
@@ -4025,7 +4628,7 @@ function IdGenTool() {
             <div>
               <div className="flex items-center justify-between mb-1.5">
                 <Label>长度</Label>
-                <span className="text-sm font-semibold tabular-nums" style={{ color: 'var(--accent)', fontFamily: '"JetBrainsMono Nerd Font", "SF Mono", "Fira Code", "Fira Mono", "Roboto Mono", "Droid Sans Mono", "Cascadia Code", Consolas, "Courier New", monospace' }}>{opts.rand.len}</span>
+                <span className="text-sm font-semibold tabular-nums" style={{ color: 'var(--accent)', fontFamily: '"JetBrains Mono", "JetBrainsMono Nerd Font", "SF Mono", "Fira Code", "Fira Mono", "Roboto Mono", "Droid Sans Mono", "Cascadia Code", Consolas, "Courier New", monospace' }}>{opts.rand.len}</span>
               </div>
               <input
                 type="range" min={1} max={256} value={opts.rand.len}
@@ -4101,13 +4704,13 @@ function IdGenTool() {
         {first && (
           <div className="flex items-center gap-3 px-4 py-3 rounded-xl mb-3" style={{ background: 'var(--s1)', border: '1px solid var(--border)' }}>
             <Badge color="ok">首条</Badge>
-            <code className="flex-1 text-sm font-semibold" style={{ fontFamily: '"JetBrainsMono Nerd Font", "SF Mono", "Fira Code", "Fira Mono", "Roboto Mono", "Droid Sans Mono", "Cascadia Code", Consolas, "Courier New", monospace', color: 'var(--text)', overflowWrap: 'anywhere' }}>{first}</code>
+            <code className="flex-1 text-sm font-semibold" style={{ fontFamily: '"JetBrains Mono", "JetBrainsMono Nerd Font", "SF Mono", "Fira Code", "Fira Mono", "Roboto Mono", "Droid Sans Mono", "Cascadia Code", Consolas, "Courier New", monospace', color: 'var(--text)', overflowWrap: 'anywhere' }}>{first}</code>
             <CopyBtn text={first} />
           </div>
         )}
         <div
           className="idgen-result rounded-xl overflow-auto p-4 text-xs leading-relaxed"
-          style={{ background: 'var(--code)', border: '1px solid var(--inputBorder)', fontFamily: '"JetBrainsMono Nerd Font", "SF Mono", "Fira Code", "Fira Mono", "Roboto Mono", "Droid Sans Mono", "Cascadia Code", Consolas, "Courier New", monospace', color: 'var(--text)', whiteSpace: 'pre', maxHeight: 460 }}
+          style={{ background: 'var(--code)', border: '1px solid var(--inputBorder)', fontFamily: '"JetBrains Mono", "JetBrainsMono Nerd Font", "SF Mono", "Fira Code", "Fira Mono", "Roboto Mono", "Droid Sans Mono", "Cascadia Code", Consolas, "Courier New", monospace', color: 'var(--text)', whiteSpace: 'pre', maxHeight: 460 }}
         >
           {text}
         </div>
@@ -4980,7 +5583,7 @@ function GraphqlTool() {
           <div
             className="absolute inset-0 overflow-auto pointer-events-none"
             style={{
-              fontFamily: '"JetBrainsMono Nerd Font", "SF Mono", "Fira Code", "Fira Mono", "Roboto Mono", "Droid Sans Mono", "Cascadia Code", Consolas, "Courier New", monospace',
+              fontFamily: '"JetBrains Mono", "JetBrainsMono Nerd Font", "SF Mono", "Fira Code", "Fira Mono", "Roboto Mono", "Droid Sans Mono", "Cascadia Code", Consolas, "Courier New", monospace',
               fontSize: 13,
               lineHeight: 1.65,
               padding: '10px 12px',
@@ -5011,7 +5614,7 @@ function GraphqlTool() {
               border: 'none',
               outline: 'none',
               fontSize: 13,
-              fontFamily: '"JetBrainsMono Nerd Font", "SF Mono", "Fira Code", "Fira Mono", "Roboto Mono", "Droid Sans Mono", "Cascadia Code", Consolas, "Courier New", monospace',
+              fontFamily: '"JetBrains Mono", "JetBrainsMono Nerd Font", "SF Mono", "Fira Code", "Fira Mono", "Roboto Mono", "Droid Sans Mono", "Cascadia Code", Consolas, "Courier New", monospace',
               lineHeight: 1.65,
               color: 'transparent',
               caretColor: 'var(--text)',

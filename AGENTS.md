@@ -14,17 +14,17 @@ npm run test:e2e   # 运行 Playwright 端到端测试
 ## 项目结构
 
 - `src/main.tsx` - React 入口，挂载 `src/App.tsx`
-- `src/App.tsx` - 单文件应用（9 个工具 + 主题系统 + 侧边栏导航，约 4200 行）
+- `src/App.tsx` - 单文件应用（9 个工具 + 主题系统 + 侧边栏导航，约 5600 行）
 - `src/index.css` - 全局样式 + Tailwind CSS v4 import + 毛玻璃/主题过渡工具类
 - `playwright.config.ts` - Playwright 端到端测试配置
 - `e2e/` - 端到端测试用例（按工具拆分）
 
 ## 技术要点
 
-- 运行时：React 19 + Vite 8 + Tailwind CSS v4（`@tailwindcss/vite` 插件）+ recharts（LLM 批量测试的输出 Token 波动图）
+- 运行时：React 19 + Vite 8 + Tailwind CSS v4（`@tailwindcss/vite` 插件）+ recharts（LLM 批量测试的输出 Token 波动图）+ `@dnd-kit/core`/`@dnd-kit/sortable`/`@dnd-kit/utilities`（LLM 批量测试的提示词库拖拽排序）
 - 样式：Tailwind 工具类 + CSS 变量主题（`--bg`/`--accent` 等，见 `THEMES`），毛玻璃用 `.glass`/`.glass-sidebar`
-- 字体：Inter + JetBrains Mono（Google Fonts 引入），主题数据在 App.tsx
-- 状态持久化：localStorage（主题 `dev-toolkit-theme`、Seedance 汇率/海外 2.5 单价、ID 生成器配置 `idgen-opts`、Base64 选项 `base64-opts`、Unicode 选项 `unicode-opts`、LLM 批量测试配置 `llmbatch-config` 与历史报告 `llmbatch-history` 等）。LLM 批量测试的 API Key（`llmbatch-key`）用 Web Crypto（AES-GCM）加密后落盘，读取时解密回填；纯前端工具没有服务端，密钥必然内嵌在代码里，这只是避免明文直接躺在 localStorage 里，不是抵御可执行页面 JS 的攻击者的真正机密保护
+- 字体：直接用 CSS `font-family` 声明 Inter（正文，`src/index.css`）/ JetBrains Mono（等宽，`App.tsx` 内联样式），不自建 `@font-face`、不下载/打包字体文件——本机没装就走后面的系统字体兜底栈；主题数据在 App.tsx
+- 状态持久化：localStorage（主题 `dev-toolkit-theme`、Seedance 汇率/海外 2.5 单价、ID 生成器配置 `idgen-opts`、Base64 选项 `base64-opts`、Unicode 选项 `unicode-opts`、LLM 批量测试配置 `llmbatch-config`、提示词库 `llmbatch-prompts`、历史报告 `llmbatch-history` 等）。`llmbatch-config` 不再存储请求体原文（已迁移到 `llmbatch-prompts`，首次加载时自动迁移一次）。LLM 批量测试的 API Key（`llmbatch-key`）用 Web Crypto（AES-GCM）加密后落盘，读取时解密回填；纯前端工具没有服务端，密钥必然内嵌在代码里，这只是避免明文直接躺在 localStorage 里，不是抵御可执行页面 JS 的攻击者的真正机密保护
 
 ## 代码质量
 
