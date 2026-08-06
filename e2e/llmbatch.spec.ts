@@ -202,6 +202,7 @@ test.describe('LLM 批量测试', () => {
     await page.getByRole('button', { name: /开始批量请求/ }).click()
     await expect(page.locator('main')).toContainText('总请求')
 
+    await page.getByRole('button', { name: /^导出/ }).click()
     const [download] = await Promise.all([
       page.waitForEvent('download'),
       page.getByRole('button', { name: '导出 CSV' }).click(),

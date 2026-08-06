@@ -232,11 +232,71 @@ function IconSettings() {
   )
 }
 
+function IconEye() {
+  return (
+    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round">
+      <path d="M2 12s3-7 10-7 10 7 10 7-3 7-10 7-10-7-10-7z"/>
+      <circle cx="12" cy="12" r="3"/>
+    </svg>
+  )
+}
+function IconRepeat() {
+  return (
+    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round">
+      <polyline points="17 1 21 5 17 9"/>
+      <path d="M3 11V9a4 4 0 0 1 4-4h14"/>
+      <polyline points="7 23 3 19 7 15"/>
+      <path d="M21 13v2a4 4 0 0 1-4 4H3"/>
+    </svg>
+  )
+}
+function IconTrash() {
+  return (
+    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round">
+      <polyline points="3 6 5 6 21 6"/>
+      <path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/>
+      <line x1="10" y1="11" x2="10" y2="17"/>
+      <line x1="14" y1="11" x2="14" y2="17"/>
+    </svg>
+  )
+}
+function IconExpand() {
+  return (
+    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round">
+      <polyline points="15 3 21 3 21 9"/>
+      <polyline points="9 21 3 21 3 15"/>
+      <line x1="21" y1="3" x2="14" y2="10"/>
+      <line x1="3" y1="21" x2="10" y2="14"/>
+    </svg>
+  )
+}
+
 // ─── Utilities ────────────────────────────────────────────────────────────────
 
 function formatJson(raw: string): { ok: boolean; text: string } {
   try {
     return { ok: true, text: JSON.stringify(JSON.parse(raw), null, 2) }
+  } catch {
+    return { ok: false, text: raw }
+  }
+}
+
+/** 兼容 `{{model}}`/`${[model]}` 等占位符的 JSON 格式化：先替换占位符为合法 JSON 标记，
+ *  格式化后再还原，确保含占位符的 JSON 也能被语法高亮和折叠。 */
+function formatJsonWithPlaceholders(raw: string): { ok: boolean; text: string } {
+  // 匹配 MODEL_PLACEHOLDER_RE 的四种写法
+  const PH_RE = /"\{\{model\}\}"|\{\{model\}\}|"\$\{\[\s*model\s*\]\}"|\$\{\[\s*model\s*\]\}/g
+  const phMap: string[] = []
+  const cleaned = raw.replace(PH_RE, m => {
+    const idx = phMap.length
+    phMap.push(m)
+    // 确保替换后是合法 JSON 字符串值（带引号）
+    return `"__PH_${idx}__"`
+  })
+  try {
+    const formatted = JSON.stringify(JSON.parse(cleaned), null, 2)
+    const restored = formatted.replace(/"__PH_(\d+)__"/g, (_, idx) => phMap[+idx] ?? `"__PH_${idx}__"`)
+    return { ok: true, text: restored }
   } catch {
     return { ok: false, text: raw }
   }
@@ -2025,6 +2085,135 @@ function AiConvertTool() {
   )
 }
 
+// ─── Shared: 只读 JSON 查看器（复用 JSON 可视化工具的高亮/折叠/虚拟滚动能力）───
+
+const LLM_JSON_VIEWER_DEGRADE_LINES = 5000
+const LLM_JSON_VIEWER_DEGRADE_CHARS = 500_000
+const LLM_JSON_VIEWER_DEGRADE_LINE_LEN = 20_000
+
+function ReadOnlyJsonTree({ text }: { text: string }) {
+  const OVERSCAN = 10
+  const lines = useMemo(() => text.split('\n'), [text])
+  const degrade = useMemo(() =>
+    lines.length > LLM_JSON_VIEWER_DEGRADE_LINES ||
+    text.length > LLM_JSON_VIEWER_DEGRADE_CHARS ||
+    lines.some(l => l.length > LLM_JSON_VIEWER_DEGRADE_LINE_LEN)
+  , [lines, text])
+  const ranges = useMemo(() => degrade ? new Map<number, number>() : computeFoldRanges(lines), [lines, degrade])
+  const [collapsed, setCollapsed] = useState<Set<number>>(new Set())
+  const [scrollTop, setScrollTop] = useState(0)
+  const [viewportH, setViewportH] = useState(0)
+  const containerRef = useRef<HTMLDivElement>(null)
+
+  useLayoutEffect(() => {
+    const el = containerRef.current
+    if (!el) return
+    setViewportH(el.clientHeight)
+  }, [])
+
+  useEffect(() => {
+    const el = containerRef.current
+    if (!el) return
+    const ro = new ResizeObserver(() => setViewportH(el.clientHeight))
+    ro.observe(el)
+    return () => ro.disconnect()
+  }, [])
+
+  const toggleFold = (line: number) => {
+    setCollapsed(prev => {
+      const next = new Set(prev)
+      if (next.has(line)) next.delete(line); else next.add(line)
+      return next
+    })
+  }
+
+  const visible = useMemo(() => getVisibleLines(lines, ranges, collapsed), [lines, ranges, collapsed])
+  const start = Math.max(0, Math.floor(scrollTop / JSON_ROW) - OVERSCAN)
+  const end = Math.min(visible.length, Math.ceil((scrollTop + viewportH) / JSON_ROW) + OVERSCAN)
+  const slice = visible.slice(start, end)
+
+  const onScroll = () => {
+    const el = containerRef.current
+    if (!el) return
+    setScrollTop(el.scrollTop)
+  }
+
+  return (
+    <div className="relative flex-1 min-h-0 overflow-hidden">
+      {degrade && (
+        <div className="text-[11px] px-4 py-1.5 flex-shrink-0" style={{ background: 'var(--warnBg)', color: 'var(--warn)' }}>
+          ⚠ 内容较大（{lines.length} 行 / {text.length} 字符），已关闭语法高亮与折叠以保证流畅度
+        </div>
+      )}
+      <div ref={containerRef} onScroll={onScroll}
+        className="absolute inset-0 overflow-auto"
+        style={{ fontFamily: '"JetBrains Mono", "JetBrainsMono Nerd Font", "SF Mono", "Fira Code", "Fira Mono", "Roboto Mono", "Droid Sans Mono", "Cascadia Code", Consolas, "Courier New", monospace', fontSize: '12.5px', lineHeight: JSON_ROW + 'px', padding: `${JSON_PAD_TB}px 16px ${JSON_PAD_TB}px ${JSON_PAD_L}px`, tabSize: 2 }}>
+        <div style={{ height: visible.length * JSON_ROW, position: 'relative' }}>
+          {slice.map((i, k) => {
+            const vi = start + k
+            const foldEnd = ranges.get(i)
+            const foldable = !degrade && foldEnd != null && foldEnd > i
+            const isCollapsed = collapsed.has(i)
+            return (
+              <div key={i} style={{ position: 'absolute', top: vi * JSON_ROW, left: 0, right: 0, height: JSON_ROW, display: 'flex', alignItems: 'center' }}>
+                <span className="select-none" style={{ width: JSON_LINE_NO_W, flexShrink: 0, textAlign: 'right', paddingRight: 4, color: 'var(--t3)', fontSize: '11px', position: 'sticky', left: 0, background: 'var(--code)' }}>{i + 1}</span>
+                {foldable ? (
+                  <button onClick={() => toggleFold(i)} aria-label={isCollapsed ? '展开' : '折叠'}
+                    className="flex-shrink-0 border-0 bg-transparent cursor-pointer outline-none"
+                    style={{ width: JSON_FOLD_W, height: JSON_FOLD_W, display: 'flex', alignItems: 'center', justifyContent: 'center', color: 'var(--t2)', padding: 0, fontFamily: 'inherit', fontSize: '10px', position: 'sticky', left: JSON_LINE_NO_W, background: 'var(--code)' }}>
+                    {isCollapsed ? '▸' : '▾'}
+                  </button>
+                ) : <span className="flex-shrink-0" style={{ width: JSON_FOLD_W, position: 'sticky', left: JSON_LINE_NO_W, background: 'var(--code)' }} />}
+                <span style={{ whiteSpace: 'pre', color: 'var(--text)', flex: 1, height: '100%' }}
+                  dangerouslySetInnerHTML={degrade ? undefined : { __html: highlightJson(lines[i]) || '​' }} />
+              </div>
+            )
+          })}
+        </div>
+      </div>
+    </div>
+  )
+}
+
+function LlmJsonViewerModal({ title, subtitle, text, onClose, extraActions }: {
+  title: string; subtitle?: string; text: string; onClose: () => void; extraActions?: React.ReactNode
+}) {
+  useEffect(() => {
+    const handler = (e: KeyboardEvent) => { if (e.key === 'Escape') onClose() }
+    window.addEventListener('keydown', handler)
+    return () => window.removeEventListener('keydown', handler)
+  }, [onClose])
+  const fmt = useMemo(() => formatJsonWithPlaceholders(text), [text])
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center p-6 ia-lightbox-enter"
+      style={{ background: 'color-mix(in srgb, var(--bg) 85%, transparent)', backdropFilter: 'blur(8px)' }}
+      onClick={e => { if (e.target === e.currentTarget) onClose() }}>
+      <div className="rounded-2xl flex flex-col" style={{ background: 'var(--bg)', border: '1px solid var(--border)', boxShadow: 'var(--shadowMd)', width: 720, maxWidth: '92vw', height: '78vh' }} onClick={e => e.stopPropagation()}>
+        <div className="flex items-center justify-between px-5 pt-4 pb-3 flex-shrink-0">
+          <div className="flex items-center gap-3 min-w-0">
+            <b className="text-sm" style={{ color: 'var(--text)' }}>{title}</b>
+            {subtitle && <span className="text-xs" style={{ color: 'var(--t2)' }}>{subtitle}</span>}
+          </div>
+          <div className="flex items-center gap-2 flex-shrink-0">
+            {extraActions}
+            <CopyBtn text={fmt.ok ? fmt.text : text} />
+            <Btn small variant="ghost" onClick={onClose}>✕ 关闭</Btn>
+          </div>
+        </div>
+        {!fmt.ok && text.trim() !== '' && (
+          <div className="mx-5 mb-2 px-3 py-1.5 rounded-lg text-xs" style={{ background: 'var(--warnBg)', color: 'var(--warn)' }}>
+            ⚠ 内容不是合法 JSON，按原始文本展示
+          </div>
+        )}
+        <div className="flex-1 flex flex-col min-h-0 px-5 pb-4">
+          <ReadOnlyJsonTree text={fmt.ok ? fmt.text : text} />
+        </div>
+      </div>
+    </div>
+  )
+}
+
 // ─── Tool: LLM 批量测试 ───────────────────────────────────────────────────────
 // 定位：Token 计费口径核查 —— 同一份请求体反复发送，输入 Token 是否恒定？换模型差多少？
 // 输出 Token 波动多大？验真（返回模型是否被中转站偷换）作为辅助指标保留。
@@ -2056,6 +2245,7 @@ interface BatchResult {
 
 interface BatchReport {
   id: string
+  title?: string
   startTime: number
   endTime: number
   durationMs: number
@@ -2562,6 +2752,12 @@ function llmTsName(d: number) {
   const dt = new Date(d)
   return `${dt.getFullYear()}${llmPad2(dt.getMonth() + 1)}${llmPad2(dt.getDate())}_${llmPad2(dt.getHours())}${llmPad2(dt.getMinutes())}${llmPad2(dt.getSeconds())}`
 }
+function llmReportExportName(report: BatchReport, ext: string): string {
+  const base = report.title?.trim()
+    ? report.title.trim().replace(/[\\/:*?"<>|]/g, '_').slice(0, 60)
+    : 'report'
+  return `${base}_${llmTsName(report.startTime)}.${ext}`
+}
 function llmDownload(name: string, content: string, mime: string) {
   const blob = new Blob([content], { type: mime })
   const a = document.createElement('a')
@@ -2583,6 +2779,137 @@ function reportToCsv(report: BatchReport): string {
   return '﻿' + rows.map(r => r.map(v => '"' + String(v).replace(/"/g, '""') + '"').join(',')).join('\r\n')
 }
 
+// ── 报告导出：图片 / PDF / HTML ──
+
+function llmDownloadBlob(name: string, blob: Blob) {
+  const a = document.createElement('a')
+  a.href = URL.createObjectURL(blob)
+  a.download = name
+  document.body.appendChild(a)
+  a.click()
+  setTimeout(() => { URL.revokeObjectURL(a.href); a.remove() }, 500)
+}
+
+function svgToPngDataUrl(liveSvg: SVGSVGElement): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const rect = liveSvg.getBoundingClientRect()
+    const w = Math.max(1, Math.round(rect.width)), h = Math.max(1, Math.round(rect.height))
+    const liveNodes = [liveSvg, ...Array.from(liveSvg.querySelectorAll<SVGElement>('*'))]
+    const clone = liveSvg.cloneNode(true) as SVGSVGElement
+    const cloneNodes = [clone, ...Array.from(clone.querySelectorAll<SVGElement>('*'))]
+    liveNodes.forEach((el, i) => {
+      const cs = getComputedStyle(el)
+      if (cs.fill && cs.fill !== 'none') cloneNodes[i].setAttribute('fill', cs.fill)
+      if (cs.stroke && cs.stroke !== 'none') cloneNodes[i].setAttribute('stroke', cs.stroke)
+    })
+    clone.setAttribute('width', String(w)); clone.setAttribute('height', String(h))
+    clone.setAttribute('xmlns', 'http://www.w3.org/2000/svg')
+    const xml = new XMLSerializer().serializeToString(clone)
+    const url = URL.createObjectURL(new Blob([xml], { type: 'image/svg+xml;charset=utf-8' }))
+    const img = new Image()
+    img.onload = () => {
+      const scale = Math.min(2, window.devicePixelRatio || 1)
+      const canvas = document.createElement('canvas')
+      canvas.width = w * scale; canvas.height = h * scale
+      const ctx = canvas.getContext('2d')!
+      ctx.scale(scale, scale); ctx.drawImage(img, 0, 0, w, h)
+      URL.revokeObjectURL(url)
+      resolve(canvas.toDataURL('image/png'))
+    }
+    img.onerror = reject
+    img.src = url
+  })
+}
+
+function withExpandedScrollAreas<T>(root: HTMLElement, fn: () => Promise<T>): Promise<T> {
+  const els = Array.from(root.querySelectorAll<HTMLElement>('[data-export-scroll]'))
+  const saved = els.map(el => ({ maxHeight: el.style.maxHeight, overflowY: el.style.overflowY, overflowX: el.style.overflowX }))
+  els.forEach(el => { el.style.maxHeight = 'none'; el.style.overflowY = 'visible'; el.style.overflowX = 'visible' })
+  return fn().finally(() => els.forEach((el, i) => { el.style.maxHeight = saved[i].maxHeight; el.style.overflowY = saved[i].overflowY; el.style.overflowX = saved[i].overflowX }))
+}
+
+async function captureReportCanvas(rootEl: HTMLElement): Promise<HTMLCanvasElement> {
+  const { default: html2canvas } = await import('html2canvas')
+  return withExpandedScrollAreas(rootEl, async () => {
+    const chartRoots = Array.from(rootEl.querySelectorAll<HTMLElement>('[data-chart-root] svg')) as SVGSVGElement[]
+    const restores: (() => void)[] = []
+    for (const svg of chartRoots) {
+      try {
+        const dataUrl = await svgToPngDataUrl(svg)
+        const img = document.createElement('img')
+        img.src = dataUrl
+        img.style.width = svg.getBoundingClientRect().width + 'px'
+        img.style.height = svg.getBoundingClientRect().height + 'px'
+        svg.replaceWith(img)
+        restores.push(() => img.replaceWith(svg))
+      } catch { /* 图表转换失败时保留原 SVG，html2canvas 兜底 */ }
+    }
+    try {
+      return await html2canvas(rootEl, {
+        backgroundColor: getComputedStyle(rootEl).getPropertyValue('--bg').trim() || '#ffffff',
+        scale: Math.min(2, window.devicePixelRatio || 1),
+        useCORS: true,
+        ignoreElements: el => el.hasAttribute('data-html2canvas-ignore'),
+      })
+    } finally {
+      restores.forEach(r => r())
+    }
+  })
+}
+
+async function exportReportAsImage(rootEl: HTMLElement, filename: string) {
+  try {
+    const canvas = await captureReportCanvas(rootEl)
+    canvas.toBlob(blob => { if (blob) llmDownloadBlob(filename, blob) }, 'image/png')
+  } catch {
+    window.alert('导出图片失败，请改用 JSON/CSV 导出获取完整数据。')
+  }
+}
+
+async function exportReportAsPdf(rootEl: HTMLElement, filename: string) {
+  try {
+    const { jsPDF } = await import('jspdf')
+    const canvas = await captureReportCanvas(rootEl)
+    const pxToMm = (px: number) => px * 0.264583
+    const w = pxToMm(canvas.width), h = pxToMm(canvas.height)
+    const doc = new jsPDF({ orientation: w > h ? 'l' : 'p', unit: 'mm', format: [w, h] })
+    doc.addImage(canvas.toDataURL('image/png'), 'PNG', 0, 0, w, h)
+    doc.save(filename)
+  } catch {
+    window.alert('导出 PDF 失败，请改用 JSON/CSV 导出获取完整数据。')
+  }
+}
+
+async function exportReportAsHtml(rootEl: HTMLElement, filename: string) {
+  try {
+    await withExpandedScrollAreas(rootEl, async () => {
+      const clone = rootEl.cloneNode(true) as HTMLElement
+      clone.querySelectorAll('[data-html2canvas-ignore]').forEach(el => el.remove())
+      const liveSvgs = Array.from(rootEl.querySelectorAll<SVGSVGElement>('[data-chart-root] svg'))
+      const cloneSvgs = Array.from(clone.querySelectorAll<SVGSVGElement>('[data-chart-root] svg'))
+      for (let i = 0; i < liveSvgs.length; i++) {
+        try {
+          const dataUrl = await svgToPngDataUrl(liveSvgs[i])
+          const img = document.createElement('img')
+          img.src = dataUrl
+          cloneSvgs[i].replaceWith(img)
+        } catch { /* 图表转换失败保留原样 */ }
+      }
+      const varNames = ['bg','s1','s2','border','borderHard','text','t2','t3','accent','accentFg','accentSub','accentSubHard','primary','primaryFg','sidebar','code','shadow','shadowMd','ok','okBg','err','errBg','warn','warnBg','jKey','jStr','jNum','jBool','jNull','inputBg','inputBorder']
+      const cs = getComputedStyle(rootEl)
+      const varsCss = ':root{' + varNames.map(n => `--${n}:${cs.getPropertyValue('--' + n).trim()}`).join(';') + '}'
+      let appCss = ''
+      for (const sheet of Array.from(document.styleSheets)) {
+        try { for (const rule of Array.from(sheet.cssRules)) appCss += rule.cssText + '\n' } catch { /* 跨域表跳过 */ }
+      }
+      const htmlContent = `<!doctype html><html><head><meta charset="utf-8"><title>LLM 批量测试报告</title><style>${varsCss}\nbody{margin:0;padding:24px;background:var(--bg);color:var(--text);font-family:Inter,system-ui,sans-serif}\n${appCss}</style></head><body>${clone.outerHTML}</body></html>`
+      llmDownload(filename, htmlContent, 'text/html;charset=utf-8')
+    })
+  } catch {
+    window.alert('导出 HTML 失败，请改用 JSON/CSV 导出获取完整数据。')
+  }
+}
+
 // ── 持久化：配置、加密后的 API Key、历史报告（最多 20 条）、提示词库 ──
 const LLM_CFG_KEY = 'llmbatch-config'
 const LLM_KEY_STORAGE_KEY = 'llmbatch-key'
@@ -2600,6 +2927,7 @@ interface LlmBatchCfgStored {
   body?: string                 // 旧字段：请求体已迁移到 llmbatch-prompts，这里仅保留供一次性迁移读取，不再写入
   promptId?: string             // 上次选中的提示词 id
   storeResponseBody?: boolean   // 是否存储响应体，默认 true
+  testTitle?: string            // 测试标题
 }
 function loadLlmCfg(): LlmBatchCfgStored {
   if (typeof window === 'undefined') return {}
@@ -2686,6 +3014,11 @@ function deleteLlmHistoryItem(id: string): BatchReport[] {
   try { localStorage.setItem(LLM_HIST_KEY, JSON.stringify(list)) } catch { /* ignore */ }
   return list
 }
+function renameLlmHistoryItem(id: string, title: string): BatchReport[] {
+  const list = loadLlmHistory().map(r => r.id === id ? { ...r, title } : r)
+  try { localStorage.setItem(LLM_HIST_KEY, JSON.stringify(list)) } catch { /* ignore */ }
+  return list
+}
 function clearLlmHistory() {
   try { localStorage.removeItem(LLM_HIST_KEY) } catch { /* ignore */ }
 }
@@ -2739,6 +3072,72 @@ function TruncatedCell({ text, maxWidth = 160, color }: { text: string; maxWidth
   )
 }
 
+function Tooltip({ label, children, side = 'top' }: {
+  label: string; children: React.ReactElement; side?: 'top' | 'bottom'
+}) {
+  const [pos, setPos] = useState<{ top: number; left: number } | null>(null)
+  const ref = useRef<HTMLSpanElement>(null)
+  const show = () => {
+    const r = ref.current?.getBoundingClientRect()
+    if (!r) return
+    setPos(side === 'top'
+      ? { top: r.top - 8, left: r.left + r.width / 2 }
+      : { top: r.bottom + 8, left: r.left + r.width / 2 })
+  }
+  return (
+    <span ref={ref} className="inline-flex" onMouseEnter={show} onMouseLeave={() => setPos(null)} onFocus={show} onBlur={() => setPos(null)}>
+      {children}
+      {pos && (
+        <span className="fixed z-[70] px-2 py-1 rounded-lg text-[11px] font-medium pointer-events-none tt-enter"
+          style={{ top: pos.top, left: pos.left, transform: side === 'top' ? 'translate(-50%,-100%)' : 'translate(-50%,0)', background: 'var(--text)', color: 'var(--bg)', boxShadow: 'var(--shadow)', whiteSpace: 'nowrap' }}>
+          {label}
+        </span>
+      )}
+    </span>
+  )
+}
+
+function IconBtn({ icon, tooltip, onClick, danger }: {
+  icon: React.ReactNode; tooltip: string; onClick: () => void; danger?: boolean
+}) {
+  return (
+    <Tooltip label={tooltip}>
+      <button onClick={onClick} aria-label={tooltip}
+        className="rounded-lg p-1.5 border-0 outline-none cursor-pointer transition-colors"
+        style={{ background: 'transparent', color: danger ? 'var(--err)' : 'var(--t2)' }}
+        onPointerEnter={e => { (e.currentTarget as HTMLButtonElement).style.background = danger ? 'var(--errBg)' : 'var(--s2)' }}
+        onPointerLeave={e => { (e.currentTarget as HTMLButtonElement).style.background = 'transparent' }}>
+        {icon}
+      </button>
+    </Tooltip>
+  )
+}
+
+function InlineEditableTitle({ value, placeholder, onSave }: {
+  value: string; placeholder: string; onSave: (v: string) => void
+}) {
+  const [editing, setEditing] = useState(false)
+  const [draft, setDraft] = useState(value)
+  if (!editing) {
+    return (
+      <span className="text-sm font-semibold cursor-text" style={{ color: 'var(--text)', borderBottom: '1px dashed transparent' }}
+        onClick={() => { setDraft(value); setEditing(true) }}
+        onMouseEnter={e => (e.currentTarget as HTMLElement).style.borderBottomColor = 'var(--t3)'}
+        onMouseLeave={e => (e.currentTarget as HTMLElement).style.borderBottomColor = 'transparent'}>
+        {value.trim() || placeholder}
+      </span>
+    )
+  }
+  const commit = () => { setEditing(false); const t = draft.trim(); if (t !== value.trim()) onSave(t) }
+  return (
+    <input autoFocus value={draft} onChange={e => setDraft(e.target.value)}
+      onBlur={commit}
+      onKeyDown={e => { if (e.key === 'Enter') commit(); if (e.key === 'Escape') setEditing(false) }}
+      className="text-sm font-semibold bg-transparent outline-none"
+      style={{ color: 'var(--text)', border: 'none', borderBottom: '1px solid var(--accent)' }} />
+  )
+}
+
 // Token 分布柱状图（输出 Token 波动始终展示；输入 Token 仅在跨请求不一致时展示，直观呈现差异）
 function LlmTokenChart({ model, results, field, title }: {
   model: string; results: BatchResult[]; field: 'inputTokens' | 'outputTokens'; title: string
@@ -2755,7 +3154,7 @@ function LlmTokenChart({ model, results, field, title }: {
     display: r.status === 'ok' ? String(r[field] ?? '-') : '失败',
   }))
   return (
-    <div className="rounded-2xl p-4" style={{ background: 'var(--bg)', border: '1px solid var(--border)', boxShadow: 'var(--shadow)' }}>
+    <div data-chart-root className="rounded-2xl p-4" style={{ background: 'var(--bg)', border: '1px solid var(--border)', boxShadow: 'var(--shadow)' }}>
       <b className="text-sm" style={{ color: 'var(--text)' }}>[{model}] {title}</b>
       <div style={{ height: 220, marginTop: 8 }}>
         <ResponsiveContainer width="100%" height="100%">
@@ -2770,7 +3169,7 @@ function LlmTokenChart({ model, results, field, title }: {
               formatter={(_value: unknown, _name: unknown, item: any) => [item?.payload?.ok ? item.payload.display + ' tok' : '请求失败', title]}
             />
             {st && <ReferenceLine y={st.mean} stroke="var(--t3)" strokeDasharray="4 3" />}
-            <Bar dataKey="value" radius={[4, 4, 0, 0]}>
+            <Bar dataKey="value" radius={[4, 4, 0, 0]} isAnimationActive={false}>
               {chartData.map((d, i) => <Cell key={i} fill={d.ok ? 'var(--accent)' : 'var(--t3)'} />)}
               <LabelList dataKey="display" position="top" style={{ fill: 'var(--text)', fontSize: 11 }} />
             </Bar>
@@ -2785,7 +3184,57 @@ function LlmTokenChart({ model, results, field, title }: {
 }
 
 // ── 报告渲染（当前报告 / 历史「查看」共用）──
+function LlmExportMenu({ report, rootRef }: { report: BatchReport; rootRef: React.RefObject<HTMLDivElement | null> }) {
+  const [open, setOpen] = useState(false)
+  const ref = useRef<HTMLDivElement>(null)
+
+  useEffect(() => {
+    if (!open) return
+    const onDown = (e: PointerEvent) => {
+      if (ref.current && !ref.current.contains(e.target as Node)) setOpen(false)
+    }
+    window.addEventListener('pointerdown', onDown)
+    return () => window.removeEventListener('pointerdown', onDown)
+  }, [open])
+
+  return (
+    <div ref={ref} className="relative" data-html2canvas-ignore="true">
+      <Btn small variant="ghost" onClick={() => setOpen(o => !o)}>导出 ▾</Btn>
+      {open && (
+        <div className="absolute right-0 z-50 rounded-2xl overflow-hidden" style={{ top: 'calc(100% + 5px)', background: 'var(--bg)', border: '1px solid var(--border)', boxShadow: 'var(--shadowMd)', padding: 4, minWidth: 140 }}>
+          <button onClick={() => { llmDownload(llmReportExportName(report, 'json'), JSON.stringify(report, null, 2), 'application/json'); setOpen(false) }}
+            className="w-full text-left px-3 py-2 text-xs rounded-xl border-0 cursor-pointer outline-none"
+            style={{ background: 'transparent', color: 'var(--text)' }}
+            onPointerEnter={e => { (e.currentTarget as HTMLButtonElement).style.background = 'var(--s1)' }}
+            onPointerLeave={e => { (e.currentTarget as HTMLButtonElement).style.background = 'transparent' }}>导出 JSON</button>
+          <button onClick={() => { llmDownload(llmReportExportName(report, 'csv'), reportToCsv(report), 'text/csv;charset=utf-8'); setOpen(false) }}
+            className="w-full text-left px-3 py-2 text-xs rounded-xl border-0 cursor-pointer outline-none"
+            style={{ background: 'transparent', color: 'var(--text)' }}
+            onPointerEnter={e => { (e.currentTarget as HTMLButtonElement).style.background = 'var(--s1)' }}
+            onPointerLeave={e => { (e.currentTarget as HTMLButtonElement).style.background = 'transparent' }}>导出 CSV</button>
+          <button onClick={() => { rootRef.current && exportReportAsImage(rootRef.current, llmReportExportName(report, 'png')); setOpen(false) }}
+            className="w-full text-left px-3 py-2 text-xs rounded-xl border-0 cursor-pointer outline-none"
+            style={{ background: 'transparent', color: 'var(--text)' }}
+            onPointerEnter={e => { (e.currentTarget as HTMLButtonElement).style.background = 'var(--s1)' }}
+            onPointerLeave={e => { (e.currentTarget as HTMLButtonElement).style.background = 'transparent' }}>导出图片</button>
+          <button onClick={() => { rootRef.current && exportReportAsPdf(rootRef.current, llmReportExportName(report, 'pdf')); setOpen(false) }}
+            className="w-full text-left px-3 py-2 text-xs rounded-xl border-0 cursor-pointer outline-none"
+            style={{ background: 'transparent', color: 'var(--text)' }}
+            onPointerEnter={e => { (e.currentTarget as HTMLButtonElement).style.background = 'var(--s1)' }}
+            onPointerLeave={e => { (e.currentTarget as HTMLButtonElement).style.background = 'transparent' }}>导出 PDF</button>
+          <button onClick={() => { rootRef.current && exportReportAsHtml(rootRef.current, llmReportExportName(report, 'html')); setOpen(false) }}
+            className="w-full text-left px-3 py-2 text-xs rounded-xl border-0 cursor-pointer outline-none"
+            style={{ background: 'transparent', color: 'var(--text)' }}
+            onPointerEnter={e => { (e.currentTarget as HTMLButtonElement).style.background = 'var(--s1)' }}
+            onPointerLeave={e => { (e.currentTarget as HTMLButtonElement).style.background = 'transparent' }}>导出 HTML</button>
+        </div>
+      )}
+    </div>
+  )
+}
+
 function LlmBatchReportView({ report, apiKey }: { report: BatchReport; apiKey: string }) {
+  const rootRef = useRef<HTMLDivElement>(null)
   const [viewingModel, setViewingModel] = useState<string | null>(null)
   const [viewingResult, setViewingResult] = useState<BatchResult | null>(null)
   const viewingBodyObj = useMemo(() => {
@@ -2809,10 +3258,10 @@ function LlmBatchReportView({ report, apiKey }: { report: BatchReport; apiKey: s
   const crossModelDiff = crossModelNumeric.length > 1 ? Math.max(...crossModelNumeric) - Math.min(...crossModelNumeric) : null
 
   return (
-    <div className="flex flex-col gap-5">
+    <div ref={rootRef} className="flex flex-col gap-5">
       {/* 概况 */}
       <div className="rounded-2xl flex flex-wrap items-center gap-x-5 gap-y-1.5 px-5 py-3.5 text-sm" style={{ background: 'var(--s1)', border: '1px solid var(--border)' }}>
-        <span style={{ color: 'var(--t2)' }}>{llmFmtTime(report.startTime)} → {llmFmtTime(report.endTime)}</span>
+        <b style={{ color: 'var(--text)' }}>{report.title?.trim() || llmFmtTime(report.startTime)}</b>
         <span style={{ color: 'var(--t3)' }}>{LLM_API_LABELS[report.apiType]}</span>
         <span style={{ color: 'var(--t3)' }}>总耗时 <strong style={{ color: 'var(--text)' }}>{llmFmtDur(report.durationMs)}</strong></span>
         <span style={{ color: 'var(--t3)' }}>总请求 <strong className="tabular-nums" style={{ color: 'var(--text)' }}>{report.total}</strong></span>
@@ -2822,9 +3271,9 @@ function LlmBatchReportView({ report, apiKey }: { report: BatchReport; apiKey: s
         </span>
         {report.stopped && <Badge color="warn">⚠ 已手动停止</Badge>}
         <div className="ml-auto flex gap-2">
-          <Btn small variant="ghost" onClick={() => llmDownload(`report_${llmTsName(report.startTime)}.json`, JSON.stringify(report, null, 2), 'application/json')}>导出 JSON</Btn>
-          <Btn small variant="ghost" onClick={() => llmDownload(`report_${llmTsName(report.startTime)}.csv`, reportToCsv(report), 'text/csv;charset=utf-8')}>导出 CSV</Btn>
+          <LlmExportMenu report={report} rootRef={rootRef} />
         </div>
+        <div className="w-full text-[11px]" style={{ color: 'var(--t3)' }}>{llmFmtTime(report.startTime)} → {llmFmtTime(report.endTime)}</div>
       </div>
 
       {/* ① 输入 Token 一致性校验 —— 核心结论置顶 */}
@@ -2909,7 +3358,7 @@ function LlmBatchReportView({ report, apiKey }: { report: BatchReport; apiKey: s
           ③ 各模型汇总统计 <span className="text-xs font-normal" style={{ color: 'var(--t3)' }}>（均值保留 1 位小数，仅统计成功请求）</span>
         </h3>
         <div className="rounded-2xl overflow-hidden" style={{ border: '1px solid var(--border)', boxShadow: 'var(--shadow)' }}>
-          <div className="overflow-x-auto">
+          <div data-export-scroll className="overflow-x-auto">
             <table className="w-full text-sm min-w-[820px]">
               <thead style={{ background: 'var(--s1)' }}>
                 <tr className="text-xs" style={{ color: 'var(--t2)' }}>
@@ -2953,7 +3402,7 @@ function LlmBatchReportView({ report, apiKey }: { report: BatchReport; apiKey: s
       <div>
         <h3 className="text-sm font-bold mb-2.5" style={{ color: 'var(--text)' }}>④ 逐请求明细</h3>
         <div className="rounded-2xl overflow-hidden" style={{ border: '1px solid var(--border)', boxShadow: 'var(--shadow)' }}>
-          <div className="overflow-x-auto" style={{ maxHeight: 420, overflowY: 'auto' }}>
+          <div data-export-scroll className="overflow-x-auto" style={{ maxHeight: 420, overflowY: 'auto' }}>
             <table className="w-full text-sm min-w-[920px]">
               <thead style={{ background: 'var(--s1)', position: 'sticky', top: 0 }}>
                 <tr className="text-xs" style={{ color: 'var(--t2)' }}>
@@ -3011,9 +3460,11 @@ function LlmBatchReportView({ report, apiKey }: { report: BatchReport; apiKey: s
                   <Label>请求体 JSON</Label>
                   {viewingBodyObj != null && <CopyBtn text={JSON.stringify(viewingBodyObj, null, 2)} />}
                 </div>
-                <pre className="rounded-xl p-3 text-xs overflow-auto" style={{ background: 'var(--code)', border: '1px solid var(--inputBorder)', fontFamily: '"JetBrains Mono", "JetBrainsMono Nerd Font", "SF Mono", "Fira Code", "Fira Mono", "Roboto Mono", "Droid Sans Mono", "Cascadia Code", Consolas, "Courier New", monospace', lineHeight: 1.7, maxHeight: '30vh' }}>
-                  {viewingBodyObj != null ? JSON.stringify(viewingBodyObj, null, 2) : '（请求体解析失败）'}
-                </pre>
+                <div className="rounded-xl flex flex-col overflow-hidden" style={{ background: 'var(--code)', border: '1px solid var(--inputBorder)', height: '30vh' }}>
+                  {viewingBodyObj != null
+                    ? <ReadOnlyJsonTree text={JSON.stringify(viewingBodyObj, null, 2)} />
+                    : <div className="flex items-center justify-center h-full text-xs" style={{ color: 'var(--t3)' }}>（请求体解析失败）</div>}
+                </div>
               </div>
               <div>
                 <div className="flex items-center justify-between mb-1.5">
@@ -3053,9 +3504,9 @@ function LlmBatchReportView({ report, apiKey }: { report: BatchReport; apiKey: s
                   <Label>响应正文{viewingResult.responseBodyTruncated ? `（已截断，超过 ${LLM_RESPONSE_BODY_MAX} 字符）` : ''}</Label>
                   <CopyBtn text={viewingResult.responseBody ?? ''} />
                 </div>
-                <pre className="rounded-xl p-3 text-xs overflow-auto whitespace-pre-wrap" style={{ background: 'var(--code)', border: '1px solid var(--inputBorder)', fontFamily: '"JetBrains Mono", "JetBrainsMono Nerd Font", "SF Mono", "Fira Code", "Fira Mono", "Roboto Mono", "Droid Sans Mono", "Cascadia Code", Consolas, "Courier New", monospace', lineHeight: 1.7, maxHeight: '40vh', wordBreak: 'break-all' }}>
-                  {viewingResult.responseBody ?? ''}
-                </pre>
+                <div className="rounded-xl flex flex-col overflow-hidden" style={{ background: 'var(--code)', border: '1px solid var(--inputBorder)', height: '40vh' }}>
+                  <ReadOnlyJsonTree text={viewingResult.responseBody ?? ''} />
+                </div>
               </div>
             </div>
           </div>
@@ -3100,8 +3551,8 @@ function SortablePromptRow({ prompt, active, onSelect, onDelete }: {
   )
 }
 
-function LlmPromptsPane({ prompts, onChange }: {
-  prompts: LlmPrompt[]; onChange: (next: LlmPrompt[]) => void
+function LlmPromptsPane({ prompts, onChange, onExpandBody }: {
+  prompts: LlmPrompt[]; onChange: (next: LlmPrompt[]) => void; onExpandBody?: (body: string) => void
 }) {
   const [search, setSearch] = useState('')
   const [editingId, setEditingId] = useState<string | null>(prompts[0]?.id ?? null)
@@ -3178,7 +3629,14 @@ function LlmPromptsPane({ prompts, onChange }: {
           <>
             <Label className="block mb-1.5">标题</Label>
             <CustomInput value={editing.title} onChange={v => updateEditing({ title: v })} className="mb-3" />
-            <Label className="block mb-1.5">请求体 JSON（占位符：{'{{model}}'} 或 {'${[model]}'}）</Label>
+            <div className="flex items-center justify-between mb-1.5">
+              <Label>请求体 JSON（占位符：{'{{model}}'} 或 {'${[model]}'}）</Label>
+              {onExpandBody && editing && <button onClick={() => onExpandBody(editing.body)}
+                className="rounded-lg p-1 border-0 cursor-pointer outline-none flex items-center gap-1 text-xs"
+                style={{ background: 'transparent', color: 'var(--t2)' }}
+                onPointerEnter={e => { (e.currentTarget as HTMLButtonElement).style.color = 'var(--accent)' }}
+                onPointerLeave={e => { (e.currentTarget as HTMLButtonElement).style.color = 'var(--t2)' }}><IconExpand /> 展开查看</button>}
+            </div>
             <CustomTextarea value={editing.body} onChange={v => updateEditing({ body: v })} mono stretch className="flex-1"
               style={{ minHeight: 0, ...(editingBodyErr ? { border: '1px solid var(--err)', boxShadow: '0 0 0 3px var(--errBg)' } : {}) }} />
             {editingBodyErr && <p className="text-xs mt-1.5" style={{ color: 'var(--err)' }}>{editingBodyErr}</p>}
@@ -3210,6 +3668,7 @@ function LlmBatchTool() {
   const [prompts, setPrompts] = useState<LlmPrompt[]>(() => loadOrMigrateLlmPrompts())
   const [selectedPromptId, setSelectedPromptId] = useState<string | null>(() => loadLlmCfg().promptId ?? null)
   const [storeResponseBody, setStoreResponseBody] = useState(() => loadLlmCfg().storeResponseBody ?? true)
+  const [testTitle, setTestTitle] = useState(() => loadLlmCfg().testTitle ?? '')
   const [reuseNotice, setReuseNotice] = useState('')
 
   // 选中项失效（首次加载时持久化的 id 已不存在 / 当前选中的提示词被删除 / prompts 变空）时自动回退到第一条
@@ -3230,7 +3689,7 @@ function LlmBatchTool() {
   }, [selectedPrompt?.body, apiType, promptBodyErr])
 
   useEffect(() => {
-    saveLlmCfg({ apiType, baseUrl, timeout: timeoutSec, models: modelListText, n: nReq, c: concurrency, promptId: selectedPromptId ?? undefined, storeResponseBody })
+    saveLlmCfg({ apiType, baseUrl, timeout: timeoutSec, models: modelListText, n: nReq, c: concurrency, promptId: selectedPromptId ?? undefined, storeResponseBody, testTitle })
   }, [apiType, baseUrl, timeoutSec, modelListText, nReq, concurrency, selectedPromptId, storeResponseBody])
 
   useEffect(() => { saveLlmPrompts(prompts) }, [prompts])
@@ -3253,7 +3712,7 @@ function LlmBatchTool() {
   }, [apiKey, apiKeyLoaded])
 
   // ── 运行状态 ──
-  const [pane, setPane] = useState<'live' | 'report' | 'history' | 'prompts'>('live')
+  const [pane, setPane] = useState<'live' | 'report' | 'history' | 'prompts' | 'compare'>('live')
   const [running, setRunning] = useState(false)
   const [stopping, setStopping] = useState(false)
   const [startErr, setStartErr] = useState('')
@@ -3266,8 +3725,19 @@ function LlmBatchTool() {
   // ── 报告 / 历史 ──
   const [report, setReport] = useState<BatchReport | null>(null)
   const [history, setHistory] = useState<BatchReport[]>(() => loadLlmHistory())
-  const [expandedHistId, setExpandedHistId] = useState<string | null>(null)
+  const [lastRunReportId, setLastRunReportId] = useState<string | null>(null)
+  const [compareIds, setCompareIds] = useState<string[]>([])
   const [histNotice, setHistNotice] = useState('')
+  const [jsonViewerBody, setJsonViewerBody] = useState<{ body: string; model: string } | null>(null)
+
+  const toggleCompare = (id: string) => setCompareIds(prev =>
+    prev.includes(id) ? prev.filter(x => x !== id) : (prev.length >= 2 ? prev : [...prev, id]))
+
+  const viewHistoryReport = (rep: BatchReport) => {
+    setReport(rep)
+    setLastRunReportId(rep.id)
+    setPane('report')
+  }
 
   const runBatch = async () => {
     setStartErr('')
@@ -3345,6 +3815,7 @@ function LlmBatchTool() {
     const finalResults = [...resultsArr].sort((a, b) => a.seq - b.seq)
     const rep: BatchReport = {
       id: 'r' + endTime + '_' + Math.random().toString(36).slice(2, 7),
+      title: testTitle.trim() || undefined,
       startTime, endTime, durationMs: endTime - startTime,
       apiType, endpoint: cfg.endpoint, baseUrl: baseUrl.trim(), timeout: timeoutNum,
       bodyText: cfg.bodyText, promptId: selectedPromptId ?? null, models, n: N, c: C, stopped: wasStopped,
@@ -3357,6 +3828,7 @@ function LlmBatchTool() {
     setHistory(list)
     setHistNotice(dropped ? '存储空间有限，已自动删除最早的历史报告为新报告腾出空间。' : '')
     setReport(rep)
+    setLastRunReportId(rep.id)
     setPane('report')
   }
 
@@ -3374,6 +3846,7 @@ function LlmBatchTool() {
     setModelListText(rep.models.join('\n'))
     setNReq(String(rep.n))
     setConcurrency(String(rep.c))
+    setTestTitle(rep.title ?? '')
 
     let targetId = rep.promptId && prompts.some(p => p.id === rep.promptId) ? rep.promptId : null
     if (!targetId) {
@@ -3415,6 +3888,10 @@ function LlmBatchTool() {
         {/* 左侧配置栏 */}
         <div className="w-72 flex-shrink-0 flex flex-col p-4 gap-3.5 overflow-y-auto" style={{ borderRight: '1px solid var(--border)', background: 'var(--s1)' }}>
           <div>
+            <Label className="block mb-1.5">测试标题（可选）</Label>
+            <CustomInput value={testTitle} onChange={setTestTitle} placeholder="例如：claude-3.5 vs haiku 计费核查" />
+          </div>
+          <div>
             <Label className="block mb-1.5">API 类型</Label>
             <CustomSelect value={apiType} onChange={v => setApiType(v as ApiType)} options={[
               { value: 'anthropic', label: 'Anthropic Messages API' },
@@ -3453,19 +3930,30 @@ function LlmBatchTool() {
               <p className="text-xs" style={{ color: 'var(--err)' }}>⚠ 还没有任何提示词，请切换到右侧「提示词」标签页新建一条。</p>
             ) : (
               <>
-                <SearchableSelect value={selectedPromptId} onChange={setSelectedPromptId}
-                  options={prompts.map(p => ({ value: p.id, label: p.title || '（未命名）' }))}
-                  placeholder="选择一个提示词…" />
+                <div className="flex items-center gap-2">
+                  <div className="flex-1">
+                    <SearchableSelect value={selectedPromptId} onChange={setSelectedPromptId}
+                      options={prompts.map(p => ({ value: p.id, label: p.title || '（未命名）' }))}
+                      placeholder="选择一个提示词…" />
+                  </div>
+                  {selectedPrompt && (
+                    <button onClick={() => {
+                      const firstModel = parseModelList(modelListText)[0] || ''
+                      const body = firstModel && bodyHasModelPlaceholder(selectedPrompt.body)
+                        ? fillModelPlaceholder(selectedPrompt.body, JSON.stringify(firstModel))
+                        : selectedPrompt.body
+                      setJsonViewerBody({ body, model: firstModel })
+                    }}
+                      className="rounded-lg p-1.5 border-0 outline-none cursor-pointer flex-shrink-0"
+                      style={{ background: 'transparent', color: 'var(--t2)' }}
+                      onPointerEnter={e => { (e.currentTarget as HTMLButtonElement).style.color = 'var(--accent)'; (e.currentTarget as HTMLButtonElement).style.background = 'var(--accentSub)' }}
+                      onPointerLeave={e => { (e.currentTarget as HTMLButtonElement).style.color = 'var(--t2)'; (e.currentTarget as HTMLButtonElement).style.background = 'transparent' }}
+                      title="查看完整请求体"><IconExpand /></button>
+                  )}
+                </div>
                 {!selectedPromptId && <p className="text-xs mt-1.5" style={{ color: 'var(--warn)' }}>⚠ 请选择一个提示词作为请求体来源。</p>}
-                {selectedPrompt && (
-                  <>
-                    <pre className="rounded-xl p-2.5 text-xs overflow-auto mt-2" style={{ background: 'var(--code)', border: '1px solid var(--inputBorder)', maxHeight: 140, lineHeight: 1.6, fontFamily: '"JetBrains Mono", "JetBrainsMono Nerd Font", "SF Mono", "Fira Code", "Fira Mono", "Roboto Mono", "Droid Sans Mono", "Cascadia Code", Consolas, "Courier New", monospace' }}>
-                      {convertedBody?.ok ? convertedBody.body : selectedPrompt.body}
-                    </pre>
-                    {promptBodyErr && <p className="text-xs mt-1.5" style={{ color: 'var(--err)' }}>{promptBodyErr}</p>}
-                    {convertedBody && !convertedBody.ok && <p className="text-xs mt-1.5" style={{ color: 'var(--err)' }}>{convertedBody.error}</p>}
-                  </>
-                )}
+                {promptBodyErr && <p className="text-xs mt-1.5" style={{ color: 'var(--err)' }}>{promptBodyErr}</p>}
+                {convertedBody && !convertedBody.ok && <p className="text-xs mt-1.5" style={{ color: 'var(--err)' }}>{convertedBody.error}</p>}
               </>
             )}
           </div>
@@ -3475,7 +3963,7 @@ function LlmBatchTool() {
         {/* 右侧结果区 */}
         <div className="flex-1 flex flex-col overflow-hidden">
           <div className="glass flex items-center px-6 py-3 flex-shrink-0" style={{ borderBottom: '1px solid var(--border)' }}>
-            <SegmentedControl value={pane} onChange={v => setPane(v as 'live' | 'report' | 'history' | 'prompts')} options={[
+            <SegmentedControl value={pane === 'compare' ? 'history' : pane} onChange={v => setPane(v as 'live' | 'report' | 'history' | 'prompts')} options={[
               { value: 'live', label: '实时' },
               { value: 'report', label: '报告' },
               { value: 'history', label: `历史 (${history.length})` },
@@ -3558,7 +4046,17 @@ function LlmBatchTool() {
 
             {pane === 'report' && (
               <div className="p-5">
-                {report ? <LlmBatchReportView report={report} apiKey={apiKey} /> : (
+                {report ? (
+                  <>
+                    {history.length > 0 && report.id !== lastRunReportId && (
+                      <div className="mb-3 flex items-center gap-2 text-xs rounded-xl px-3 py-2" style={{ background: 'var(--accentSub)', color: 'var(--accent)' }}>
+                        正在查看历史报告{report.title?.trim() ? `「${report.title.trim()}」` : ''}。
+                        {lastRunReportId && <button className="underline cursor-pointer border-0 bg-transparent" style={{ color: 'var(--accent)' }} onClick={() => setReport(history.find(h => h.id === lastRunReportId) ?? null)}>返回最近一次运行结果</button>}
+                      </div>
+                    )}
+                    <LlmBatchReportView report={report} apiKey={apiKey} />
+                  </>
+                ) : (
                   <div className="flex flex-col items-center justify-center py-16" style={{ color: 'var(--t3)' }}>
                     <p className="text-sm">还没有已完成的测试报告。</p>
                   </div>
@@ -3566,6 +4064,65 @@ function LlmBatchTool() {
               </div>
             )}
 
+            {pane === 'compare' && compareIds.length === 2 && (
+              <div className="p-5 flex flex-col gap-5">
+                <div className="flex items-center gap-3">
+                  <Btn small variant="ghost" onClick={() => setPane('history')}>← 返回历史列表</Btn>
+                  <b style={{ color: 'var(--text)' }}>历史报告对比</b>
+                </div>
+                {(() => {
+                  const a = history.find(h => h.id === compareIds[0])
+                  const b = history.find(h => h.id === compareIds[1])
+                  if (!a || !b) return null
+                  const metrics: { key: string; label: string; get: (r: BatchReport) => number; fmt: (v: number) => string; better?: 'higher' | 'lower' }[] = [
+                    { key: 'total', label: '总请求数', get: r => r.total, fmt: v => String(v) },
+                    { key: 'successRate', label: '成功率', get: r => r.total ? (r.success / r.total * 100) : 0, fmt: v => v.toFixed(1) + '%', better: 'higher' },
+                    { key: 'fail', label: '失败数', get: r => r.fail, fmt: v => String(v), better: 'lower' },
+                    { key: 'duration', label: '总耗时', get: r => r.durationMs, fmt: v => llmFmtDur(v), better: 'lower' },
+                    { key: 'avgElapsed', label: '平均单请求耗时', get: r => { const v = r.results.map(x => x.elapsed).filter((x): x is number => x != null); return v.length ? v.reduce((s, x) => s + x, 0) / v.length : 0 }, fmt: v => (v / 1000).toFixed(2) + 's', better: 'lower' },
+                    { key: 'avgInput', label: '输入 Token 均值', get: r => { const v = r.results.filter(x => x.status === 'ok' && x.inputTokens != null).map(x => x.inputTokens as number); return v.length ? v.reduce((s, x) => s + x, 0) / v.length : 0 }, fmt: v => v.toFixed(0) },
+                    { key: 'avgOutput', label: '输出 Token 均值', get: r => { const v = r.results.filter(x => x.status === 'ok' && x.outputTokens != null).map(x => x.outputTokens as number); return v.length ? v.reduce((s, x) => s + x, 0) / v.length : 0 }, fmt: v => v.toFixed(0) },
+                    { key: 'outputRange', label: '输出 Token 波动', get: r => { const v = r.results.filter(x => x.status === 'ok' && x.outputTokens != null).map(x => x.outputTokens as number); return v.length > 1 ? Math.max(...v) - Math.min(...v) : 0 }, fmt: v => String(v), better: 'lower' },
+                  ]
+                  return (
+                    <>
+                      <div className="rounded-2xl overflow-hidden" style={{ border: '1px solid var(--border)' }}>
+                        <table className="w-full text-sm">
+                          <thead style={{ background: 'var(--s1)' }}>
+                            <tr className="text-xs" style={{ color: 'var(--t2)' }}>
+                              <th className="text-left px-4 py-2.5 font-semibold">指标</th>
+                              <th className="text-left px-4 py-2.5 font-semibold">{a.title?.trim() || llmFmtTime(a.startTime)}</th>
+                              <th className="text-left px-4 py-2.5 font-semibold">{b.title?.trim() || llmFmtTime(b.startTime)}</th>
+                            </tr>
+                          </thead>
+                          <tbody>
+                            {metrics.map(m => {
+                              const va = m.get(a), vb = m.get(b)
+                              let aBetter = false, bBetter = false
+                              if (m.better && va !== vb) {
+                                if (m.better === 'higher') { aBetter = va > vb; bBetter = vb > va }
+                                else { aBetter = va < vb; bBetter = vb < va }
+                              }
+                              return (
+                                <tr key={m.key} style={{ borderTop: '1px solid var(--border)' }}>
+                                  <td className="px-4 py-2 text-xs" style={{ color: 'var(--t2)' }}>{m.label}</td>
+                                  <td className="px-4 py-2 tabular-nums text-xs" style={{ color: aBetter ? 'var(--ok)' : 'var(--text)', fontWeight: aBetter ? 700 : 400 }}>{m.fmt(va)}</td>
+                                  <td className="px-4 py-2 tabular-nums text-xs" style={{ color: bBetter ? 'var(--ok)' : 'var(--text)', fontWeight: bBetter ? 700 : 400 }}>{m.fmt(vb)}</td>
+                                </tr>
+                              )
+                            })}
+                          </tbody>
+                        </table>
+                      </div>
+                      <div className="grid grid-cols-1 lg:grid-cols-2 gap-5">
+                        <div className="min-w-0"><LlmBatchReportView report={a} apiKey={apiKey} /></div>
+                        <div className="min-w-0"><LlmBatchReportView report={b} apiKey={apiKey} /></div>
+                      </div>
+                    </>
+                  )
+                })()}
+              </div>
+            )}
             {pane === 'history' && (
               <div className="p-5 flex flex-col gap-3">
                 <div className="flex items-center justify-between">
@@ -3573,12 +4130,21 @@ function LlmBatchTool() {
                   {history.length > 0 && (
                     <Btn small variant="danger" onClick={() => {
                       if (window.confirm('确认清空全部历史报告？此操作不可恢复。')) {
-                        clearLlmHistory(); setHistory([]); setExpandedHistId(null)
+                        clearLlmHistory(); setHistory([]); setCompareIds([])
                       }
                     }}>清空全部</Btn>
                   )}
                 </div>
                 {histNotice && <p className="text-xs" style={{ color: 'var(--warn)' }}>⚠ {histNotice}</p>}
+                {compareIds.length === 2 && (
+                  <div className="flex items-center justify-between rounded-xl px-4 py-2.5" style={{ background: 'var(--accentSub)' }}>
+                    <span className="text-xs" style={{ color: 'var(--accent)' }}>已选择 2 条历史报告</span>
+                    <div className="flex gap-2">
+                      <Btn small variant="ghost" onClick={() => setCompareIds([])}>取消选择</Btn>
+                      <Btn small variant="accent" onClick={() => setPane('compare')}>对比所选 →</Btn>
+                    </div>
+                  </div>
+                )}
                 {history.length === 0 ? (
                   <div className="flex flex-col items-center justify-center py-16" style={{ color: 'var(--t3)' }}>
                     <p className="text-sm">暂无历史报告。</p>
@@ -3586,36 +4152,35 @@ function LlmBatchTool() {
                 ) : history.map(rep => (
                   <div key={rep.id} className="rounded-2xl p-4" style={{ background: 'var(--bg)', border: '1px solid var(--border)', boxShadow: 'var(--shadow)' }}>
                     <div className="flex flex-wrap items-center justify-between gap-2">
-                      <div>
-                        <div className="text-sm font-semibold" style={{ color: 'var(--text)' }}>
-                          {llmFmtTime(rep.startTime)}
-                          {rep.stopped && <span className="ml-2 text-xs font-normal" style={{ color: 'var(--warn)' }}>（已手动停止）</span>}
-                        </div>
-                        <div className="text-xs mt-0.5" style={{ color: 'var(--t3)' }}>
-                          模型：{rep.models.join(', ')} ｜ 成功 <span style={{ color: 'var(--ok)' }}>{rep.success}</span> / 总 {rep.total} ｜ 耗时 {llmFmtDur(rep.durationMs)}
+                      <div className="flex items-center gap-2.5 min-w-0">
+                        <input type="checkbox" checked={compareIds.includes(rep.id)}
+                          disabled={!compareIds.includes(rep.id) && compareIds.length >= 2}
+                          onChange={() => toggleCompare(rep.id)}
+                          style={{ accentColor: 'var(--accent)' }} className="w-3.5 h-3.5" />
+                        <div className="min-w-0">
+                          <InlineEditableTitle
+                            value={rep.title ?? ''}
+                            placeholder={llmFmtTime(rep.startTime)}
+                            onSave={title => { setHistory(renameLlmHistoryItem(rep.id, title)) }}
+                          />
+                          <div className="text-[11px] mt-0.5" style={{ color: 'var(--t3)' }}>
+                            {llmFmtTime(rep.startTime)} · 模型 {rep.models.join(', ')} · 成功 <span style={{ color: 'var(--ok)' }}>{rep.success}</span>/{rep.total} · {llmFmtDur(rep.durationMs)}
+                            {rep.stopped && <span style={{ color: 'var(--warn)' }}> · 已手动停止</span>}
+                          </div>
                         </div>
                       </div>
-                      <div className="flex gap-2 flex-shrink-0">
-                        <Btn small variant="ghost" onClick={() => setExpandedHistId(id => id === rep.id ? null : rep.id)}>
-                          {expandedHistId === rep.id ? '收起' : '查看'}
-                        </Btn>
-                        <Btn small variant="ghost" onClick={() => reuseHistoryReport(rep)}>复用</Btn>
-                        <Btn small variant="ghost" onClick={() => llmDownload(`report_${llmTsName(rep.startTime)}.json`, JSON.stringify(rep, null, 2), 'application/json')}>JSON</Btn>
-                        <Btn small variant="ghost" onClick={() => llmDownload(`report_${llmTsName(rep.startTime)}.csv`, reportToCsv(rep), 'text/csv;charset=utf-8')}>CSV</Btn>
-                        <Btn small variant="danger" onClick={() => {
+                      <div className="flex items-center gap-1 flex-shrink-0">
+                        <IconBtn icon={<IconEye />} tooltip="查看报告" onClick={() => viewHistoryReport(rep)} />
+                        <IconBtn icon={<IconRepeat />} tooltip="复用此配置" onClick={() => reuseHistoryReport(rep)} />
+                        <IconBtn icon={<IconTrash />} tooltip="删除该历史报告" danger onClick={() => {
                           if (window.confirm('确认删除该条历史报告？此操作不可恢复。')) {
                             const list = deleteLlmHistoryItem(rep.id)
                             setHistory(list)
-                            if (expandedHistId === rep.id) setExpandedHistId(null)
+                            setCompareIds(ids => ids.filter(id => id !== rep.id))
                           }
-                        }}>删除</Btn>
+                        }} />
                       </div>
                     </div>
-                    {expandedHistId === rep.id && (
-                      <div className="mt-4 pt-4" style={{ borderTop: '1px solid var(--border)' }}>
-                        <LlmBatchReportView report={rep} apiKey={apiKey} />
-                      </div>
-                    )}
                   </div>
                 ))}
               </div>
@@ -3623,12 +4188,24 @@ function LlmBatchTool() {
 
             {pane === 'prompts' && (
               <div className="h-full">
-                <LlmPromptsPane prompts={prompts} onChange={setPrompts} />
+                <LlmPromptsPane prompts={prompts} onChange={setPrompts} onExpandBody={body => {
+                  const m = parseModelList(modelListText)[0] || ''
+                  const replaced = m && bodyHasModelPlaceholder(body) ? fillModelPlaceholder(body, JSON.stringify(m)) : body
+                  setJsonViewerBody({ body: replaced, model: m })
+                }} />
               </div>
             )}
           </div>
         </div>
       </div>
+      {jsonViewerBody != null && (
+        <LlmJsonViewerModal
+  title="请求体预览"
+  subtitle={jsonViewerBody.model ? `模型：${jsonViewerBody.model}` : undefined}
+  text={jsonViewerBody.body}
+  onClose={() => setJsonViewerBody(null)}
+/>
+      )}
     </div>
   )
 }
