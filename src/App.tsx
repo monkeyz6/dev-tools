@@ -1,5 +1,5 @@
 import React, { useState, useCallback, useRef, useEffect, useLayoutEffect, useMemo, useDeferredValue } from 'react'
-import { BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, Cell, LabelList, ReferenceLine } from 'recharts'
+import { BarChart, Bar, LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, Cell, LabelList, ReferenceLine, Legend } from 'recharts'
 import { DndContext, PointerSensor, useSensor, useSensors, closestCenter, type DragEndEvent } from '@dnd-kit/core'
 import { SortableContext, useSortable, verticalListSortingStrategy, arrayMove } from '@dnd-kit/sortable'
 import { CSS } from '@dnd-kit/utilities'
@@ -3239,6 +3239,93 @@ function LlmTokenChart({ model, results, field, title }: {
   )
 }
 
+// ── 对比模式组合图表（对比双方的输入/输出放到同一图表）──
+function LlmCompareChart({ reportA, reportB, model, field, title }: {
+  reportA: BatchReport; reportB: BatchReport; model: string; field: 'inputTokens' | 'outputTokens'; title: string
+}) {
+  const rsA = useMemo(() => reportA.results.filter(r => r.model === model).sort((a, b) => a.localIdx - b.localIdx), [reportA, model])
+  const rsB = useMemo(() => reportB.results.filter(r => r.model === model).sort((a, b) => a.localIdx - b.localIdx), [reportB, model])
+  const maxLen = Math.max(rsA.length, rsB.length)
+  const [chartType, setChartType] = useState<'bar' | 'line'>(maxLen > 30 ? 'line' : 'bar')
+  const labelA = reportA.title?.trim() || llmFmtTime(reportA.startTime)
+  const labelB = reportB.title?.trim() || llmFmtTime(reportB.startTime)
+  const chartData = useMemo(() => {
+    const idxs = new Set<number>()
+    rsA.forEach(r => idxs.add(r.localIdx))
+    rsB.forEach(r => idxs.add(r.localIdx))
+    const sorted = [...idxs].sort((a, b) => a - b)
+    return sorted.map(idx => {
+      const ra = rsA.find(r => r.localIdx === idx)
+      const rb = rsB.find(r => r.localIdx === idx)
+      const aOk = ra?.status === 'ok' && ra[field] != null
+      const bOk = rb?.status === 'ok' && rb[field] != null
+      return {
+        label: '#' + idx,
+        reportA: aOk ? (ra[field] as number) : 0,
+        reportB: bOk ? (rb[field] as number) : 0,
+        aOk,
+        bOk,
+        aDisplay: aOk ? String(ra[field] ?? '-') : '失败',
+        bDisplay: bOk ? String(rb[field] ?? '-') : '失败',
+      }
+    })
+  }, [rsA, rsB, field])
+  return (
+    <div data-chart-root className="rounded-2xl p-4" style={{ background: 'var(--bg)', border: '1px solid var(--border)', boxShadow: 'var(--shadow)' }}>
+      <div className="flex items-center justify-between mb-1">
+        <div className="flex items-center gap-2">
+          <span className="text-xs font-mono px-2 py-0.5 rounded-md" style={{ background: 'var(--accentSub)', color: 'var(--accent)' }}>{model}</span>
+          <b className="text-sm" style={{ color: 'var(--text)' }}>{title}</b>
+        </div>
+        <div className="flex items-center gap-1 rounded-lg p-0.5" style={{ background: 'var(--s2)', border: '1px solid var(--border)' }}>
+          <button onClick={() => setChartType('bar')}
+            className="px-2 py-0.5 text-[11px] font-medium rounded-md border-0 cursor-pointer outline-none"
+            style={{ background: chartType === 'bar' ? 'var(--bg)' : 'transparent', color: chartType === 'bar' ? 'var(--text)' : 'var(--t2)', boxShadow: chartType === 'bar' ? '0 1px 2px rgba(0,0,0,0.06)' : 'none' }}>柱状图</button>
+          <button onClick={() => setChartType('line')}
+            className="px-2 py-0.5 text-[11px] font-medium rounded-md border-0 cursor-pointer outline-none"
+            style={{ background: chartType === 'line' ? 'var(--bg)' : 'transparent', color: chartType === 'line' ? 'var(--text)' : 'var(--t2)', boxShadow: chartType === 'line' ? '0 1px 2px rgba(0,0,0,0.06)' : 'none' }}>折线图</button>
+        </div>
+      </div>
+      <div style={{ height: 220, marginTop: 8 }}>
+        <ResponsiveContainer width="100%" height="100%">
+          {chartType === 'bar' ? (
+            <BarChart data={chartData} margin={{ top: 22, right: 8, left: 0, bottom: 0 }}>
+              <CartesianGrid stroke="var(--border)" vertical={false} />
+              <XAxis dataKey="label" tick={{ fill: 'var(--t2)', fontSize: 11 }} axisLine={{ stroke: 'var(--border)' }} tickLine={false} />
+              <YAxis tick={{ fill: 'var(--t2)', fontSize: 11 }} axisLine={false} tickLine={false} width={36} allowDecimals={false} />
+              <Tooltip cursor={{ fill: 'var(--s1)' }}
+                contentStyle={{ background: 'var(--bg)', border: '1px solid var(--border)', borderRadius: 10, fontSize: 12 }}
+                labelStyle={{ color: 'var(--t2)' }}
+                formatter={(value: number, name: string) => [value + ' tok', name]}
+              />
+              <Legend wrapperStyle={{ fontSize: 11, paddingTop: 4 }}
+                formatter={(value: string) => <span style={{ color: 'var(--text)' }}>{value === 'reportA' ? labelA : labelB}</span>}
+              />
+              <Bar dataKey="reportA" name="reportA" radius={[4, 4, 0, 0]} isAnimationActive={false} fill="var(--accent)" />
+              <Bar dataKey="reportB" name="reportB" radius={[4, 4, 0, 0]} isAnimationActive={false} fill="var(--ok)" />
+            </BarChart>
+          ) : (
+            <LineChart data={chartData} margin={{ top: 22, right: 8, left: 0, bottom: 0 }}>
+              <CartesianGrid stroke="var(--border)" vertical={false} />
+              <XAxis dataKey="label" tick={{ fill: 'var(--t2)', fontSize: 11 }} axisLine={{ stroke: 'var(--border)' }} tickLine={false} />
+              <YAxis tick={{ fill: 'var(--t2)', fontSize: 11 }} axisLine={false} tickLine={false} width={36} allowDecimals={false} />
+              <Tooltip contentStyle={{ background: 'var(--bg)', border: '1px solid var(--border)', borderRadius: 10, fontSize: 12 }}
+                labelStyle={{ color: 'var(--t2)' }}
+                formatter={(value: number, name: string) => [value + ' tok', name]}
+              />
+              <Legend wrapperStyle={{ fontSize: 11, paddingTop: 4 }}
+                formatter={(value: string) => <span style={{ color: 'var(--text)' }}>{value === 'reportA' ? labelA : labelB}</span>}
+              />
+              <Line type="monotone" dataKey="reportA" name="reportA" stroke="var(--accent)" strokeWidth={2} dot={{ r: 3, fill: 'var(--accent)', strokeWidth: 0 }} isAnimationActive={false} />
+              <Line type="monotone" dataKey="reportB" name="reportB" stroke="var(--ok)" strokeWidth={2} dot={{ r: 3, fill: 'var(--ok)', strokeWidth: 0 }} isAnimationActive={false} />
+            </LineChart>
+          )}
+        </ResponsiveContainer>
+      </div>
+    </div>
+  )
+}
+
 // ── 报告渲染（当前报告 / 历史「查看」共用）──
 function LlmExportMenu({ report, rootRef }: { report: BatchReport; rootRef: React.RefObject<HTMLDivElement | null> }) {
   const [open, setOpen] = useState(false)
@@ -3289,7 +3376,7 @@ function LlmExportMenu({ report, rootRef }: { report: BatchReport; rootRef: Reac
   )
 }
 
-function LlmBatchReportView({ report, apiKey }: { report: BatchReport; apiKey: string }) {
+function LlmBatchReportView({ report, apiKey, hideCharts }: { report: BatchReport; apiKey: string; hideCharts?: boolean }) {
   const rootRef = useRef<HTMLDivElement>(null)
   const [viewingModel, setViewingModel] = useState<string | null>(null)
   const [viewingResult, setViewingResult] = useState<BatchResult | null>(null)
@@ -3389,7 +3476,7 @@ function LlmBatchReportView({ report, apiKey }: { report: BatchReport; apiKey: s
             ⚠ 不同模型对同一请求体的 Token 计算存在差异（可能是分词器不同所致），最大相差 {crossModelDiff} tokens
           </div>
         )}
-        {report.models.filter(m => consistency[m] && !consistency[m].consistent && consistency[m].uniq.length > 0).length > 0 && (
+        {!hideCharts && report.models.filter(m => consistency[m] && !consistency[m].consistent && consistency[m].uniq.length > 0).length > 0 && (
           <div className="flex flex-col gap-4">
             {report.models.filter(m => consistency[m] && !consistency[m].consistent && consistency[m].uniq.length > 0).map(m => (
               <LlmTokenChart key={m} model={m} results={report.results} field="inputTokens" title="输入 Token 分布（不一致）" />
@@ -3398,15 +3485,16 @@ function LlmBatchReportView({ report, apiKey }: { report: BatchReport; apiKey: s
         )}
       </div>
 
-      {/* ② 输出 Token 波动图 */}
-      <div>
-        <h3 className="text-sm font-bold mb-2.5" style={{ color: 'var(--text)' }}>② 输出 Token 波动</h3>
-        <div className="flex flex-col gap-4">
-          {report.models.map(m => (
-            <LlmTokenChart key={m} model={m} results={report.results} field="outputTokens" title="输出 Token 分布" />
-          ))}
+      {!hideCharts && (
+        <div>
+          <h3 className="text-sm font-bold mb-2.5" style={{ color: 'var(--text)' }}>② 输出 Token 波动</h3>
+          <div className="flex flex-col gap-4">
+            {report.models.map(m => (
+              <LlmTokenChart key={m} model={m} results={report.results} field="outputTokens" title="输出 Token 分布" />
+            ))}
+          </div>
         </div>
-      </div>
+      )}
 
       {/* ③ 各模型汇总统计 */}
       <div>
@@ -4205,9 +4293,28 @@ function LlmBatchTool() {
                           </tbody>
                         </table>
                       </div>
+
+                      {/* 组合图表（对比双方的输入/输出放到同一图表） */}
+                      {(() => {
+                        const modelsInBoth = a.models.filter(m => b.models.includes(m))
+                        if (modelsInBoth.length === 0) return null
+                        return (
+                          <div className="flex flex-col gap-5">
+                            <h3 className="text-sm font-bold" style={{ color: 'var(--text)' }}>Token 对比图表</h3>
+                            {modelsInBoth.map(m => (
+                              <div key={m} className="flex flex-col gap-4">
+                                <LlmCompareChart reportA={a} reportB={b} model={m} field="inputTokens" title="输入 Token 对比" />
+                                <LlmCompareChart reportA={a} reportB={b} model={m} field="outputTokens" title="输出 Token 对比" />
+                              </div>
+                            ))}
+                          </div>
+                        )
+                      })()}
+
+                      {/* 个体报告摘要（不含图表） */}
                       <div className="grid grid-cols-1 lg:grid-cols-2 gap-5">
-                        <div className="min-w-0"><LlmBatchReportView report={a} apiKey={apiKey} /></div>
-                        <div className="min-w-0"><LlmBatchReportView report={b} apiKey={apiKey} /></div>
+                        <div className="min-w-0"><LlmBatchReportView report={a} apiKey={apiKey} hideCharts /></div>
+                        <div className="min-w-0"><LlmBatchReportView report={b} apiKey={apiKey} hideCharts /></div>
                       </div>
                     </>
                   )
