@@ -253,7 +253,7 @@ test.describe('LLM 批量测试', () => {
     await expect(main).toContainText('x-api-key: sk-test-curl')
     await expect(main).toContainText('cURL 命令含明文 API Key')
 
-    await page.getByRole('button', { name: '✕ 关闭' }).click()
+    await page.getByRole('button', { name: '✕' }).click()
     await expect(page.getByText('cURL 命令含明文 API Key')).not.toBeVisible()
   })
 })

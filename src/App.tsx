@@ -985,9 +985,10 @@ function SearchableSelect({ value, onChange, options, placeholder, className = '
 }
 
 // Fully custom Textarea
-function CustomTextarea({ value, onChange, placeholder, rows, className = '', mono, style, stretch }: {
+function CustomTextarea({ value, onChange, placeholder, rows, className = '', mono, style, stretch, onKeyDown }: {
   value: string; onChange: (v: string) => void; placeholder?: string
   rows?: number; className?: string; mono?: boolean; style?: React.CSSProperties; stretch?: boolean
+  onKeyDown?: (e: React.KeyboardEvent<HTMLTextAreaElement>) => void
 }) {
   const [focused, setFocused] = useState(false)
   return (
@@ -1007,6 +1008,7 @@ function CustomTextarea({ value, onChange, placeholder, rows, className = '', mo
         onChange={e => onChange(e.target.value)}
         onFocus={() => setFocused(true)}
         onBlur={() => setFocused(false)}
+        onKeyDown={onKeyDown}
         placeholder={placeholder}
         rows={rows}
         spellCheck={false}
@@ -2198,7 +2200,7 @@ function LlmJsonViewerModal({ title, subtitle, text, onClose, extraActions }: {
           <div className="flex items-center gap-2 flex-shrink-0">
             {extraActions}
             <CopyBtn text={fmt.ok ? fmt.text : text} />
-            <Btn small variant="ghost" onClick={onClose}>✕ 关闭</Btn>
+            <Btn small variant="ghost" onClick={onClose}>✕</Btn>
           </div>
         </div>
         {!fmt.ok && text.trim() !== '' && (
@@ -2208,6 +2210,60 @@ function LlmJsonViewerModal({ title, subtitle, text, onClose, extraActions }: {
         )}
         <div className="flex-1 flex flex-col min-h-0 px-5 pb-4">
           <ReadOnlyJsonTree text={fmt.ok ? fmt.text : text} />
+        </div>
+      </div>
+    </div>
+  )
+}
+
+// 提示词编辑器用的可编辑 JSON 弹框（支持 Tab 缩进 + 格式化 + 占位符原样显示）
+function LlmPromptEditorModal({ title, initial, onSave, onClose }: {
+  title: string; initial: string; onSave: (body: string) => void; onClose: () => void
+}) {
+  const [text, setText] = useState(initial)
+  const fmt = useMemo(() => formatJsonWithPlaceholders(text), [text])
+
+  useEffect(() => {
+    const handler = (e: KeyboardEvent) => { if (e.key === 'Escape') onClose() }
+    window.addEventListener('keydown', handler)
+    return () => window.removeEventListener('keydown', handler)
+  }, [onClose])
+
+  const handleTab = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
+    if (e.key !== 'Tab') return
+    e.preventDefault()
+    const ta = e.currentTarget
+    const { selectionStart, selectionEnd, value } = ta
+    const next = value.slice(0, selectionStart) + '  ' + value.slice(selectionEnd)
+    setText(next)
+    requestAnimationFrame(() => {
+      ta.focus()
+      ta.selectionStart = ta.selectionEnd = selectionStart + 2
+    })
+  }
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center p-6 ia-lightbox-enter"
+      style={{ background: 'color-mix(in srgb, var(--bg) 85%, transparent)', backdropFilter: 'blur(8px)' }}
+      onClick={e => { if (e.target === e.currentTarget) onClose() }}>
+      <div className="rounded-2xl flex flex-col" style={{ background: 'var(--bg)', border: '1px solid var(--border)', boxShadow: 'var(--shadowMd)', width: 760, maxWidth: '92vw', height: '82vh' }} onClick={e => e.stopPropagation()}>
+        <div className="flex items-center justify-between px-5 pt-4 pb-3 flex-shrink-0">
+          <b className="text-sm" style={{ color: 'var(--text)' }}>{title}</b>
+          <div className="flex items-center gap-2 flex-shrink-0">
+            <Btn small variant="ghost" onClick={() => setText(fmt.ok ? fmt.text : text)}>格式化</Btn>
+            <Btn small variant="primary" onClick={() => { onSave(text); onClose() }}>保存</Btn>
+            <button onClick={onClose} aria-label="关闭" className="rounded-lg p-1.5 border-0 outline-none cursor-pointer text-sm" style={{ background: 'transparent', color: 'var(--t2)' }}
+              onPointerEnter={e => { (e.currentTarget as HTMLButtonElement).style.background = 'var(--s2)' }}
+              onPointerLeave={e => { (e.currentTarget as HTMLButtonElement).style.background = 'transparent' }}>✕</button>
+          </div>
+        </div>
+        {!fmt.ok && text.trim() !== '' && (
+          <div className="mx-5 mb-2 px-3 py-1.5 rounded-lg text-xs" style={{ background: 'var(--warnBg)', color: 'var(--warn)' }}>
+            ⚠ 内容不是合法 JSON，按原始文本展示
+          </div>
+        )}
+        <div className="flex-1 flex flex-col min-h-0 px-5 pb-5">
+          <CustomTextarea value={text} onChange={setText} onKeyDown={handleTab} mono stretch className="flex-1" style={{ minHeight: 0, fontSize: 12, lineHeight: 1.6 }} />
         </div>
       </div>
     </div>
@@ -3452,7 +3508,7 @@ function LlmBatchReportView({ report, apiKey }: { report: BatchReport; apiKey: s
           <div className="rounded-2xl p-5 w-full flex flex-col" style={{ background: 'var(--bg)', border: '1px solid var(--border)', boxShadow: 'var(--shadowMd)', maxWidth: 640, maxHeight: '82vh' }} onClick={e => e.stopPropagation()}>
             <div className="flex items-center justify-between mb-3 flex-shrink-0">
               <b className="text-sm" style={{ color: 'var(--text)' }}>[{viewingModel}] 请求体 / cURL</b>
-              <Btn small variant="ghost" onClick={() => setViewingModel(null)}>✕ 关闭</Btn>
+              <Btn small variant="ghost" onClick={() => setViewingModel(null)}>✕</Btn>
             </div>
             <div className="overflow-y-auto flex flex-col gap-4">
               <div>
@@ -3487,7 +3543,7 @@ function LlmBatchReportView({ report, apiKey }: { report: BatchReport; apiKey: s
           <div className="rounded-2xl p-5 w-full flex flex-col" style={{ background: 'var(--bg)', border: '1px solid var(--border)', boxShadow: 'var(--shadowMd)', maxWidth: 640, maxHeight: '82vh' }} onClick={e => e.stopPropagation()}>
             <div className="flex items-center justify-between mb-3 flex-shrink-0">
               <b className="text-sm" style={{ color: 'var(--text)' }}>[#{viewingResult.seq} {viewingResult.model}] 响应</b>
-              <Btn small variant="ghost" onClick={() => setViewingResult(null)}>✕ 关闭</Btn>
+              <Btn small variant="ghost" onClick={() => setViewingResult(null)}>✕</Btn>
             </div>
             <div className="overflow-y-auto flex flex-col gap-4">
               <div>
@@ -3551,11 +3607,12 @@ function SortablePromptRow({ prompt, active, onSelect, onDelete }: {
   )
 }
 
-function LlmPromptsPane({ prompts, onChange, onExpandBody }: {
-  prompts: LlmPrompt[]; onChange: (next: LlmPrompt[]) => void; onExpandBody?: (body: string) => void
+function LlmPromptsPane({ prompts, onChange }: {
+  prompts: LlmPrompt[]; onChange: (next: LlmPrompt[]) => void
 }) {
   const [search, setSearch] = useState('')
   const [editingId, setEditingId] = useState<string | null>(prompts[0]?.id ?? null)
+  const [expandedBody, setExpandedBody] = useState<string | null>(null)
   const editing = prompts.find(p => p.id === editingId) ?? null
   const editingBodyErr = editing ? validateLlmBodyJson(editing.body) : ''
   const filtered = prompts.filter(p => p.title.toLowerCase().includes(search.trim().toLowerCase()))
@@ -3566,6 +3623,25 @@ function LlmPromptsPane({ prompts, onChange, onExpandBody }: {
   const updateEditing = (patch: Partial<Pick<LlmPrompt, 'title' | 'body'>>) => {
     if (!editingId) return
     onChange(prompts.map(p => p.id === editingId ? { ...p, ...patch, updatedAt: Date.now() } : p))
+  }
+
+  const formatEditingBody = () => {
+    if (!editing) return
+    const fmt = formatJsonWithPlaceholders(editing.body)
+    if (fmt.ok) updateEditing({ body: fmt.text })
+  }
+
+  const handleBodyKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
+    if (e.key !== 'Tab') return
+    e.preventDefault()
+    const ta = e.currentTarget
+    const { selectionStart, selectionEnd, value } = ta
+    const next = value.slice(0, selectionStart) + '  ' + value.slice(selectionEnd)
+    updateEditing({ body: next })
+    requestAnimationFrame(() => {
+      ta.focus()
+      ta.selectionStart = ta.selectionEnd = selectionStart + 2
+    })
   }
 
   const createPrompt = () => {
@@ -3631,13 +3707,20 @@ function LlmPromptsPane({ prompts, onChange, onExpandBody }: {
             <CustomInput value={editing.title} onChange={v => updateEditing({ title: v })} className="mb-3" />
             <div className="flex items-center justify-between mb-1.5">
               <Label>请求体 JSON（占位符：{'{{model}}'} 或 {'${[model]}'}）</Label>
-              {onExpandBody && editing && <button onClick={() => onExpandBody(editing.body)}
-                className="rounded-lg p-1 border-0 cursor-pointer outline-none flex items-center gap-1 text-xs"
-                style={{ background: 'transparent', color: 'var(--t2)' }}
-                onPointerEnter={e => { (e.currentTarget as HTMLButtonElement).style.color = 'var(--accent)' }}
-                onPointerLeave={e => { (e.currentTarget as HTMLButtonElement).style.color = 'var(--t2)' }}><IconExpand /> 展开查看</button>}
+              <div className="flex items-center gap-1">
+                <button onClick={formatEditingBody}
+                  className="rounded-lg px-2 py-1 border-0 cursor-pointer outline-none text-xs"
+                  style={{ background: 'transparent', color: 'var(--t2)' }}
+                  onPointerEnter={e => { (e.currentTarget as HTMLButtonElement).style.color = 'var(--accent)' }}
+                  onPointerLeave={e => { (e.currentTarget as HTMLButtonElement).style.color = 'var(--t2)' }}>格式化</button>
+                {editing && <button onClick={() => setExpandedBody(editing.body)}
+                  className="rounded-lg p-1 border-0 cursor-pointer outline-none flex items-center gap-1 text-xs"
+                  style={{ background: 'transparent', color: 'var(--t2)' }}
+                  onPointerEnter={e => { (e.currentTarget as HTMLButtonElement).style.color = 'var(--accent)' }}
+                  onPointerLeave={e => { (e.currentTarget as HTMLButtonElement).style.color = 'var(--t2)' }}><IconExpand /> 展开查看</button>}
+              </div>
             </div>
-            <CustomTextarea value={editing.body} onChange={v => updateEditing({ body: v })} mono stretch className="flex-1"
+            <CustomTextarea value={editing.body} onChange={v => updateEditing({ body: v })} onKeyDown={handleBodyKeyDown} mono stretch className="flex-1"
               style={{ minHeight: 0, ...(editingBodyErr ? { border: '1px solid var(--err)', boxShadow: '0 0 0 3px var(--errBg)' } : {}) }} />
             {editingBodyErr && <p className="text-xs mt-1.5" style={{ color: 'var(--err)' }}>{editingBodyErr}</p>}
             <div className="flex gap-2 mt-3 flex-shrink-0">
@@ -3650,6 +3733,14 @@ function LlmPromptsPane({ prompts, onChange, onExpandBody }: {
           </div>
         )}
       </div>
+      {expandedBody != null && editing && (
+        <LlmPromptEditorModal
+          title="编辑请求体 JSON"
+          initial={expandedBody}
+          onSave={body => { updateEditing({ body }); setExpandedBody(null) }}
+          onClose={() => setExpandedBody(null)}
+        />
+      )}
     </div>
   )
 }
@@ -4188,11 +4279,7 @@ function LlmBatchTool() {
 
             {pane === 'prompts' && (
               <div className="h-full">
-                <LlmPromptsPane prompts={prompts} onChange={setPrompts} onExpandBody={body => {
-                  const m = parseModelList(modelListText)[0] || ''
-                  const replaced = m && bodyHasModelPlaceholder(body) ? fillModelPlaceholder(body, JSON.stringify(m)) : body
-                  setJsonViewerBody({ body: replaced, model: m })
-                }} />
+                <LlmPromptsPane prompts={prompts} onChange={setPrompts} />
               </div>
             )}
           </div>
