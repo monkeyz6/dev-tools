@@ -46,6 +46,13 @@ input[type='number'] { -moz-appearance: textfield; appearance: textfield; }
 .spring { transition: all 0.22s cubic-bezier(0.34, 1.56, 0.64, 1); }
 .ease-out-fast { transition: all 0.18s cubic-bezier(0.25, 0.46, 0.45, 0.94); }
 
+/* 侧边栏收缩过渡：宽度/留白是布局属性，只能过渡 width/padding；
+   仅无 reduced-motion 时生效，缩小到两处静态元素、成本可忽略 */
+@media (prefers-reduced-motion: no-preference) {
+  .sb-sidebar { transition: width 0.22s ease; }
+  .sb-sidebar ~ main { transition: padding-left 0.22s ease; }
+}
+
 /* Glassmorphism — 半透明毛玻璃材质（色值由主题变量推导，深浅主题自动适配） */
 .glass,
 .glass-sidebar {

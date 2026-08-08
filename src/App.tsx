@@ -6838,31 +6838,36 @@ function VideoAnalyzerTool() {
   )
 }
 
-function Sidebar({ tool, setTool, theme, setTheme }: {
+function Sidebar({ tool, setTool, theme, setTheme, collapsed, onToggle }: {
   tool: ToolKey; setTool: (t: ToolKey) => void
   theme: ThemeKey; setTheme: (t: ThemeKey) => void
+  collapsed: boolean; onToggle: () => void
 }) {
   return (
-    <aside className="glass-sidebar fixed inset-y-0 left-0 z-30 flex flex-col" style={{ width: 'var(--sidebar-w)', borderRight: '1px solid var(--border)' }}>
-      {/* Logo */}
-      <div className="px-5 pt-6 pb-5 flex-shrink-0">
-        <div className="flex items-center gap-2.5">
+    <aside className="glass-sidebar sb-sidebar fixed inset-y-0 left-0 z-30 flex flex-col" style={{ width: 'var(--sidebar-w)', borderRight: '1px solid var(--border)' }}>
+      {/* Logo（点击可收起/展开） */}
+      <div className={collapsed ? 'pt-5 pb-4 px-2 flex-shrink-0 flex justify-center' : 'px-5 pt-6 pb-5 flex-shrink-0'}>
+        <button onClick={onToggle} aria-label={collapsed ? '展开侧边栏' : '收起侧边栏'}
+          className={"flex items-center gap-2.5 cursor-pointer border-0 outline-none rounded-xl transition-all duration-150 active:scale-95 " + (collapsed ? "" : "px-1.5 py-1 -mx-1.5")}
+          style={{ background: 'transparent', fontFamily: 'inherit' }}>
           <img src="/logo.svg" alt="SparkQ" className="w-8 h-8 rounded-xl flex-shrink-0" />
-          <div>
-            <div className="text-sm font-bold tracking-tight" style={{ color: 'var(--text)', letterSpacing: '-0.02em' }}>Dev Toolkit</div>
-            <div className="text-xs" style={{ color: 'var(--t3)' }}>前端导航工具</div>
-          </div>
-        </div>
+          {!collapsed && (
+            <div className="text-left">
+              <div className="text-sm font-bold tracking-tight" style={{ color: 'var(--text)', letterSpacing: '-0.02em' }}>Dev Toolkit</div>
+              <div className="text-xs" style={{ color: 'var(--t3)' }}>前端导航工具</div>
+            </div>
+          )}
+        </button>
       </div>
 
       {/* Nav */}
-      <nav className="flex-1 px-3 overflow-y-auto">
+      <nav className={"flex-1 overflow-y-auto " + (collapsed ? "px-1.5" : "px-3")}>
         <div className="flex flex-col gap-0.5">
           {TOOLS.map(t => {
             const active = tool === t.key
             return (
-              <button key={t.key} onClick={() => setTool(t.key)}
-                className={"w-full text-left px-3 py-2.5 rounded-xl cursor-pointer border-0 outline-none active:scale-[0.98] " + (active ? "sb-nav-item-active" : "sb-nav-item")}
+              <button key={t.key} onClick={() => setTool(t.key)} title={collapsed ? t.label : undefined}
+                className={"w-full text-left px-3 py-2.5 rounded-xl cursor-pointer border-0 outline-none active:scale-[0.98] " + (collapsed ? "flex justify-center !px-0 " : "") + (active ? "sb-nav-item-active" : "sb-nav-item")}
                 style={{ fontFamily: 'inherit' }}
               >
                 <div className="flex items-center gap-3">
@@ -6870,7 +6875,7 @@ function Sidebar({ tool, setTool, theme, setTheme }: {
                     style={{ background: active ? 'var(--accentSubHard)' : 'var(--s2)', color: active ? 'var(--accent)' : 'var(--t2)' }}>
                     {t.icon}
                   </span>
-                  <span className="text-sm font-semibold leading-tight truncate" style={{ color: 'var(--text)' }}>{t.label}</span>
+                  {!collapsed && <span className="text-sm font-semibold leading-tight truncate" style={{ color: 'var(--text)' }}>{t.label}</span>}
                 </div>
               </button>
             )
@@ -6879,9 +6884,18 @@ function Sidebar({ tool, setTool, theme, setTheme }: {
       </nav>
 
       {/* Footer */}
-      <div className="px-4 py-4 flex-shrink-0 flex items-center gap-3" style={{ borderTop: '1px solid var(--border)' }}>
+      <div className={"flex-shrink-0 flex items-center " + (collapsed ? "flex-col gap-2 py-4" : "px-4 py-4 gap-3")} style={{ borderTop: '1px solid var(--border)' }}>
         <ThemeMenu theme={theme} setTheme={setTheme} />
-        <p className="text-xs leading-tight" style={{ color: 'var(--t3)' }}>本地运算<br />不上传数据</p>
+        <button onClick={onToggle} aria-label={collapsed ? '展开侧边栏' : '收起侧边栏'}
+          className="w-9 h-9 rounded-xl flex items-center justify-center cursor-pointer border-0 outline-none transition-all duration-150 active:scale-95 sb-settings-btn"
+          style={{ background: 'var(--s1)', color: 'var(--t2)', border: '1px solid var(--border)' }}
+        >
+          <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"
+            style={{ transform: collapsed ? 'rotate(180deg)' : 'rotate(0deg)', transition: 'transform 0.2s ease' }}>
+            <polyline points="15 18 9 12 15 6" />
+          </svg>
+        </button>
+        {!collapsed && <p className="text-xs leading-tight flex-1" style={{ color: 'var(--t3)' }}>本地运算<br />不上传数据</p>}
       </div>
     </aside>
   )
@@ -8339,10 +8353,18 @@ export default function App() {
   const [tool, setTool] = useState<ToolKey>('seedance')
   const [animating, setAnimating] = useState(false)
   const [themeX, setThemeX] = useState(false)
+  const [sidebarCollapsed, setSidebarCollapsed] = useState(() => {
+    if (typeof window !== 'undefined') return localStorage.getItem('dev-toolkit-sidebar') === '1'
+    return false
+  })
 
   useEffect(() => {
     localStorage.setItem('dev-toolkit-theme', theme)
   }, [theme])
+
+  useEffect(() => {
+    localStorage.setItem('dev-toolkit-sidebar', sidebarCollapsed ? '1' : '0')
+  }, [sidebarCollapsed])
 
   const switchTool = useCallback((t: ToolKey) => {
     if (t === tool) return
@@ -8380,9 +8402,11 @@ export default function App() {
   return (
     <div className={themeX ? 'theme-x' : undefined} style={{
       display: 'flex', height: '100vh', overflow: 'hidden', background: 'var(--bg)', ...cssVars,
+      '--sidebar-w': sidebarCollapsed ? '60px' : '224px',
       backgroundImage: 'var(--bgGrad)',
-    }}>
-      <Sidebar tool={tool} setTool={switchTool} theme={theme} setTheme={changeTheme} />
+    } as React.CSSProperties}>
+      <Sidebar tool={tool} setTool={switchTool} theme={theme} setTheme={changeTheme}
+        collapsed={sidebarCollapsed} onToggle={() => setSidebarCollapsed(c => !c)} />
       <main className="flex-1 overflow-hidden flex flex-col" style={{ paddingLeft: 'var(--sidebar-w)' }}>
         <div
           className="flex-1 overflow-hidden"
