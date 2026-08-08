@@ -4530,9 +4530,58 @@ function ImageAnalyzerTool() {
     addToast(`已添加 ${files.length} 张本地图片`, 'ok')
   }, [addToast, updateItem])
 
+  // 解析 OpenAI 图片接口的标准响应结构 { "data": [ { "b64_json": "..." }, ... ] }
+  // 每个 b64_json 单独解码为二进制后按 magic bytes 嗅探真实格式，不假设固定为 PNG
+  const addOpenAiB64Json = useCallback((text: string) => {
+    let json: unknown
+    try { json = JSON.parse(text) } catch { addToast('JSON 解析失败，请检查内容是否完整、格式是否正确', 'err'); return }
+    const dataArr = (json && typeof json === 'object' && Array.isArray((json as { data?: unknown }).data))
+      ? (json as { data: unknown[] }).data : null
+    if (!dataArr) { addToast('未识别到 OpenAI 图片响应结构：需包含 data 数组，如 { "data": [ { "b64_json": "..." } ] }', 'err'); return }
+    const found = dataArr
+      .map(entry => (entry && typeof entry === 'object') ? entry as { b64_json?: unknown } : null)
+      .filter((entry): entry is { b64_json?: unknown } => !!entry && typeof entry.b64_json === 'string' && (entry.b64_json as string).trim().length > 0)
+      .map(entry => (entry.b64_json as string).trim())
+    if (!found.length) { addToast('data[] 中未找到 b64_json 字段', 'err'); return }
+    found.forEach((b64, i) => {
+      const idx = i + 1
+      const id = Math.random().toString(36).slice(2, 10)
+      const item: ImageItem = {
+        id, order: imgCounter++, source: 'base64json', name: `openai-image-${idx}`,
+        size: null, mime: '', status: 'loading', width: 0, height: 0,
+        format: '', src: '', origin: 'OpenAI Base64 JSON',
+      }
+      setItems(prev => [...prev, item])
+      let buf: ArrayBuffer
+      try {
+        const bin = atob(b64)
+        const bytes = new Uint8Array(bin.length)
+        for (let j = 0; j < bin.length; j++) bytes[j] = bin.charCodeAt(j)
+        buf = bytes.buffer
+      } catch {
+        updateItem(id, { status: 'error', error: 'base64 解码失败，可能不是合法的 base64 字符串' }); return
+      }
+      const fmt = imgDetectFormat(buf) || 'PNG'
+      const mimeByFmt: Record<string, string> = { JPEG: 'image/jpeg', PNG: 'image/png', GIF: 'image/gif', BMP: 'image/bmp', WebP: 'image/webp', TIFF: 'image/tiff', AVIF: 'image/avif', HEIC: 'image/heic', ICO: 'image/x-icon', SVG: 'image/svg+xml' }
+      const mime = mimeByFmt[fmt] || 'image/png'
+      const ext = fmt === 'JPEG' ? 'jpg' : fmt.toLowerCase()
+      const dataUrl = `data:${mime};base64,${b64}`
+      const img = new Image()
+      img.onload = () => updateItem(id, {
+        width: img.naturalWidth, height: img.naturalHeight, src: dataUrl, status: 'done',
+        format: fmt, mime, size: buf.byteLength, name: `openai-image-${idx}.${ext}`,
+      })
+      img.onerror = () => updateItem(id, { status: 'error', error: '图片解码失败，base64 数据可能已损坏或被截断' })
+      img.src = dataUrl
+    })
+    addToast(`已从 JSON 中解析出 ${found.length} 张图片`, 'ok')
+  }, [addToast, updateItem])
+
   const addUrls = useCallback((text: string) => {
+    const trimmed = text.trim()
+    if (trimmed.startsWith('{')) { addOpenAiB64Json(trimmed); return }
     const urls = text.split(/[\n,\s]+/).map(s => s.trim()).filter(Boolean).filter(u => /^(https?:)?\/\/|^data:image\//i.test(u))
-    if (!urls.length) { addToast('请输入有效的图片 URL（以 http(s):// 开头）', 'err'); return }
+    if (!urls.length) { addToast('请输入有效的图片 URL（以 http(s):// 开头），或粘贴 OpenAI 图片接口返回的 JSON', 'err'); return }
     urls.forEach(url => {
       const rawName = decodeURIComponent(url.split('/').pop()!.split('?')[0]) || '远程图片'
       const id = Math.random().toString(36).slice(2, 10)
@@ -4560,7 +4609,7 @@ function ImageAnalyzerTool() {
         .catch(() => updateItem(id, { sizeBlocked: true, format: item.format || '未知' }))
     })
     addToast(`已开始加载 ${urls.length} 个 URL 图片`, 'ok')
-  }, [addToast, updateItem])
+  }, [addToast, updateItem, addOpenAiB64Json])
 
   const removeItem = useCallback((id: string) => setItems(prev => prev.filter(i => i.id !== id)), [])
 
@@ -4601,7 +4650,10 @@ function ImageAnalyzerTool() {
       const files = Array.from(e.clipboardData?.files || [])
       if (files.length) { addFiles(files); return }
       const text = e.clipboardData?.getData('text')
-      if (text && /^https?:\/\//i.test(text.trim())) addUrls(text)
+      const trimmed = text?.trim()
+      if (!trimmed) return
+      // 全局粘贴要保守判断，避免误触发：URL 或者「看起来像带 b64_json 的 JSON」才当图片处理
+      if (/^https?:\/\//i.test(trimmed) || (trimmed.startsWith('{') && /"b64_json"/.test(trimmed))) addUrls(text!)
     }
     window.addEventListener('paste', handler as EventListener)
     return () => window.removeEventListener('paste', handler as EventListener)
@@ -4692,7 +4744,7 @@ function ImageAnalyzerTool() {
             <span className="w-7 h-7 rounded-lg flex items-center justify-center" style={{ background: 'var(--accentSub)', color: 'var(--accent)' }}>
               <svg viewBox="0 0 24 24" className="w-4 h-4" fill="none" stroke="currentColor" strokeWidth="2"><path d="M10 13a5 5 0 0 0 7.5.5l3-3a5 5 0 0 0-7-7l-1.5 1.5" /><path d="M14 11a5 5 0 0 0-7.5-.5l-3 3a5 5 0 0 0 7 7L12 19" /></svg>
             </span>
-            <span className="text-sm font-semibold" style={{ color: 'var(--text)' }}>图片 URL 加载 <span style={{ color: 'var(--t3)' }} className="font-normal">（每行一个，可批量）</span></span>
+            <span className="text-sm font-semibold" style={{ color: 'var(--text)' }}>图片 URL 加载 <span style={{ color: 'var(--t3)' }} className="font-normal">（每行一个，可批量；也支持粘贴 OpenAI 图片接口返回的 JSON）</span></span>
           </div>
           <UrlInput onSubmit={addUrls} />
         </div>
@@ -4796,7 +4848,7 @@ function ImageAnalyzerTool() {
                 <div className="p-4">
                   <p className="font-semibold text-sm truncate" style={{ color: 'var(--text)' }} title={it.name}>{it.name}</p>
                   <p className="text-[10px] mt-0.5 flex items-center gap-1" style={{ color: 'var(--t3)' }}>
-                    <span className="w-1.5 h-1.5 rounded-full" style={{ background: it.source === 'local' ? 'var(--accent)' : 'var(--warn)' }} />{it.origin}
+                    <span className="w-1.5 h-1.5 rounded-full" style={{ background: it.source === 'local' ? 'var(--accent)' : it.source === 'base64json' ? 'var(--jKey)' : 'var(--warn)' }} />{it.origin}
                   </p>
                   <div className="grid grid-cols-2 gap-2 mt-3">
                     <div className="rounded-lg px-2.5 py-2" style={{ background: 'var(--s1)', border: '1px solid var(--border)' }}>
@@ -4960,7 +5012,7 @@ function UrlInput({ onSubmit }: { onSubmit: (text: string) => void }) {
       <textarea
         value={value} onChange={e => setValue(e.target.value)} rows={4} spellCheck={false}
         onFocus={() => setFocused(true)} onBlur={() => setFocused(false)}
-        placeholder="https://example.com/photo.jpg&#10;https://example.com/banner.png"
+        placeholder={'https://example.com/photo.jpg\nhttps://example.com/banner.png\n\n也支持粘贴 OpenAI 图片接口返回的 JSON（自动提取 data[].b64_json，可含多张）'}
         className="w-full flex-1 rounded-xl p-3 text-xs leading-relaxed resize-y outline-none transition-all duration-150"
         style={{
           background: 'var(--inputBg)', color: 'var(--text)',
