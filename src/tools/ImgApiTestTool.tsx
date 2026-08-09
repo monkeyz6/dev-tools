@@ -211,9 +211,18 @@ function imgBlobToDataURI(b: Blob): Promise<string | null> {
     f.readAsDataURL(b)
   })
 }
-async function imgUrlToDataURI(u: string): Promise<string | null> {
+async function imgFetchWithTimeout(u: string, ms: number, init: RequestInit = {}): Promise<Response> {
+  const ctrl = new AbortController()
+  const timer = window.setTimeout(() => ctrl.abort(), ms)
   try {
-    const r = await fetch(u)
+    return await fetch(u, { ...init, signal: ctrl.signal })
+  } finally {
+    window.clearTimeout(timer)
+  }
+}
+async function imgUrlToDataURI(u: string, timeoutMs = 20_000): Promise<string | null> {
+  try {
+    const r = await imgFetchWithTimeout(u, timeoutMs)
     const b = await r.blob()
     return await imgBlobToDataURI(b)
   } catch { return null }
@@ -540,7 +549,7 @@ async function imgExecutePlan(plan: ImgPlan, channel: { baseUrl: string; apiKey:
     delete headers['content-type']
     opts = { method: plan.method, headers, body: fd }
   }
-  const resp = await fetch(url, opts)
+  const resp = await imgFetchWithTimeout(url, 120_000, opts)
   const rh: Record<string, string> = {}
   resp.headers.forEach((v, k) => { rh[k.toLowerCase()] = v })
   const text = await resp.text()
@@ -966,19 +975,21 @@ function ImgApiTestTool() {
       c.status = 'error'
     }
     c.result = rec
-    if (c.needRef) {
-      for (const r of refImagesRef.current) {
-        rec.refThumbs.push(r.dataUri ? await imgMakeThumb(r.dataUri) : (r.url || null))
+    try {
+      if (c.needRef) {
+        for (const r of refImagesRef.current) {
+          rec.refThumbs.push(r.dataUri ? await imgMakeThumb(r.dataUri) : (r.url || null))
+        }
       }
-    }
-    const storedResponse = imgResponseForHistory(rec.rawSnippet)
-    const histRec: ImgRecord = {
-      ...rec,
-      rawSnippet: storedResponse.body,
-      responseBodyComplete: storedResponse.complete,
-      images: rec.images.map(im => ({ ...im, dataUri: null })),
-    }
-    setHistory(h => [histRec, ...h].slice(0, IMG_HIST_MAX))
+      const storedResponse = imgResponseForHistory(rec.rawSnippet)
+      const histRec: ImgRecord = {
+        ...rec,
+        rawSnippet: storedResponse.body,
+        responseBodyComplete: storedResponse.complete,
+        images: rec.images.map(im => ({ ...im, dataUri: null })),
+      }
+      setHistory(h => [histRec, ...h].slice(0, IMG_HIST_MAX))
+    } catch { /* 收尾失败不阻塞状态更新 */ }
     setCases([...casesRef.current])
   }
 
@@ -986,19 +997,24 @@ function ImgApiTestTool() {
     if (running) { toastShow('已有运行中'); return }
     setRunning(true)
     stopRef.current = false
-    for (const c of list) {
-      if (stopRef.current) break
-      if (c.needRef && refImagesRef.current.length === 0) {
-        c.status = 'error'
-        c.result = emptyRecord(c, activeChannel?.name || '', model.trim() || IMG_PLACEHOLDER_MODEL[apiType], '需要参考图但未提供')
-        setCases([...casesRef.current])
-        continue
+    try {
+      for (const c of list) {
+        if (stopRef.current) break
+        if (c.needRef && refImagesRef.current.length === 0) {
+          c.status = 'error'
+          c.result = emptyRecord(c, activeChannel?.name || '', model.trim() || IMG_PLACEHOLDER_MODEL[apiType], '需要参考图但未提供')
+          setCases([...casesRef.current])
+          continue
+        }
+        try {
+          await runCase(c)
+        } catch { /* 单个用例异常不中断批量 */ }
+        await new Promise(r => setTimeout(r, 150))
       }
-      await runCase(c)
-      await new Promise(r => setTimeout(r, 150))
+    } finally {
+      setRunning(false)
+      stopRef.current = false
     }
-    setRunning(false)
-    stopRef.current = false
     toastShow('批量测试结束')
   }
 
