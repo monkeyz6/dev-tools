@@ -1,4 +1,5 @@
 import React, { Suspense, useCallback, useEffect, useRef, useState } from 'react'
+import HomePage from './HomePage'
 import { IconCheck, IconSettings } from './shared/icons'
 import {
   TOOL_DEFINITIONS, preloadTool, resolveToolRoute,
@@ -136,7 +137,7 @@ const THEMES: Record<ThemeKey, { label: string; icon: string; dark: boolean; v: 
   },
 }
 
-function ThemeMenu({ theme, setTheme }: { theme: ThemeKey; setTheme: (t: ThemeKey) => void }) {
+function ThemeMenu({ theme, setTheme, placement = 'up' }: { theme: ThemeKey; setTheme: (t: ThemeKey) => void; placement?: 'up' | 'down' }) {
   const [open, setOpen] = useState(false)
   const ref = useRef<HTMLDivElement>(null)
 
@@ -156,8 +157,8 @@ function ThemeMenu({ theme, setTheme }: { theme: ThemeKey; setTheme: (t: ThemeKe
   return (
     <div ref={ref} className="relative">
       {open && (
-        <div className="floating-material absolute left-0 bottom-full mb-2 rounded-2xl z-20"
-          style={{ background: 'var(--bg)', border: '1px solid var(--border)', boxShadow: 'var(--shadowMd)', width: 180, padding: '6px' }}>
+        <div className={"floating-material absolute rounded-2xl z-20 " + (placement === 'down' ? "right-0 top-full mt-2" : "left-0 bottom-full mb-2")}
+          style={{ background: 'var(--bg)', border: '1px solid var(--border)', boxShadow: 'var(--shadowMd)', width: 180, padding: '6px', transformOrigin: placement === 'down' ? '50% 0%' : '50% 100%' }}>
           <p className="text-xs font-semibold px-2 pt-1 pb-2" style={{ color: 'var(--t3)', letterSpacing: '0.06em' }}>THEME</p>
           {(Object.keys(THEMES) as ThemeKey[]).map(t => {
             const active = theme === t
@@ -220,7 +221,7 @@ function Sidebar({ tool, onNavigate, onToolIntent, theme, setTheme, collapsed, o
           {!collapsed && (
             <div className="text-left">
               <div className="text-sm font-bold tracking-tight" style={{ color: 'var(--text)', letterSpacing: '-0.02em' }}>Dev Toolkit</div>
-              <div className="text-xs" style={{ color: 'var(--t3)' }}>前端导航工具</div>
+              <div className="text-xs" style={{ color: 'var(--t3)' }}>纯前端工具箱</div>
             </div>
           )}
         </button>
@@ -332,7 +333,7 @@ class ToolLoadBoundary extends React.Component<
   }
 }
 
-function ToolNotFound({ pathname, onNavigate }: { pathname: string; onNavigate: (key: ToolKey) => void }) {
+function ToolNotFound({ pathname, onNavigate, onHome }: { pathname: string; onNavigate: (key: ToolKey) => void; onHome: () => void }) {
   const navigate = (event: React.MouseEvent<HTMLAnchorElement>, key: ToolKey) => {
     if (!shouldHandleClientNavigation(event)) return
     event.preventDefault()
@@ -347,11 +348,15 @@ function ToolNotFound({ pathname, onNavigate }: { pathname: string; onNavigate: 
         <p className="text-sm mt-2 leading-relaxed" style={{ color: 'var(--t2)' }}>
           路径 <code className="font-mono px-1.5 py-0.5 rounded-md" style={{ background: 'var(--s2)', color: 'var(--text)' }}>{pathname}</code> 没有对应的工具。
         </p>
-        <a href={TOOL_DEFINITIONS[0].path}
-          onClick={event => navigate(event, TOOL_DEFINITIONS[0].key)}
+        <a href="/"
+          onClick={event => {
+            if (!shouldHandleClientNavigation(event)) return
+            event.preventDefault()
+            onHome()
+          }}
           className="ui-btn inline-flex mt-5 rounded-full px-4 py-2 text-sm font-semibold no-underline"
           style={{ background: 'var(--primary)', color: 'var(--primaryFg)' }}>
-          返回 Seedance 计费
+          返回首页
         </a>
         <div className="mt-7 pt-6" style={{ borderTop: '1px solid var(--border)' }}>
           <p className="text-xs font-semibold mb-3" style={{ color: 'var(--t3)', letterSpacing: '0.06em' }}>可用工具</p>
@@ -420,6 +425,11 @@ export default function App() {
     setRoute({ kind: 'tool', key: definition.key, path: definition.path })
   }, [])
   const handleToolIntent = useCallback((next: ToolKey, intent: ToolIntent) => preloadTool(next, intent), [])
+  const navigateHome = useCallback(() => {
+    if (window.location.pathname === '/') return
+    window.history.pushState(null, '', '/')
+    setRoute({ kind: 'home' })
+  }, [])
   const changeTheme = useCallback((next: ThemeKey) => {
     setTheme(next)
     setThemeX(true)
@@ -429,13 +439,17 @@ export default function App() {
   const definition = route.kind === 'tool' ? TOOL_DEFINITIONS.find(item => item.key === route.key) ?? null : null
 
   useEffect(() => {
-    document.title = definition ? `${definition.label} · Dev Toolkit` : '工具不存在 · Dev Toolkit'
-  }, [definition])
+    if (route.kind === 'home') {
+      document.title = 'Dev Toolkit · 纯前端工具箱'
+    } else {
+      document.title = definition ? `${definition.label} · Dev Toolkit` : '工具不存在 · Dev Toolkit'
+    }
+  }, [route.kind, definition])
 
   const vars = THEMES[theme].v
   const cssVars = Object.fromEntries(Object.entries(vars).map(([key, value]) => [`--${key}`, value])) as Record<string, string>
   const ToolComponent = definition?.component
-  const stageKey = route.kind === 'tool' ? route.key : `not-found:${route.pathname}`
+  const stageKey = route.kind === 'tool' ? route.key : route.kind === 'home' ? 'home' : `not-found:${route.pathname}`
 
   return (
     <div className={`app-shell ${themeX ? 'theme-x' : ''}`} data-theme={theme} style={{
@@ -444,11 +458,22 @@ export default function App() {
       backgroundImage: 'var(--bgGrad)',
     } as React.CSSProperties}>
       <AmbientBackground />
-      <Sidebar tool={route.kind === 'tool' ? route.key : null} onNavigate={navigateTool} onToolIntent={handleToolIntent} theme={theme} setTheme={changeTheme}
-        collapsed={sidebarCollapsed} onToggle={() => setSidebarCollapsed(current => !current)} />
-      <main className="app-main relative z-[1] flex-1 overflow-hidden flex flex-col" style={{ paddingLeft: 'var(--sidebar-w)' }}>
+      {route.kind !== 'home' && (
+        <Sidebar tool={route.kind === 'tool' ? route.key : null} onNavigate={navigateTool} onToolIntent={handleToolIntent} theme={theme} setTheme={changeTheme}
+          collapsed={sidebarCollapsed} onToggle={() => setSidebarCollapsed(current => !current)} />
+      )}
+      <main className="app-main relative z-[1] flex-1 overflow-hidden flex flex-col" style={{ paddingLeft: route.kind === 'home' ? 0 : 'var(--sidebar-w)' }}>
         <div key={stageKey} className="tool-stage flex-1 overflow-hidden">
-          {definition && ToolComponent ? (
+          {route.kind === 'home' ? (
+            <div className="h-full overflow-y-auto">
+              <HomePage
+                themeMenu={<ThemeMenu theme={theme} setTheme={changeTheme} placement="down" />}
+                onNavigate={navigateTool}
+                onToolIntent={handleToolIntent}
+                onHome={navigateHome}
+              />
+            </div>
+          ) : definition && ToolComponent ? (
             <ToolLoadBoundary key={definition.key} label={definition.label}>
               <Suspense fallback={<ToolLoading label={definition.label} />}>
                 {definition.fullHeight ? (
@@ -459,7 +484,7 @@ export default function App() {
               </Suspense>
             </ToolLoadBoundary>
           ) : (
-            <ToolNotFound pathname={route.kind === 'not-found' ? route.pathname : window.location.pathname} onNavigate={navigateTool} />
+            <ToolNotFound pathname={route.kind === 'not-found' ? route.pathname : window.location.pathname} onNavigate={navigateTool} onHome={navigateHome} />
           )}
         </div>
       </main>

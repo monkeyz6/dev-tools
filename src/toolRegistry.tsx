@@ -10,6 +10,7 @@ export type ToolKey = 'seedance' | 'json' | 'timestamp' | 'aiconvert' | 'llmbatc
 export type ToolIntent = 'hover' | 'focus' | 'activate'
 export type ToolPath = `/tools/${ToolKey}`
 export type ToolRoute =
+  | { kind: 'home' }
   | { kind: 'tool'; key: ToolKey; path: ToolPath }
   | { kind: 'not-found'; pathname: string }
 
@@ -21,6 +22,7 @@ export interface ToolDefinition {
   key: ToolKey
   path: ToolPath
   label: string
+  desc: string
   icon: React.ReactNode
   fullHeight: boolean
   component: React.ComponentType
@@ -74,26 +76,23 @@ const lazyComponents: Record<AsyncToolKey, React.LazyExoticComponent<React.Compo
 }
 
 export const TOOL_DEFINITIONS: ToolDefinition[] = [
-  { key: 'seedance', path: toolPath('seedance'), label: 'Seedance 计费', icon: <IconSeedance />, fullHeight: false, component: SeedanceTool },
-  { key: 'json', path: toolPath('json'), label: 'JSON 可视化', icon: <IconJson />, fullHeight: true, component: lazyComponents.json },
-  { key: 'timestamp', path: toolPath('timestamp'), label: '时间戳转换', icon: <IconClock />, fullHeight: false, component: lazyComponents.timestamp },
-  { key: 'aiconvert', path: toolPath('aiconvert'), label: 'AI 格式转换', icon: <IconConvert />, fullHeight: true, component: lazyComponents.aiconvert },
-  { key: 'llmbatch', path: toolPath('llmbatch'), label: 'LLM 批量测试', icon: <IconBatch />, fullHeight: true, component: lazyComponents.llmbatch },
-  { key: 'imgtest', path: toolPath('imgtest'), label: '图片接口测试', icon: <IconImgTest />, fullHeight: true, component: lazyComponents.imgtest },
-  { key: 'modelprobe', path: toolPath('modelprobe'), label: '模型探测', icon: <IconProbe />, fullHeight: true, component: lazyComponents.modelprobe },
-  { key: 'imganalyze', path: toolPath('imganalyze'), label: '图片信息识别', icon: <IconImage />, fullHeight: false, component: lazyComponents.imganalyze },
-  { key: 'videoanalyze', path: toolPath('videoanalyze'), label: '视频信息检测', icon: <IconVideo />, fullHeight: false, component: lazyComponents.videoanalyze },
-  { key: 'idgen', path: toolPath('idgen'), label: 'ID 生成器', icon: <IconId />, fullHeight: false, component: lazyComponents.idgen },
-  { key: 'base64', path: toolPath('base64'), label: 'Base64 编解码', icon: <IconCode />, fullHeight: true, component: lazyComponents.base64 },
-  { key: 'unicode', path: toolPath('unicode'), label: 'Unicode 转换', icon: <IconType />, fullHeight: true, component: lazyComponents.unicode },
-  { key: 'graphql', path: toolPath('graphql'), label: 'GraphQL 格式化', icon: <IconGraphql />, fullHeight: true, component: lazyComponents.graphql },
+  { key: 'seedance', path: toolPath('seedance'), label: 'Seedance 计费', desc: '视频生成模型计费计算器，人民币/美元自动换算', icon: <IconSeedance />, fullHeight: false, component: SeedanceTool },
+  { key: 'json', path: toolPath('json'), label: 'JSON 可视化', desc: '双栏 JSON 查看、编辑、折叠与 A/B Diff 对比', icon: <IconJson />, fullHeight: true, component: lazyComponents.json },
+  { key: 'timestamp', path: toolPath('timestamp'), label: '时间戳转换', desc: '毫秒/秒/纳秒时间戳与日期时间双向转换', icon: <IconClock />, fullHeight: false, component: lazyComponents.timestamp },
+  { key: 'aiconvert', path: toolPath('aiconvert'), label: 'AI 格式转换', desc: 'OpenAI、Anthropic、Responses 请求体互转', icon: <IconConvert />, fullHeight: true, component: lazyComponents.aiconvert },
+  { key: 'llmbatch', path: toolPath('llmbatch'), label: 'LLM 批量测试', desc: 'Token 计费口径、一致性、波动与模型验真', icon: <IconBatch />, fullHeight: true, component: lazyComponents.llmbatch },
+  { key: 'imgtest', path: toolPath('imgtest'), label: '图片接口测试', desc: '多渠道图片生成接口批测、价格与响应校验', icon: <IconImgTest />, fullHeight: true, component: lazyComponents.imgtest },
+  { key: 'modelprobe', path: toolPath('modelprobe'), label: '模型探测', desc: 'API 渠道兼容性、参数降级与缓存实验台', icon: <IconProbe />, fullHeight: true, component: lazyComponents.modelprobe },
+  { key: 'imganalyze', path: toolPath('imganalyze'), label: '图片信息识别', desc: '图片分辨率、格式、尺寸与等级识别', icon: <IconImage />, fullHeight: false, component: lazyComponents.imganalyze },
+  { key: 'videoanalyze', path: toolPath('videoanalyze'), label: '视频信息检测', desc: '本地文件或 URL 视频元信息与播放检测', icon: <IconVideo />, fullHeight: false, component: lazyComponents.videoanalyze },
+  { key: 'idgen', path: toolPath('idgen'), label: 'ID 生成器', desc: 'UUID v4/v7 与安全随机字符串批量生成', icon: <IconId />, fullHeight: false, component: lazyComponents.idgen },
+  { key: 'base64', path: toolPath('base64'), label: 'Base64 编解码', desc: '双向编解码、URL-safe 模式与宽容解码', icon: <IconCode />, fullHeight: true, component: lazyComponents.base64 },
+  { key: 'unicode', path: toolPath('unicode'), label: 'Unicode 转换', desc: '六种 Unicode 表示格式的编码与自动解码', icon: <IconType />, fullHeight: true, component: lazyComponents.unicode },
+  { key: 'graphql', path: toolPath('graphql'), label: 'GraphQL 格式化', desc: 'GraphQL 查询格式化、压缩与语法检查', icon: <IconGraphql />, fullHeight: true, component: lazyComponents.graphql },
 ]
 
 export function resolveToolRoute(pathname: string): ToolRoute {
-  if (pathname === '/') {
-    const definition = TOOL_DEFINITIONS[0]
-    return { kind: 'tool', key: definition.key, path: definition.path }
-  }
+  if (pathname === '/') return { kind: 'home' }
   const normalizedPath = pathname.length > 1 ? pathname.replace(/\/+$/, '') : pathname
   const definition = TOOL_DEFINITIONS.find(tool => tool.path === normalizedPath)
   return definition

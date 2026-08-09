@@ -27,13 +27,13 @@ test.describe('工具懒加载与预加载', () => {
     })
 
     await page.goto('/')
-    await expect(page.getByRole('heading', { name: 'Seedance 计费计算器' })).toBeVisible()
+    await expect(page.getByRole('heading', { name: /工具集合/ })).toBeVisible()
     expect(requests).toHaveLength(0)
 
     const jsonNav = page.locator('[data-tool-key="json"]')
     await jsonNav.hover()
     await expect.poll(() => requests.length).toBe(1)
-    await expect(page.getByRole('heading', { name: 'Seedance 计费计算器' })).toBeVisible()
+    await expect(page.getByRole('heading', { name: /工具集合/ })).toBeVisible()
 
     await jsonNav.click()
     await expect(page.getByRole('heading', { name: 'JSON 可视化 & Diff' })).toBeVisible()
@@ -50,7 +50,7 @@ test.describe('工具懒加载与预加载', () => {
     await page.goto('/')
     await page.locator('[data-tool-key="json"]').focus()
     await requestPromise
-    await expect(page.getByRole('heading', { name: 'Seedance 计费计算器' })).toBeVisible()
+    await expect(page.getByRole('heading', { name: /工具集合/ })).toBeVisible()
   })
 
   test('节省流量模式下 hover 不做推测加载，点击仍会加载', async ({ page }) => {

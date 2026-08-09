@@ -1,6 +1,6 @@
 # Dev Toolkit
 
-> 纯前端开发者工具集合
+> 纯前端实现，零服务端依赖
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
@@ -8,7 +8,7 @@
 
 ## 介绍
 
-**Dev Toolkit** 是一个纯前端、零服务端依赖的开发者工具集合站，所有数据均在浏览器本地处理，**不会上传到任何服务器**。包含 13 个实用工具，覆盖计费计算、JSON 处理、时间戳转换、AI 格式转换、LLM 测试、模型探测、图片与视频分析、ID 生成、编解码等领域。
+**Dev Toolkit** 是一个纯前端实现、零服务端依赖的开发工具箱，所有数据均在浏览器本地处理，**不会上传到任何服务器**。包含 13 个实用工具，覆盖计费计算、JSON 处理、时间戳转换、AI 格式转换、LLM 测试、模型探测、图片与视频分析、ID 生成、编解码等领域，服务前后端开发者。
 
 ---
 
@@ -93,7 +93,7 @@ npm install
 # 启动开发服务器
 npm run dev
 
-# 访问 http://localhost:8443
+# 访问 http://localhost:8443（首页为工具导航，也可直达具体工具）
 
 # 生产构建
 npm run build
@@ -102,7 +102,7 @@ npm run build
 npm run preview
 ```
 
-也可以直接访问具体工具，例如 `http://localhost:8443/tools/imgtest`。
+也可以直接访问具体工具，例如 `http://localhost:8443/tools/imgtest`；首页 `/` 以卡片网格展示全部 13 个工具。
 
 ### 生产部署的路由回退
 
@@ -150,6 +150,7 @@ npm run preview
 ├── src/
 │   ├── main.tsx         # React 入口
 │   ├── App.tsx          # 应用外壳（主题、侧边栏与 URL 路由）
+│   ├── HomePage.tsx     # 首页（/ 路由，工具卡片导航）
 │   ├── toolRegistry.tsx # 13 个工具的注册、路径与懒加载配置
 │   ├── tools/           # 各工具独立模块
 │   └── index.css        # 全局样式 + Tailwind CSS
@@ -172,11 +173,11 @@ npm run preview
 
 **推荐版（150 字以内）：**
 
-> 纯前端开发者工具合集，无需服务端，所有数据本地处理，不上传任何服务器。包含 Seedance 计费、JSON 可视化/Diff、时间戳转换、AI 请求体格式转换、LLM 批量测试与 Token 验真、图片接口测试、模型探测、图片/视频信息识别、ID 生成器、Base64 编解码、Unicode 转换、GraphQL 格式化等 13 个工具，支持 4 套主题。技术栈：React 19 + Vite 8 + Tailwind CSS v4。
+> 纯前端实现、零服务端依赖的工具箱，所有数据本地处理，不上传任何服务器。包含 Seedance 计费、JSON 可视化/Diff、时间戳转换、AI 请求体格式转换、LLM 批量测试与 Token 验真、图片接口测试、模型探测、图片/视频信息识别、ID 生成器、Base64 编解码、Unicode 转换、GraphQL 格式化等 13 个工具，服务前后端开发者，支持 4 套主题。技术栈：React 19 + Vite 8 + Tailwind CSS v4。
 
 **完整版（350 字以内）：**
 
-> 纯前端开发者工具集合站，包含 13 个实用工具：Seedance 视频生成计费、JSON 可视化与 Diff、时间戳转换、AI 请求体格式转换、LLM 批量测试与 Token 核查、图片接口测试、模型探测、图片和视频信息识别、UUID 与随机字符串生成、Base64、Unicode、GraphQL 格式化。所有数据在浏览器本地处理，不上传任何服务器。内置 4 套主题，支持工具 URL 直达、毛玻璃 UI 与配置持久化。技术栈：React 19 + Vite 8 + Tailwind CSS v4 + TypeScript + Recharts。
+> 纯前端实现、零服务端依赖的浏览器工具箱，包含 13 个实用工具：Seedance 视频生成计费、JSON 可视化与 Diff、时间戳转换、AI 请求体格式转换、LLM 批量测试与 Token 核查、图片接口测试、模型探测、图片和视频信息识别、UUID 与随机字符串生成、Base64、Unicode、GraphQL 格式化。所有数据在浏览器本地处理，不上传任何服务器。内置 4 套主题，支持工具 URL 直达、毛玻璃 UI 与配置持久化。技术栈：React 19 + Vite 8 + Tailwind CSS v4 + TypeScript + Recharts。
 
 ---
 

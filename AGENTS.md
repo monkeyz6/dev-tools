@@ -1,6 +1,6 @@
 # dev-toolkit
 
-一个纯前端开发者工具集合站：React + Vite + Tailwind CSS v4。包含 13 个工具（Seedance 计费、JSON 可视化/Diff、时间戳转换、AI 请求体格式转换、LLM 批量测试 & Token 计费口径核查、图片接口测试、模型探测、图片信息识别、视频信息检测、ID 生成器、Base64 编解码、Unicode 转换、GraphQL 格式化）与 4 套主题。
+一个纯前端实现的开发工具箱：React + Vite + Tailwind CSS v4。包含 13 个工具（Seedance 计费、JSON 可视化/Diff、时间戳转换、AI 请求体格式转换、LLM 批量测试 & Token 计费口径核查、图片接口测试、模型探测、图片信息识别、视频信息检测、ID 生成器、Base64 编解码、Unicode 转换、GraphQL 格式化）与 4 套主题。
 
 ## 开发命令
 
@@ -14,13 +14,15 @@ npm run test:e2e   # 运行 Playwright 端到端测试
 ## 项目结构
 
 - `src/main.tsx` - React 入口，挂载 `src/App.tsx`
-- `src/App.tsx` - 单文件应用（13 个工具 + 主题系统 + 侧边栏导航，约 10000 行）
-- `src/index.css` - 全局样式 + Tailwind CSS v4 import + 毛玻璃/主题过渡工具类
+- `src/App.tsx` - 应用外壳（主题 + 侧边栏 + URL 路由，工具注册见 `toolRegistry.tsx`）
+- `src/HomePage.tsx` - 首页（`/` 路由：无侧栏的顶栏 + Hero + 3 列工具卡片 + 备案页脚，视觉参考 `index/index.html`）
+- `src/index.css` - 全局样式 + Tailwind CSS v4 import + 毛玻璃/主题过渡工具类 + `home-*` 首页样式
 - `playwright.config.ts` - Playwright 端到端测试配置
 - `e2e/` - 端到端测试用例（按工具拆分）
 
 ## 技术要点
 
+- 路由：`/` 渲染首页（`HomePage.tsx`，无侧栏），`/tools/*` 渲染带侧边栏的工作台；`resolveToolRoute` 不再把 `/` 重定向到默认工具
 - 运行时：React 19 + Vite 8 + Tailwind CSS v4（`@tailwindcss/vite` 插件）+ recharts（LLM 批量测试的输出 Token 波动图）+ `@dnd-kit/core`/`@dnd-kit/sortable`/`@dnd-kit/utilities`（LLM 批量测试的提示词库拖拽排序）
 - 样式：Tailwind 工具类 + CSS 变量主题（`--bg`/`--accent` 等，见 `THEMES`），毛玻璃用 `.glass`/`.glass-sidebar`
 - 字体：直接用 CSS `font-family` 声明 Inter（正文，`src/index.css`）/ JetBrains Mono（等宽，`App.tsx` 内联样式），不自建 `@font-face`、不下载/打包字体文件——本机没装就走后面的系统字体兜底栈；主题数据在 App.tsx

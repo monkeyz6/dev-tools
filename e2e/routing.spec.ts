@@ -20,14 +20,17 @@ test.beforeEach(async ({ page }) => {
   await page.addInitScript(() => localStorage.clear())
 })
 
-test('根路径使用 replaceState 规范到默认工具', async ({ page }) => {
+test('根路径渲染首页且不重定向', async ({ page }) => {
   await page.addInitScript(() => {
     ;(window as Window & { historyLengthBeforeApp?: number }).historyLengthBeforeApp = window.history.length
   })
   await page.goto('/?from=legacy#old-route')
 
-  await expect(page).toHaveURL('/tools/seedance')
-  await expect(page.getByRole('heading', { name: 'Seedance 计费计算器' })).toBeVisible()
+  await expect(page).toHaveURL('/?from=legacy#old-route')
+  await expect(page).toHaveTitle('Dev Toolkit · 纯前端工具箱')
+  await expect(page.getByRole('heading', { name: /工具集合/ })).toBeVisible()
+  await expect(page.locator('.home-card')).toHaveCount(13)
+  await expect(page.locator('aside')).toHaveCount(0)
   const lengths = await page.evaluate(() => ({
     before: (window as Window & { historyLengthBeforeApp?: number }).historyLengthBeforeApp,
     after: window.history.length,
@@ -83,7 +86,7 @@ test('有效尾斜杠被规范化，无效路径显示可恢复 404', async ({ p
   await expect(page).toHaveTitle('工具不存在 · Dev Toolkit')
   await expect(page.getByRole('heading', { name: '工具不存在' })).toBeVisible()
   await expect(page.locator('[data-tool-key][aria-current="page"]')).toHaveCount(0)
-  await page.getByRole('link', { name: '返回 Seedance 计费' }).click()
-  await expect(page).toHaveURL('/tools/seedance')
-  await expect(page.getByRole('heading', { name: 'Seedance 计费计算器' })).toBeVisible()
+  await page.getByRole('link', { name: '返回首页' }).click()
+  await expect(page).toHaveURL('/')
+  await expect(page.getByRole('heading', { name: /工具集合/ })).toBeVisible()
 })

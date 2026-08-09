@@ -10,9 +10,20 @@ test('浅色工作台视觉基线', async ({ page }) => {
     localStorage.clear()
     localStorage.setItem('dev-toolkit-theme', 'light')
   })
-  await page.goto('/')
+  await page.goto('/tools/seedance')
   await expect(page.getByRole('heading', { name: 'Seedance 计费计算器' })).toBeVisible()
   await expect(page).toHaveScreenshot('workspace-light.png', { animations: 'disabled' })
+})
+
+test('首页浅色视觉基线', async ({ page }) => {
+  await page.addInitScript(() => {
+    localStorage.clear()
+    localStorage.setItem('dev-toolkit-theme', 'light')
+  })
+  await page.goto('/')
+  await expect(page.getByRole('heading', { name: /工具集合/ })).toBeVisible()
+  await expect(page.locator('.home-card')).toHaveCount(13)
+  await expect(page).toHaveScreenshot('home-light.png', { animations: 'disabled' })
 })
 
 test('深色密集编辑器视觉基线', async ({ page }) => {
