@@ -11,6 +11,8 @@ const IMG_HIST_KEY = 'imgtest-history'
 const IMG_UI_KEY = 'imgtest-ui'
 const IMG_HIST_MAX = 30
 const IMG_DEFAULT_RATE = 7
+const IMG_VALIDATION_VERSION = 2
+const IMG_RESOLUTION_TIER_MIN_SCALE = 0.88
 
 const IMG_KEY_PASSPHRASE = 'dev-toolkit-imgtest-v1'
 let imgCryptoKeyPromise: Promise<CryptoKey> | null = null
@@ -135,8 +137,8 @@ const IMG_TEST_SETS: Record<ImgApiType, ImgCaseDef[]> = {
   ],
   grok: [
     { name: '1k + 1:1', desc: 'resolution=1k, aspect_ratio=1:1', params: { resolution: '1k', aspect_ratio: '1:1', n: 1, response_format: 'url' } },
-    { name: '1k + 16:9', desc: '长边约 1024, 16:9', params: { resolution: '1k', aspect_ratio: '16:9', n: 1, response_format: 'url' } },
-    { name: '2k + 16:9 + n=2', desc: '2k 长边 + 16:9 + 张数三重校验', params: { resolution: '2k', aspect_ratio: '16:9', n: 2, response_format: 'url' } },
+    { name: '1k + 16:9', desc: '1K 分辨率档位 + 16:9', params: { resolution: '1k', aspect_ratio: '16:9', n: 1, response_format: 'url' } },
+    { name: '2k + 16:9 + n=2', desc: '2K 分辨率档位 + 16:9 + 张数三重校验', params: { resolution: '2k', aspect_ratio: '16:9', n: 2, response_format: 'url' } },
     { name: '2k + 9:16 竖版', desc: '2k 竖版 9:16', params: { resolution: '2k', aspect_ratio: '9:16', n: 1, response_format: 'url' } },
     { name: '2k + 21:9 超宽', desc: '2k 电影级 21:9', params: { resolution: '2k', aspect_ratio: '21:9', n: 1, response_format: 'url' } },
     { name: 'response_format=b64_json', desc: '返回格式校验', params: { resolution: '1k', aspect_ratio: '1:1', n: 1, response_format: 'b64_json' } },
@@ -281,11 +283,24 @@ function imgCheckRatio(str: string | null, w: number, h: number) {
   const t = imgParseRatio(str)
   if (!t || !w || !h) return null
   const a = w / h
-  const dev = Math.min(Math.abs(a - t) / t, Math.abs((h / w) - t) / t)
+  const dev = Math.abs(a - t) / t
   return { target: t, actual: +a.toFixed(3), devPct: +(dev * 100).toFixed(1), pass: dev <= 0.05 }
 }
-function imgExpLongEdge(l: string | null) {
-  return ({ '512': 512, '0.5K': 512, '1k': 1024, '1K': 1024, '2k': 2048, '2K': 2048, '4k': 4096, '4K': 4096 } as Record<string, number>)[l || ''] || null
+function imgResolutionTierBase(value: string | null | undefined) {
+  const normalized = String(value || '').trim().toUpperCase()
+  return ({ '512': 512, '0.5K': 512, '1K': 1024, '2K': 2048, '4K': 4096 } as Record<string, number>)[normalized] || null
+}
+function imgResolutionTierLabel(value: string | null | undefined, base: number) {
+  const normalized = String(value || '').trim().toUpperCase()
+  if (normalized === '512') return '512'
+  if (normalized === '0.5K' || normalized === '1K' || normalized === '2K' || normalized === '4K') return normalized
+  return base === 512 ? '0.5K' : `${base / 1024}K`
+}
+function imgCheckResolutionTier(base: number, w: number, h: number) {
+  const equivalent = w > 0 && h > 0 ? Math.sqrt(w * h) : 0
+  const min = base * IMG_RESOLUTION_TIER_MIN_SCALE
+  const devPct = base ? +(((equivalent - base) / base) * 100).toFixed(1) : 0
+  return { equivalent: +equivalent.toFixed(1), min: +min.toFixed(1), devPct, pass: equivalent >= min }
 }
 function imgMakeThumb(dataUri: string | null, maxSide = 160): Promise<string | null> {
   if (!dataUri) return Promise.resolve(null)
@@ -324,7 +339,10 @@ function imgLoadHistory(): ImgRecord[] {
   if (typeof window === 'undefined') return []
   try {
     const raw = localStorage.getItem(IMG_HIST_KEY)
-    if (raw) { const l = JSON.parse(raw); if (Array.isArray(l)) return l }
+    if (raw) {
+      const l = JSON.parse(raw)
+      if (Array.isArray(l)) return l.map(imgMigrateHistoryRecord)
+    }
   } catch { /* ignore */ }
   return []
 }
@@ -498,18 +516,25 @@ async function imgResolvePlan(plan: ImgPlan, refs: ImgRef[]): Promise<ImgPlan> {
   return clone
 }
 
+function imgSetResolutionTierTarget(targets: Record<string, any>, value: string | null | undefined) {
+  const base = imgResolutionTierBase(value)
+  if (!base) return
+  targets.resolutionTierBaseReq = base
+  targets.resolutionTierLabelReq = imgResolutionTierLabel(value, base)
+}
+
 function imgDeriveTargets(type: ImgApiType, plan: ImgPlan): Record<string, any> {
   const t: Record<string, any> = {}
   const body = plan.kind === 'json' ? plan.body : (plan.multipart?.fields) || {}
   if (type === 'openai' || type === 'seedream') {
     const s = body.size
     if (typeof s === 'string' && /^\d+x\d+$/i.test(s)) { const [w, h] = s.toLowerCase().split('x').map(Number); t.wReq = w; t.hReq = h; t.sizeReq = s }
-    else if (s) { t.sizeReq = s; t.longEdgeReq = imgExpLongEdge(s) }
+    else if (s) { t.sizeReq = s; imgSetResolutionTierTarget(t, s) }
   }
-  if (type === 'grok') { t.longEdgeReq = imgExpLongEdge(body.resolution); t.ratioReq = (body.aspect_ratio && body.aspect_ratio !== 'auto') ? body.aspect_ratio : null }
+  if (type === 'grok') { imgSetResolutionTierTarget(t, body.resolution); t.ratioReq = (body.aspect_ratio && body.aspect_ratio !== 'auto') ? body.aspect_ratio : null }
   if (type === 'gemini') {
     const ic = body?.generationConfig?.imageConfig || {}
-    t.longEdgeReq = imgExpLongEdge(ic.imageSize)
+    imgSetResolutionTierTarget(t, ic.imageSize)
     t.ratioReq = ic.aspectRatio
   }
   t.nReq = parseInt(body.n) || 1
@@ -621,6 +646,7 @@ interface ImgRecord {
   returnedN: number
   durationMs: number
   checks: ImgCheck[]
+  validationVersion?: number
 }
 interface ImgCase {
   id: string
@@ -647,16 +673,23 @@ function imgBuildChecks(rec: ImgRecord): ImgCheck[] {
     const tag = rec.images.length > 1 ? `图${i + 1} ` : ''
     if (t.wReq && t.hReq) {
       c.push({ name: tag + '精确尺寸', target: `${t.wReq}×${t.hReq}`, actual: `${im.w}×${im.h}`, pass: im.w === t.wReq && im.h === t.hReq })
-    } else if (t.longEdgeReq) {
-      const le = Math.max(im.w, im.h)
-      const dev = Math.abs(le - t.longEdgeReq) / t.longEdgeReq
-      c.push({ name: tag + '长边达标', target: `≈${t.longEdgeReq}px`, actual: `${im.w}×${im.h} (长边 ${le})`, pass: dev <= 0.12 })
+    } else if (t.resolutionTierBaseReq) {
+      const tier = imgCheckResolutionTier(t.resolutionTierBaseReq, im.w, im.h)
+      const signedDev = `${tier.devPct > 0 ? '+' : ''}${tier.devPct}%`
+      c.push({
+        name: tag + '分辨率档位',
+        target: `${t.resolutionTierLabelReq || imgResolutionTierLabel(null, t.resolutionTierBaseReq)} 档（下限等效 ${Math.round(tier.min)}px）`,
+        actual: im.w > 0 && im.h > 0 ? `${im.w}×${im.h}（等效 ${Math.round(tier.equivalent)}px，偏差${signedDev}）` : '未能读取图片尺寸',
+        pass: tier.pass,
+      })
     } else {
       c.push({ name: tag + '尺寸', target: t.sizeReq || '—', actual: `${im.w}×${im.h}`, pass: true, info: true })
     }
     if (t.ratioReq) {
       const r = imgCheckRatio(t.ratioReq, im.w, im.h)
-      if (r) c.push({ name: tag + '宽高比', target: t.ratioReq, actual: `${r.actual} (偏差${r.devPct}%)`, pass: r.pass })
+      c.push(r
+        ? { name: tag + '宽高比', target: t.ratioReq, actual: `${r.actual} (偏差${r.devPct}%)`, pass: r.pass }
+        : { name: tag + '宽高比', target: t.ratioReq, actual: '未能读取图片尺寸', pass: false })
     }
     if (t._of) {
       const norm = (f: string) => f === 'jpg' ? 'jpeg' : f
@@ -669,6 +702,17 @@ function imgBuildChecks(rec: ImgRecord): ImgCheck[] {
     c.push({ name: 'response_format', target: t._rf, actual: got, pass: got === t._rf })
   }
   return c
+}
+function imgMigrateHistoryRecord(record: ImgRecord): ImgRecord {
+  if (!record || record.validationVersion === IMG_VALIDATION_VERSION) return record
+  const targets = { ...(record.targets || {}) }
+  if (!targets.resolutionTierBaseReq && targets.longEdgeReq) {
+    targets.resolutionTierBaseReq = targets.longEdgeReq
+    targets.resolutionTierLabelReq = imgResolutionTierLabel(null, targets.longEdgeReq)
+    delete targets.longEdgeReq
+  }
+  const migrated: ImgRecord = { ...record, targets, validationVersion: IMG_VALIDATION_VERSION }
+  return { ...migrated, checks: imgBuildChecks(migrated) }
 }
 function imgVerdict(checks: ImgCheck[]): { level: 'ok' | 'fail' | 'warn'; text: string } {
   const real = checks.filter(x => !x.info)
@@ -882,7 +926,7 @@ function ImgApiTestTool() {
     channelName: chName, apiType, model: m, prompt: c.prompt ?? prompt,
     targets: {}, useRef: c.needRef, refThumbs: [], price: null,
     status: 0, respHeaders: {}, reqId: '', sentPreview: '',
-    ok: false, error: err, rawSnippet: '', images: [], returnedN: 0, durationMs: 0, checks: [],
+    ok: false, error: err, rawSnippet: '', images: [], returnedN: 0, durationMs: 0, checks: [], validationVersion: IMG_VALIDATION_VERSION,
   })
 
   const runCase = async (c: ImgCase) => {
@@ -926,6 +970,7 @@ function ImgApiTestTool() {
       refThumbs: [],
       status: 0, respHeaders: {}, reqId: '', sentPreview: '',
       ok: false, error: null, rawSnippet: '', responseBodyComplete: true, images: [], returnedN: 0, durationMs: 0, checks: [],
+      validationVersion: IMG_VALIDATION_VERSION,
     }
     try {
       const resolved = await imgResolvePlan(plan, refImagesRef.current)
@@ -1483,7 +1528,8 @@ function ImgApiTestTool() {
               const cls = classify(r)
               const badge = cls === 'pass' ? <Badge color="ok">✓ {imgVerdict(r.checks || []).text}</Badge> : cls === 'fail' ? <Badge color="err">✕ {imgVerdict(r.checks || []).text}</Badge> : <Badge color="warn">! 失败</Badge>
               const t = r.targets || {}
-              const tgt = (t.wReq ? `${t.wReq}×${t.hReq}` : (t.longEdgeReq ? `≈${t.longEdgeReq}` : (t.sizeReq || '—'))) + (t.ratioReq ? ' ' + t.ratioReq : '') + (t.nReq > 1 ? ' ×' + t.nReq : '')
+              const tierLabel = t.resolutionTierBaseReq ? `${t.resolutionTierLabelReq || imgResolutionTierLabel(null, t.resolutionTierBaseReq)} 档` : ''
+              const tgt = (t.wReq ? `${t.wReq}×${t.hReq}` : (tierLabel || t.sizeReq || '—')) + (t.ratioReq ? ' ' + t.ratioReq : '') + (t.nReq > 1 ? ' ×' + t.nReq : '')
               const act = r.ok && r.images && r.images[0] ? `${r.images[0].w}×${r.images[0].h}${r.returnedN > 1 ? ' ×' + r.returnedN : ''}` : '—'
               const thumb = r.images?.[0]?.thumb || r.images?.[0]?.url || ''
               return (
