@@ -989,9 +989,9 @@ function ImgApiTestTool() {
         const imgs: ImgRecImage[] = []
         for (const im of parsed.images) {
           let dataUri = im.dataUri
-          const directDimension = !dataUri && im.url ? imgProbeImage(im.url) : null
-          if (!dataUri && im.url) dataUri = await imgUrlToDataURI(im.url)
-          const dim = dataUri ? await imgProbeImage(dataUri) : (directDimension ? await directDimension : { w: 0, h: 0 })
+          let dim = !dataUri && im.url ? await imgProbeImage(im.url) : { w: 0, h: 0 }
+          if ((!dim.w || !dim.h) && !dataUri && im.url) dataUri = await imgUrlToDataURI(im.url)
+          if ((!dim.w || !dim.h) && dataUri) dim = await imgProbeImage(dataUri)
           const thumb = await imgMakeThumb(dataUri)
           const uriFormat = imgDetectUriFormat(dataUri)
           imgs.push({

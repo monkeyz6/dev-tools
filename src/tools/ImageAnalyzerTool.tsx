@@ -118,7 +118,7 @@ function imgClassifyResolution(w: number, h: number, loose: boolean): ImgClassif
   let near = '低于 144P'
   const buckets: [number, string][] = [[7680,'8K'],[6144,'6K'],[5120,'5K'],[3840,'4K'],[3200,'3K'],[2560,'2K'],[1920,'1080P'],[1600,'900P'],[1366,'768P'],[1280,'720P'],[1024,'576P'],[854,'480P'],[640,'360P'],[426,'240P'],[256,'144P']]
   for (const [edge, name] of buckets) { if (long >= edge) { near = name; break } }
-  return { tier: '非标准', label: '非标准分辨率', standard: false, name: '', near }
+  return { tier: near, label: `${near} 档（非标准尺寸）`, standard: false, name: '', near }
 }
 
 function imgDetectFormat(buffer: ArrayBuffer): string | null {
@@ -381,12 +381,14 @@ function ImageAnalyzerTool() {
 
   const tierBadge = (c: ImgClassification) => {
     const grad = IMG_TIER_STYLE[c.tier] || IMG_TIER_STYLE['非标准']
-    return <span className={`inline-flex items-center gap-1 rounded-full font-bold bg-gradient-to-r ${grad} text-white px-2 py-0.5 text-[10px]`} style={{ textShadow: '0 1px 6px rgba(0,0,0,.35)' }}>{c.standard ? c.tier : '非标准'}</span>
+    return <span className={`inline-flex items-center gap-1 rounded-full font-bold bg-gradient-to-r ${grad} text-white px-2 py-0.5 text-[10px]`} style={{ textShadow: '0 1px 6px rgba(0,0,0,.35)' }}>{c.tier}</span>
   }
+
+  const tierText = (c: ImgClassification) => c.standard ? `${c.tier}（${c.name}）` : `${c.tier} 档（非标准尺寸）`
 
   const copyInfo = (it: ImageItem) => {
     const c = imgClassifyResolution(it.width, it.height, loose)
-    const txt = `文件名：${it.name}\n分辨率：${it.width} × ${it.height} 像素\n文件大小：${it.size == null ? '未知' : imgFormatBytes(it.size)}\n分辨率等级：${c.standard ? c.tier + '（' + c.name + '）' : '非标准分辨率（最接近 ' + c.near + '）'}\n图片格式：${it.format}\n宽高比：${imgAspectRatio(it.width, it.height)}\n来源：${it.origin}`
+    const txt = `文件名：${it.name}\n分辨率：${it.width} × ${it.height} 像素\n文件大小：${it.size == null ? '未知' : imgFormatBytes(it.size)}\n分辨率等级：${tierText(c)}\n图片格式：${it.format}\n宽高比：${imgAspectRatio(it.width, it.height)}\n来源：${it.origin}`
     navigator.clipboard.writeText(txt).then(() => addToast('图片信息已复制到剪贴板', 'ok')).catch(() => addToast('复制失败', 'err'))
   }
 
@@ -395,7 +397,7 @@ function ImageAnalyzerTool() {
     visibleItems.filter(i => i.status === 'done').forEach(it => {
       const c = imgClassifyResolution(it.width, it.height, loose)
       rows.push([it.name, it.origin, String(it.width), String(it.height), `${it.width}x${it.height}`, String(it.size ?? ''), it.size == null ? '未知' : imgFormatBytes(it.size),
-        c.standard ? c.tier : '非标准分辨率', c.standard ? c.name : ('最接近 ' + (c.near || '')), it.format, imgAspectRatio(it.width, it.height), ((it.width * it.height) / 1e6).toFixed(2)])
+        c.tier, c.standard ? c.name : '非标准尺寸', it.format, imgAspectRatio(it.width, it.height), ((it.width * it.height) / 1e6).toFixed(2)])
     })
     const csv = '\ufeff' + rows.map(r => r.map(v => `"${String(v).replace(/"/g, '""')}"`).join(',')).join('\n')
     const a = document.createElement('a')
@@ -560,7 +562,7 @@ function ImageAnalyzerTool() {
                     </div>
                     <div className="rounded-lg px-2.5 py-2" style={{ background: 'var(--s1)', border: '1px solid var(--border)' }}>
                       <p className="text-[10px]" style={{ color: 'var(--t3)' }}>分辨率等级</p>
-                      <p className="text-sm font-semibold" style={{ color: c.standard ? 'var(--accent)' : 'var(--warn)' }}>{c.standard ? c.tier : '非标准'}</p>
+                      <p className="text-sm font-semibold" style={{ color: c.tier === '未知' ? 'var(--warn)' : 'var(--accent)' }}>{c.tier}</p>
                     </div>
                     <div className="rounded-lg px-2.5 py-2" style={{ background: 'var(--s1)', border: '1px solid var(--border)' }}>
                       <p className="text-[10px]" style={{ color: 'var(--t3)' }}>图片格式</p>
@@ -570,7 +572,7 @@ function ImageAnalyzerTool() {
                   <div className="mt-2.5 text-[11px] leading-relaxed" style={{ color: 'var(--t2)' }}>
                     {c.standard
                       ? <span style={{ color: 'var(--ok)' }}>✓ 标准规格：{c.name}{c.exact ? '' : '（±2% 近似）'}</span>
-                      : <><span style={{ color: 'var(--warn)' }}>⚠ 非标准分辨率</span> · 最接近 <b style={{ color: 'var(--text)' }}>{c.near}</b></>}
+                      : <><span style={{ color: 'var(--accent)' }}>✓ {c.tier} 分辨率档位</span> · <span style={{ color: 'var(--warn)' }}>非标准尺寸</span></>}
                   </div>
                   <div className="mt-2 flex flex-wrap gap-1.5 text-[10px]" style={{ color: 'var(--t3)' }}>
                     <span className="px-1.5 py-0.5 rounded" style={{ background: 'var(--s1)', border: '1px solid var(--border)' }}>宽高比 {imgAspectRatio(it.width, it.height)}</span>
@@ -617,7 +619,7 @@ function ImageAnalyzerTool() {
                       <td className="px-4 py-2"><div className="w-14 h-10 ia-checker rounded overflow-hidden cursor-zoom-in" onClick={() => setLightboxItem(it)}><img src={it.src} className="w-full h-full object-contain" /></div></td>
                       <td className="px-4 py-2 max-w-[220px]"><p className="truncate text-xs font-medium" style={{ color: 'var(--text)' }} title={it.name}>{it.name}</p><p className="text-[10px]" style={{ color: 'var(--t3)' }}>{it.origin}</p></td>
                       <td className="px-4 py-2 font-mono text-xs" style={{ color: 'var(--accent)' }}>{it.width} × {it.height}</td>
-                      <td className="px-4 py-2">{tierBadge(c)}<span className="block text-[10px] mt-0.5" style={{ color: 'var(--t3)' }}>{c.standard ? c.name : '最接近 ' + c.near}</span></td>
+                      <td className="px-4 py-2">{tierBadge(c)}<span className="block text-[10px] mt-0.5" style={{ color: 'var(--t3)' }}>{c.standard ? c.name : '非标准尺寸'}</span></td>
                       <td className="px-4 py-2 font-mono text-xs" style={{ color: it.size == null ? 'var(--t3)' : 'var(--ok)' }}>{it.size == null ? '未知' : imgFormatBytes(it.size)}</td>
                       <td className="px-4 py-2"><span className={`px-2 py-0.5 rounded text-[10px] font-semibold border ${fmtCls}`}>{it.format || '未知'}</span></td>
                       <td className="px-4 py-2 text-xs" style={{ color: 'var(--t2)' }}>{imgAspectRatio(it.width, it.height)}</td>
@@ -643,7 +645,7 @@ function ImageAnalyzerTool() {
             分辨率标准规格参照表（判定规则说明）
           </summary>
           <div className="mt-4 text-xs space-y-3" style={{ color: 'var(--t2)' }}>
-            <p>判定逻辑：取图片的<strong style={{ color: 'var(--text)' }}>长边与短边</strong>与标准规格比对（自动兼容横屏 / 竖屏）。完全一致时判定为对应标准等级；开启"宽松匹配"后允许 ±2% 误差；均不匹配时显示<span style={{ color: 'var(--warn)', fontWeight: 600 }}>非标准分辨率</span>，并给出最接近的等级参考（按长边区间归类）。</p>
+            <p>判定逻辑：取图片的<strong style={{ color: 'var(--text)' }}>长边与短边</strong>与标准规格比对（自动兼容横屏 / 竖屏）。完全一致时标记为标准规格；开启"宽松匹配"后允许 ±2% 误差。其他尺寸仍会按长边归入分辨率档位，并明确标记为<span style={{ color: 'var(--warn)', fontWeight: 600 }}>非标准尺寸</span>。</p>
             <div className="grid sm:grid-cols-2 lg:grid-cols-4 gap-2">
               {IMG_STANDARDS.map(s => (
                 <div key={s.name} className="flex items-center justify-between gap-2 rounded-lg px-2.5 py-1.5" style={{ background: 'var(--s1)', border: '1px solid var(--border)' }}>
@@ -672,7 +674,7 @@ function ImageAnalyzerTool() {
               <div className="flex-1 min-w-0">
                 <p className="font-semibold truncate" style={{ color: 'var(--text)' }}>{lightboxItem.name}</p>
                 <p className="text-xs mt-0.5" style={{ color: 'var(--t2)' }}>
-                  {lightboxItem.width} × {lightboxItem.height} px · {lightboxItem.size == null ? '体积未知' : imgFormatBytes(lightboxItem.size)} · {lightboxItem.format} · {(() => { const c = imgClassifyResolution(lightboxItem.width, lightboxItem.height, loose); return c.standard ? c.tier + '（' + c.name + '）' : '非标准分辨率' })()} · {imgAspectRatio(lightboxItem.width, lightboxItem.height)}
+                  {lightboxItem.width} × {lightboxItem.height} px · {lightboxItem.size == null ? '体积未知' : imgFormatBytes(lightboxItem.size)} · {lightboxItem.format} · {tierText(imgClassifyResolution(lightboxItem.width, lightboxItem.height, loose))} · {imgAspectRatio(lightboxItem.width, lightboxItem.height)}
                 </p>
               </div>
               <Btn small variant="soft" onClick={() => setLightboxItem(null)}>关闭 ✕</Btn>

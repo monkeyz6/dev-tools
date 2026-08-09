@@ -77,11 +77,12 @@ test('1K 横版按等效分辨率档位通过，并完整格式化响应 JSON', 
     meta: { padding: 'x'.repeat(4500), tail: 'RESPONSE-END' },
   }
 
-  await page.route(imageUrl, route => route.fulfill({
-    status: 200,
-    contentType: 'image/jpeg',
-    body: Buffer.from(jpegBase64, 'base64'),
-  }))
+  await page.route(imageUrl, route => {
+    const accept = route.request().headers().accept || ''
+    return route.fulfill(accept.includes('image/')
+      ? { status: 200, contentType: 'image/jpeg', body: Buffer.from(jpegBase64, 'base64') }
+      : { status: 200, contentType: 'text/plain', body: 'not an image' })
+  })
   await page.route('**/v1/images/generations', route => route.fulfill({
     status: 200,
     contentType: 'application/json',
