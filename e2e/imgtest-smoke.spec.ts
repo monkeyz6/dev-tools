@@ -60,6 +60,55 @@ test('完整流程：渠道+用例运行+校验+历史', async ({ page }) => {
   await expect(page.getByText('req-test-123', { exact: true })).toBeVisible()
 })
 
+test('URL 图片无 CORS 时仍读取尺寸，并完整格式化响应 JSON', async ({ page }) => {
+  await page.goto('/')
+  const jpegBase64 = await page.evaluate(() => {
+    const canvas = document.createElement('canvas')
+    canvas.width = 1024
+    canvas.height = 768
+    const context = canvas.getContext('2d')!
+    context.fillStyle = '#0a84ff'
+    context.fillRect(0, 0, canvas.width, canvas.height)
+    return canvas.toDataURL('image/jpeg', 0.8).split(',')[1]
+  })
+  const imageUrl = 'https://cdn.example/generated.jpeg'
+  const responseBody = {
+    data: [{ url: imageUrl, mime_type: 'image/jpeg' }],
+    meta: { padding: 'x'.repeat(4500), tail: 'RESPONSE-END' },
+  }
+
+  await page.route(imageUrl, route => route.fulfill({
+    status: 200,
+    contentType: 'image/jpeg',
+    body: Buffer.from(jpegBase64, 'base64'),
+  }))
+  await page.route('**/v1/images/generations', route => route.fulfill({
+    status: 200,
+    contentType: 'application/json',
+    headers: { ...CORS, 'x-oneapi-request-id': 'req-url-dimension' },
+    body: JSON.stringify(responseBody),
+  }))
+
+  await page.getByText('图片接口测试').click()
+  await page.getByRole('button', { name: '渠道管理', exact: true }).click()
+  await page.getByPlaceholder('例如：主线-oinone').fill('URL 图片渠道')
+  await page.getByPlaceholder('https://api.oinone.top').fill('https://mock.example')
+  await page.getByPlaceholder('sk-xxxxxxxx').fill('sk-test-1234567890')
+  await page.getByRole('button', { name: '保存渠道' }).click()
+  await page.getByRole('button', { name: '批量测试', exact: true }).click()
+  await page.getByRole('button', { name: /OpenAI images/ }).click()
+  await page.getByText('xAI Grok Imagine').click()
+  await page.getByText('1k + 1:1', { exact: true }).click()
+  await page.getByRole('button', { name: '▶ 运行此用例' }).click()
+
+  await expect(page.getByText('1024×768', { exact: true }).first()).toBeVisible()
+  await expect(page.getByText('1024×768 (长边 1024)', { exact: true })).toBeVisible()
+  await page.getByText('响应体', { exact: true }).click()
+  const response = page.locator('pre[data-response-body="true"]').first()
+  await expect(response).toContainText('RESPONSE-END')
+  await expect(response).toHaveText(JSON.stringify(responseBody, null, 2))
+})
+
 test('请求失败时记录错误并可查看', async ({ page }) => {
   await page.route('**/v1/images/generations', route => route.fulfill({ status: 400, contentType: 'application/json', headers: CORS, body: JSON.stringify({ error: { message: 'unsupported parameter: size' } }) }))
   await page.goto('/')

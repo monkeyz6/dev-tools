@@ -8,7 +8,7 @@
 
 ## 介绍
 
-**Dev Toolkit** 是一个纯前端、零服务端依赖的开发者工具集合站，所有数据均在浏览器本地处理，**不会上传到任何服务器**。包含 10 个实用工具，覆盖计费计算、JSON 处理、时间戳转换、AI 格式转换、LLM 测试、模型探测、图片分析、ID 生成、编解码等领域。
+**Dev Toolkit** 是一个纯前端、零服务端依赖的开发者工具集合站，所有数据均在浏览器本地处理，**不会上传到任何服务器**。包含 13 个实用工具，覆盖计费计算、JSON 处理、时间戳转换、AI 格式转换、LLM 测试、模型探测、图片与视频分析、ID 生成、编解码等领域。
 
 ---
 
@@ -51,7 +51,7 @@
 ## 特性
 
 - ✅ **纯前端** — 所有计算在浏览器本地完成，不上传数据
-- ✅ **10 个实用工具** — 覆盖日常开发高频需求
+- ✅ **13 个实用工具** — 覆盖日常开发高频需求
 - ✅ **4 套主题** — 浅色、深色、暖陶、山野绿，一键切换
 - ✅ **毛玻璃 UI** — 现代化毛玻璃设计，兼顾美观与可读性
 - ✅ **数据持久化** — 配置和偏好自动保存到 localStorage
@@ -62,18 +62,21 @@
 
 ## 工具一览
 
-| 工具 | 说明 |
-|------|------|
-| **Seedance 计费** | 火山方舟 / BytePlus ModelArk 视频生成模型计费计算器，支持 4 个模型变体、4 种分辨率，自动计算人民币和美元 |
-| **JSON 可视化** | 双栏 JSON 查看/编辑，支持语法高亮、折叠/展开、行号、A/B Diff 对比，拖拽调整左右栏宽度 |
-| **时间戳转换** | 毫秒/秒/纳秒级时间戳与日期时间双向转换，自动识别单位，支持相对时间显示 |
-| **AI 格式转换** | OpenAI Chat Completions ⇄ Anthropic Messages ⇄ OpenAI Responses 三种请求体格式互转，支持 cache_control 注入 |
-| **LLM 批量测试** | Token 计费口径核查工具：同一请求体反复发送，检验输入 Token 一致性、输出 Token 波动、返回模型验真，支持并发控制与历史报告 |
-| **模型探测** | API 渠道兼容性实验台：Chat / Responses / Anthropic 三格式 × 参数智能降级、流式、缓存命中（最多 3 次重试）、Token 计数稳定性、并发与错误码，每条请求记录 Token 用量、缓存读写与 Request ID，报告含说明与复现步骤 |
-| **图片信息识别** | 拖拽/粘贴/URL 加载图片，自动识别分辨率、格式、尺寸、分辨率等级（8K/4K/1080P 等 30+ 标准），支持宽松匹配、卡片/表格视图、CSV 导出 |
-| **ID 生成器** | UUID v4/v7 和随机字符串批量生成，支持多种格式（标准/紧凑/大括号/urn:uuid:），密码学安全随机源 |
-| **Base64 编解码** | 双向编解码，支持 URL-safe 模式和宽容解码，实时统计膨胀率 |
-| **Unicode 转换** | 支持 6 种编码格式（`\uXXXX` / `\u{XXXXX}` / HTML 实体 / `U+XXXX` / `%uXXXX`），解码自动识别混合格式 |
+| 工具 | 直达路径 | 说明 |
+|------|----------|------|
+| **Seedance 计费** | `/tools/seedance` | 火山方舟 / BytePlus ModelArk 视频生成模型计费计算器，自动计算人民币和美元 |
+| **JSON 可视化** | `/tools/json` | 双栏 JSON 查看/编辑、折叠、行号与 A/B Diff 对比 |
+| **时间戳转换** | `/tools/timestamp` | 毫秒/秒/纳秒级时间戳与日期时间双向转换 |
+| **AI 格式转换** | `/tools/aiconvert` | OpenAI Chat、Anthropic Messages、OpenAI Responses 请求体互转 |
+| **LLM 批量测试** | `/tools/llmbatch` | Token 计费口径、一致性、波动和返回模型验真 |
+| **图片接口测试** | `/tools/imgtest` | 多渠道图片生成接口批测、价格与响应校验 |
+| **模型探测** | `/tools/modelprobe` | API 渠道兼容性、参数降级、缓存和 Token 稳定性实验台 |
+| **图片信息识别** | `/tools/imganalyze` | 图片分辨率、格式、尺寸和分辨率等级识别 |
+| **视频信息检测** | `/tools/videoanalyze` | 本地文件或 URL 视频元信息与播放检测 |
+| **ID 生成器** | `/tools/idgen` | UUID v4/v7 和密码学安全随机字符串批量生成 |
+| **Base64 编解码** | `/tools/base64` | 双向编解码、URL-safe 模式和宽容解码 |
+| **Unicode 转换** | `/tools/unicode` | 六种 Unicode 表示格式的编码与自动解码 |
+| **GraphQL 格式化** | `/tools/graphql` | GraphQL 查询格式化、压缩与语法检查 |
 
 ---
 
@@ -98,6 +101,12 @@ npm run build
 # 预览生产构建
 npm run preview
 ```
+
+也可以直接访问具体工具，例如 `http://localhost:8443/tools/imgtest`。
+
+### 生产部署的路由回退
+
+本项目使用 History API 路由。生产服务器必须把 `/tools/*` 以及其他前端路径回退到根目录的 `index.html`，再由应用判断工具是否存在；否则刷新或直接打开深层链接时，静态服务器可能返回 404。具体 rewrite 写法由实际使用的 Nginx、Vercel、Cloudflare 等托管环境配置。
 
 ---
 
@@ -140,7 +149,9 @@ npm run preview
 │   └── screenshots/     # 截图
 ├── src/
 │   ├── main.tsx         # React 入口
-│   ├── App.tsx          # 单文件应用（10 个工具 + 主题 + 侧边栏）
+│   ├── App.tsx          # 应用外壳（主题、侧边栏与 URL 路由）
+│   ├── toolRegistry.tsx # 13 个工具的注册、路径与懒加载配置
+│   ├── tools/           # 各工具独立模块
 │   └── index.css        # 全局样式 + Tailwind CSS
 └── e2e/                 # Playwright 端到端测试
     ├── helpers.ts
@@ -161,11 +172,11 @@ npm run preview
 
 **推荐版（150 字以内）：**
 
-> 纯前端开发者工具合集，无需服务端，所有数据本地处理，不上传任何服务器。包含 Seedance 计费、JSON 可视化/Diff、时间戳转换、AI 请求体格式转换、LLM 批量测试与 Token 验真、图片信息识别、ID 生成器、Base64 编解码、Unicode 转换、模型探测等 10 个工具，支持 4 套主题。技术栈：React 19 + Vite 8 + Tailwind CSS v4。
+> 纯前端开发者工具合集，无需服务端，所有数据本地处理，不上传任何服务器。包含 Seedance 计费、JSON 可视化/Diff、时间戳转换、AI 请求体格式转换、LLM 批量测试与 Token 验真、图片接口测试、模型探测、图片/视频信息识别、ID 生成器、Base64 编解码、Unicode 转换、GraphQL 格式化等 13 个工具，支持 4 套主题。技术栈：React 19 + Vite 8 + Tailwind CSS v4。
 
 **完整版（350 字以内）：**
 
-> 纯前端开发者工具集合站，包含 10 个实用工具：Seedance 视频生成计费计算器、JSON 可视化与 Diff 对比、时间戳双向转换、AI 请求体格式转换（OpenAI/Anthropic/Responses）、LLM 批量测试与 Token 计费口径核查、图片信息识别（分辨率/格式/等级）、UUID 与随机字符串生成器、Base64 编解码、Unicode 多格式转换、模型探测（API 兼容性测试）。所有数据在浏览器本地处理，不上传任何服务器。内置 4 套主题（浅色/深色/暖陶/山野绿），毛玻璃 UI，配置持久化。技术栈：React 19 + Vite 8 + Tailwind CSS v4 + TypeScript + Recharts。
+> 纯前端开发者工具集合站，包含 13 个实用工具：Seedance 视频生成计费、JSON 可视化与 Diff、时间戳转换、AI 请求体格式转换、LLM 批量测试与 Token 核查、图片接口测试、模型探测、图片和视频信息识别、UUID 与随机字符串生成、Base64、Unicode、GraphQL 格式化。所有数据在浏览器本地处理，不上传任何服务器。内置 4 套主题，支持工具 URL 直达、毛玻璃 UI 与配置持久化。技术栈：React 19 + Vite 8 + Tailwind CSS v4 + TypeScript + Recharts。
 
 ---
 

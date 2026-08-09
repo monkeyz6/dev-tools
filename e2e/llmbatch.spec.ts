@@ -187,7 +187,7 @@ test.describe('LLM 批量测试', () => {
     expect(JSON.parse(stored!)).toHaveLength(1)
 
     await page.reload()
-    await page.getByRole('button', { name: /LLM 批量测试/ }).first().click()
+    await page.getByRole('link', { name: /LLM 批量测试/ }).first().click()
     await page.getByRole('button', { name: /历史/ }).click()
     await expect(page.locator('main')).toContainText('已存 1 / 20 条历史报告')
   })
@@ -220,7 +220,7 @@ test.describe('LLM 批量测试', () => {
     expect(stored).not.toContain('sk-test-secret-abc123') // 落盘的是密文，不是明文
 
     await page.reload()
-    await page.getByRole('button', { name: /LLM 批量测试/ }).first().click()
+    await page.getByRole('link', { name: /LLM 批量测试/ }).first().click()
     // 解密回填后，开始按钮应因 apiKey/baseUrl 均非空而可用
     await expect(page.getByRole('button', { name: /开始批量请求/ })).toBeEnabled()
     await expect(inputByLabel(page, 'API Key')).toHaveValue('sk-test-secret-abc123')

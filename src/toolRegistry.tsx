@@ -1,0 +1,116 @@
+import React, { lazy } from 'react'
+import SeedanceTool from './tools/SeedanceTool'
+import {
+  IconSeedance, IconJson, IconClock, IconConvert, IconBatch, IconImgTest, IconProbe,
+  IconImage, IconVideo, IconId, IconCode, IconType, IconGraphql,
+} from './shared/icons'
+
+export type ToolKey = 'seedance' | 'json' | 'timestamp' | 'aiconvert' | 'llmbatch' | 'imgtest' | 'modelprobe' | 'imganalyze'
+  | 'videoanalyze' | 'idgen' | 'base64' | 'unicode' | 'graphql'
+export type ToolIntent = 'hover' | 'focus' | 'activate'
+export type ToolPath = `/tools/${ToolKey}`
+export type ToolRoute =
+  | { kind: 'tool'; key: ToolKey; path: ToolPath }
+  | { kind: 'not-found'; pathname: string }
+
+type AsyncToolKey = Exclude<ToolKey, 'seedance'>
+export type ToolModule = { default: React.ComponentType }
+type ToolLoader = () => Promise<ToolModule>
+
+export interface ToolDefinition {
+  key: ToolKey
+  path: ToolPath
+  label: string
+  icon: React.ReactNode
+  fullHeight: boolean
+  component: React.ComponentType
+}
+
+export function toolPath(key: ToolKey): ToolPath {
+  return `/tools/${key}`
+}
+
+const loaders: Record<AsyncToolKey, ToolLoader> = {
+  json: () => import('./tools/JsonTool'),
+  timestamp: () => import('./tools/TimestampTool'),
+  aiconvert: () => import('./tools/AiConvertTool'),
+  llmbatch: () => import('./tools/LlmBatchTool'),
+  imgtest: () => import('./tools/ImgApiTestTool'),
+  modelprobe: () => import('./tools/ModelProbeTool'),
+  imganalyze: () => import('./tools/ImageAnalyzerTool'),
+  videoanalyze: () => import('./tools/VideoAnalyzerTool'),
+  idgen: () => import('./tools/IdGenTool'),
+  base64: () => import('./tools/Base64Tool'),
+  unicode: () => import('./tools/UnicodeTool'),
+  graphql: () => import('./tools/GraphqlTool'),
+}
+
+const modulePromises = new Map<AsyncToolKey, Promise<ToolModule>>()
+
+function loadToolModule(key: AsyncToolKey): Promise<ToolModule> {
+  const cached = modulePromises.get(key)
+  if (cached) return cached
+  const pending = loaders[key]().catch(error => {
+    modulePromises.delete(key)
+    throw error
+  })
+  modulePromises.set(key, pending)
+  return pending
+}
+
+const lazyComponents: Record<AsyncToolKey, React.LazyExoticComponent<React.ComponentType>> = {
+  json: lazy(() => loadToolModule('json')),
+  timestamp: lazy(() => loadToolModule('timestamp')),
+  aiconvert: lazy(() => loadToolModule('aiconvert')),
+  llmbatch: lazy(() => loadToolModule('llmbatch')),
+  imgtest: lazy(() => loadToolModule('imgtest')),
+  modelprobe: lazy(() => loadToolModule('modelprobe')),
+  imganalyze: lazy(() => loadToolModule('imganalyze')),
+  videoanalyze: lazy(() => loadToolModule('videoanalyze')),
+  idgen: lazy(() => loadToolModule('idgen')),
+  base64: lazy(() => loadToolModule('base64')),
+  unicode: lazy(() => loadToolModule('unicode')),
+  graphql: lazy(() => loadToolModule('graphql')),
+}
+
+export const TOOL_DEFINITIONS: ToolDefinition[] = [
+  { key: 'seedance', path: toolPath('seedance'), label: 'Seedance 计费', icon: <IconSeedance />, fullHeight: false, component: SeedanceTool },
+  { key: 'json', path: toolPath('json'), label: 'JSON 可视化', icon: <IconJson />, fullHeight: true, component: lazyComponents.json },
+  { key: 'timestamp', path: toolPath('timestamp'), label: '时间戳转换', icon: <IconClock />, fullHeight: false, component: lazyComponents.timestamp },
+  { key: 'aiconvert', path: toolPath('aiconvert'), label: 'AI 格式转换', icon: <IconConvert />, fullHeight: true, component: lazyComponents.aiconvert },
+  { key: 'llmbatch', path: toolPath('llmbatch'), label: 'LLM 批量测试', icon: <IconBatch />, fullHeight: true, component: lazyComponents.llmbatch },
+  { key: 'imgtest', path: toolPath('imgtest'), label: '图片接口测试', icon: <IconImgTest />, fullHeight: true, component: lazyComponents.imgtest },
+  { key: 'modelprobe', path: toolPath('modelprobe'), label: '模型探测', icon: <IconProbe />, fullHeight: true, component: lazyComponents.modelprobe },
+  { key: 'imganalyze', path: toolPath('imganalyze'), label: '图片信息识别', icon: <IconImage />, fullHeight: false, component: lazyComponents.imganalyze },
+  { key: 'videoanalyze', path: toolPath('videoanalyze'), label: '视频信息检测', icon: <IconVideo />, fullHeight: false, component: lazyComponents.videoanalyze },
+  { key: 'idgen', path: toolPath('idgen'), label: 'ID 生成器', icon: <IconId />, fullHeight: false, component: lazyComponents.idgen },
+  { key: 'base64', path: toolPath('base64'), label: 'Base64 编解码', icon: <IconCode />, fullHeight: true, component: lazyComponents.base64 },
+  { key: 'unicode', path: toolPath('unicode'), label: 'Unicode 转换', icon: <IconType />, fullHeight: true, component: lazyComponents.unicode },
+  { key: 'graphql', path: toolPath('graphql'), label: 'GraphQL 格式化', icon: <IconGraphql />, fullHeight: true, component: lazyComponents.graphql },
+]
+
+export function resolveToolRoute(pathname: string): ToolRoute {
+  if (pathname === '/') {
+    const definition = TOOL_DEFINITIONS[0]
+    return { kind: 'tool', key: definition.key, path: definition.path }
+  }
+  const normalizedPath = pathname.length > 1 ? pathname.replace(/\/+$/, '') : pathname
+  const definition = TOOL_DEFINITIONS.find(tool => tool.path === normalizedPath)
+  return definition
+    ? { kind: 'tool', key: definition.key, path: definition.path }
+    : { kind: 'not-found', pathname }
+}
+
+function allowSpeculativePreload(): boolean {
+  if (typeof window === 'undefined') return false
+  if (!window.matchMedia('(hover: hover) and (pointer: fine)').matches) return false
+  const connection = (navigator as Navigator & { connection?: { saveData?: boolean; effectiveType?: string } }).connection
+  if (connection?.saveData) return false
+  return connection?.effectiveType !== 'slow-2g' && connection?.effectiveType !== '2g'
+}
+
+export function preloadTool(key: ToolKey, intent: ToolIntent): void {
+  if (key === 'seedance') return
+  if (intent !== 'activate' && !allowSpeculativePreload()) return
+  void loadToolModule(key)
+}

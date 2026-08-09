@@ -22,5 +22,5 @@ export async function selectOption(page: Page, label: string, option: string): P
 /** 通过侧栏导航进入某个工具 */
 export async function goto(page: Page, navText: RegExp | string): Promise<void> {
   await page.goto('/')
-  await page.getByRole('button', { name: navText }).first().click()
+  await page.getByRole('link', { name: navText }).first().click()
 }

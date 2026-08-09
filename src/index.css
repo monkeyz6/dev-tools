@@ -6,13 +6,126 @@ html, body, #root {
   height: 100%;
   margin: 0;
   padding: 0;
-  font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', 'Helvetica Neue', Helvetica, Arial, sans-serif;
+  font-family: -apple-system, BlinkMacSystemFont, 'SF Pro Text', 'Inter', 'Segoe UI', 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', 'Helvetica Neue', Helvetica, Arial, sans-serif;
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
+  text-rendering: optimizeLegibility;
 }
 
 :root {
   --sidebar-w: 224px;
+  --ease-fluid: cubic-bezier(0.22, 1, 0.36, 1);
+  --ease-press: cubic-bezier(0.2, 0.8, 0.2, 1);
+}
+
+body { overflow: hidden; }
+button, input, textarea { font: inherit; }
+
+/* ─── Ambient app scene ─────────────────────────────────────────── */
+
+.app-shell {
+  position: relative;
+  isolation: isolate;
+  color: var(--text);
+  line-height: 1.5;
+}
+
+.ambient-scene {
+  position: fixed;
+  inset: 0;
+  z-index: 0;
+  overflow: hidden;
+  pointer-events: none;
+}
+
+.ambient-orb {
+  position: absolute;
+  border-radius: 50%;
+  filter: blur(82px);
+  opacity: 0.82;
+  will-change: transform;
+  transform: translate3d(0, 0, 0);
+}
+.ambient-orb-a {
+  width: min(58vw, 860px);
+  height: min(58vw, 860px);
+  top: -34%;
+  left: 12%;
+  background: radial-gradient(circle at 42% 42%, var(--sceneA), transparent 68%);
+  animation: ambient-drift-a 28s ease-in-out infinite alternate;
+}
+.ambient-orb-b {
+  width: min(52vw, 760px);
+  height: min(52vw, 760px);
+  top: -8%;
+  right: -18%;
+  background: radial-gradient(circle at 50% 45%, var(--sceneB), transparent 70%);
+  animation: ambient-drift-b 36s ease-in-out infinite alternate;
+}
+.ambient-orb-c {
+  width: min(46vw, 680px);
+  height: min(46vw, 680px);
+  bottom: -30%;
+  left: 38%;
+  background: radial-gradient(circle at 50% 50%, var(--sceneC), transparent 70%);
+  animation: ambient-drift-c 32s ease-in-out infinite alternate;
+}
+
+.ambient-ring {
+  position: absolute;
+  border: 1px solid var(--ringLine);
+  border-radius: 50%;
+  opacity: 0.48;
+}
+.ambient-ring-a {
+  width: 72vw;
+  height: 72vw;
+  min-width: 880px;
+  min-height: 880px;
+  top: -70%;
+  right: -18%;
+  transform: rotate(-18deg);
+}
+.ambient-ring-b {
+  width: 38vw;
+  height: 38vw;
+  min-width: 520px;
+  min-height: 520px;
+  bottom: -43%;
+  left: 18%;
+  transform: rotate(22deg);
+  opacity: 0.3;
+}
+
+.ambient-grid {
+  position: absolute;
+  inset: 0;
+  background-image:
+    linear-gradient(var(--gridLine) 1px, transparent 1px),
+    linear-gradient(90deg, var(--gridLine) 1px, transparent 1px);
+  background-size: 52px 52px;
+  -webkit-mask-image: radial-gradient(ellipse 92% 78% at 62% 34%, #000 12%, transparent 76%);
+  mask-image: radial-gradient(ellipse 92% 78% at 62% 34%, #000 12%, transparent 76%);
+}
+
+.ambient-noise {
+  position: absolute;
+  inset: 0;
+  opacity: var(--noiseOpacity);
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='120' height='120'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='.82' numOctaves='2' stitchTiles='stitch'/%3E%3CfeColorMatrix type='saturate' values='0'/%3E%3CfeComponentTransfer%3E%3CfeFuncA type='table' tableValues='0 .035'/%3E%3C/feComponentTransfer%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)'/%3E%3C/svg%3E");
+}
+
+@keyframes ambient-drift-a {
+  from { transform: translate3d(-2vw, -1vh, 0) scale(1); }
+  to { transform: translate3d(5vw, 4vh, 0) scale(1.07); }
+}
+@keyframes ambient-drift-b {
+  from { transform: translate3d(1vw, -2vh, 0) scale(1.02); }
+  to { transform: translate3d(-5vw, 5vh, 0) scale(1.08); }
+}
+@keyframes ambient-drift-c {
+  from { transform: translate3d(-2vw, 2vh, 0) scale(1); }
+  to { transform: translate3d(4vw, -4vh, 0) scale(1.06); }
 }
 
 /* Scrollbar */
@@ -37,14 +150,9 @@ input[type='number'] { -moz-appearance: textfield; appearance: textfield; }
 .json-null  { color: var(--jNull); }
 .json-bracket-match { background: color-mix(in srgb, var(--accent) 25%, transparent); border-radius: 2px; outline: 1px solid var(--accent); }
 
-/* Transition prefers */
-@media (prefers-reduced-motion: reduce) {
-  * { transition-duration: 0.01ms !important; animation-duration: 0.01ms !important; }
-}
-
 /* Spring-like transitions */
-.spring { transition: all 0.22s cubic-bezier(0.34, 1.56, 0.64, 1); }
-.ease-out-fast { transition: all 0.18s cubic-bezier(0.25, 0.46, 0.45, 0.94); }
+.spring { transition: transform 0.32s var(--ease-fluid), opacity 0.22s ease-out; }
+.ease-out-fast { transition: transform 0.18s var(--ease-fluid), opacity 0.18s ease-out; }
 
 /* 侧边栏收缩过渡：宽度/留白是布局属性，只能过渡 width/padding；
    仅无 reduced-motion 时生效，缩小到两处静态元素、成本可忽略 */
@@ -56,56 +164,187 @@ input[type='number'] { -moz-appearance: textfield; appearance: textfield; }
 /* Glassmorphism — 半透明毛玻璃材质（色值由主题变量推导，深浅主题自动适配） */
 .glass,
 .glass-sidebar {
-  --glass-alpha: 72%;
-  -webkit-backdrop-filter: blur(14px) saturate(160%);
-  backdrop-filter: blur(14px) saturate(160%);
+  -webkit-backdrop-filter: blur(24px) saturate(175%);
+  backdrop-filter: blur(24px) saturate(175%);
 }
 .glass {
-  background: color-mix(in srgb, var(--bg) var(--glass-alpha), transparent);
+  background: var(--surface);
   /* backdrop-filter 会创建层叠上下文，困住内部下拉的 z-index；
      提升整个玻璃条，使下拉能覆盖其下的滚动内容/面板 */
   position: relative;
   z-index: 10;
+  box-shadow: inset 0 1px 0 var(--surfaceEdge), 0 12px 28px -26px rgba(0,0,0,0.36);
 }
-.glass-sidebar { background: color-mix(in srgb, var(--sidebar) var(--glass-alpha), transparent); }
+.glass-sidebar {
+  background: var(--surfaceStrong);
+  -webkit-backdrop-filter: blur(32px) saturate(185%);
+  backdrop-filter: blur(32px) saturate(185%);
+  box-shadow: inset -1px 0 0 color-mix(in srgb, var(--surfaceEdge) 62%, transparent), 18px 0 54px -40px rgba(17,25,48,0.48);
+}
+
+.surface-card {
+  position: relative;
+  background: var(--surface) !important;
+  border: 1px solid color-mix(in srgb, var(--surfaceEdge) 76%, var(--border));
+  box-shadow: var(--shadow), inset 0 1px 0 color-mix(in srgb, var(--surfaceEdge) 82%, transparent);
+  -webkit-backdrop-filter: blur(22px) saturate(165%);
+  backdrop-filter: blur(22px) saturate(165%);
+  transform: translateZ(0);
+  transition: transform 0.38s var(--ease-fluid), opacity 0.24s ease-out;
+}
+.surface-card::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  border-radius: inherit;
+  background: radial-gradient(460px circle at 12% -12%, var(--surfaceGlow), transparent 64%);
+  opacity: 0.22;
+  pointer-events: none;
+  transition: opacity 0.32s ease-out;
+}
+.surface-card:focus-within { z-index: 12; }
+.surface-card-emphasis {
+  background:
+    linear-gradient(135deg, color-mix(in srgb, var(--accentSub) 82%, var(--surface)), var(--surface)) !important;
+  border-color: color-mix(in srgb, var(--accent) 28%, var(--surfaceEdge)) !important;
+}
+.surface-card-interactive::after {
+  content: "";
+  position: absolute;
+  top: -1px;
+  left: -34%;
+  width: 30%;
+  height: 2px;
+  border-radius: 999px;
+  background: linear-gradient(90deg, transparent, color-mix(in srgb, var(--accent) 72%, white), transparent);
+  opacity: 0;
+  transform: translate3d(0, 0, 0);
+  pointer-events: none;
+}
+
+.floating-material {
+  background: var(--surfaceStrong) !important;
+  border-color: color-mix(in srgb, var(--surfaceEdge) 74%, var(--border)) !important;
+  box-shadow: var(--shadowMd), inset 0 1px 0 var(--surfaceEdge) !important;
+  -webkit-backdrop-filter: blur(30px) saturate(180%);
+  backdrop-filter: blur(30px) saturate(180%);
+  transform-origin: 50% 100%;
+}
+
+.ui-btn,
+.ui-icon-button,
+.brand-control,
+.ui-switch,
+.segmented-option,
+.ui-select-trigger {
+  transition: transform 0.28s var(--ease-fluid), opacity 0.18s ease-out;
+  -webkit-tap-highlight-color: transparent;
+}
+.ui-btn:active:not(:disabled),
+.ui-icon-button:active,
+.brand-control:active,
+.ui-switch:active,
+.segmented-option:active,
+.ui-select-trigger:active {
+  transform: scale(0.97);
+  transition-duration: 100ms;
+}
+.ui-control {
+  transition: transform 0.28s var(--ease-fluid), opacity 0.18s ease-out;
+}
+.ui-control-focused { transform: translateY(-1px); }
+.segmented-control {
+  box-shadow: inset 0 1px 2px color-mix(in srgb, var(--text) 6%, transparent), inset 0 1px 0 var(--surfaceEdge);
+  -webkit-backdrop-filter: blur(14px) saturate(150%);
+  backdrop-filter: blur(14px) saturate(150%);
+}
+.section-title {
+  line-height: 1.2;
+  font-optical-sizing: auto;
+}
+
+@media (hover: hover) and (pointer: fine) {
+  .surface-card:hover::before { opacity: 0.52; }
+  .surface-card-interactive:hover {
+    transform: translateY(-4px) scale(1.004);
+    box-shadow: var(--shadowHover), inset 0 1px 0 var(--surfaceEdge) !important;
+  }
+  .surface-card-interactive:hover::after {
+    opacity: 1;
+    animation: card-edge-flow 2.8s var(--ease-fluid) infinite;
+  }
+  .ui-btn:hover:not(:disabled), .ui-icon-button:hover, .brand-control:hover { transform: translateY(-1px); }
+  .sb-nav-item:hover:not(.sb-nav-item-active) { transform: translateX(2px); }
+  .sb-nav-item:hover .sb-nav-icon { transform: scale(1.045); }
+}
+
+@keyframes card-edge-flow {
+  from { transform: translate3d(0, 0, 0); }
+  to { transform: translate3d(450%, 0, 0); }
+}
 
 /* 不支持 backdrop-filter 时回退实色 */
 @supports not (backdrop-filter: blur(1px)) {
-  .glass { background: var(--bg); }
-  .glass-sidebar { background: var(--sidebar); }
+  .glass, .surface-card { background: var(--bg) !important; }
+  .glass-sidebar, .floating-material { background: var(--bg) !important; }
 }
 
 /* 减少透明度：去除模糊、提高不透明度 */
 @media (prefers-reduced-transparency: reduce) {
-  .glass, .glass-sidebar { --glass-alpha: 100%; backdrop-filter: none; -webkit-backdrop-filter: none; }
+  .glass, .surface-card { background: var(--bg) !important; }
+  .glass-sidebar, .floating-material { background: var(--bg) !important; }
+  .glass, .glass-sidebar, .surface-card, .floating-material { backdrop-filter: none; -webkit-backdrop-filter: none; }
+  .ambient-orb, .ambient-noise { opacity: 0.08; }
 }
 
 /* 增强对比度：玻璃面更实、边框更深 */
 @media (prefers-contrast: more) {
-  .glass, .glass-sidebar { --glass-alpha: 94%; }
+  .glass, .surface-card { background: color-mix(in srgb, var(--bg) 96%, transparent) !important; border-color: var(--borderHard) !important; }
+  .glass-sidebar, .floating-material { background: color-mix(in srgb, var(--bg) 98%, transparent) !important; border-color: var(--borderHard) !important; }
+  .ambient-grid, .ambient-noise { display: none; }
 }
 
-/* 主题切换平滑过渡（仅切换瞬间生效，避免常驻全局 transition 开销） */
-.theme-x, .theme-x * {
-  transition: background-color 0.25s ease, color 0.25s ease, border-color 0.25s ease, box-shadow 0.25s ease !important;
+/* 主题切换用轻量遮罩柔化明暗突变，不让整棵 DOM 参与颜色动画。 */
+.theme-x::after {
+  content: "";
+  position: fixed;
+  inset: 0;
+  z-index: 80;
+  pointer-events: none;
+  background: var(--bg);
+  animation: theme-veil 0.3s ease-out both;
 }
+@keyframes theme-veil { from { opacity: 0.18; } to { opacity: 0; } }
+
+/* 页面与工具切换：短距离、无回弹、始终可打断。 */
+.shell-enter-sidebar { animation: shell-enter-left 0.55s var(--ease-fluid) backwards; }
+.tool-stage { animation: tool-enter 0.34s var(--ease-fluid) backwards; }
+.tool-stage .section-title { animation: item-enter 0.42s var(--ease-fluid) 0.04s backwards; }
+.tool-stage .surface-card { animation: item-enter 0.46s var(--ease-fluid) 0.08s backwards; }
+@keyframes shell-enter-left { from { opacity: 0; transform: translateX(-12px); } to { opacity: 1; transform: none; } }
+@keyframes tool-enter { from { opacity: 0; transform: translateY(6px); } to { opacity: 1; transform: none; } }
+@keyframes item-enter { from { opacity: 0; transform: translateY(10px) scale(0.992); } to { opacity: 1; transform: none; } }
 
 /* ─── Sidebar Nav Items ──────────────────────────────────────────── */
 
 .sb-nav-item {
-  transition: background 0.15s ease, box-shadow 0.15s ease, transform 0.15s ease;
+  background: transparent;
+  transition: transform 0.3s var(--ease-fluid), opacity 0.18s ease-out;
 }
 .sb-nav-item:hover:not(.sb-nav-item-active) {
   background: var(--s2) !important;
   box-shadow: 0 1px 2px color-mix(in srgb, var(--text) 4%, transparent) !important;
 }
 .sb-nav-item-active {
-  background: var(--bg) !important;
-  box-shadow: var(--shadow) !important;
+  background: var(--surfaceStrong) !important;
+  box-shadow: var(--shadow), inset 0 1px 0 var(--surfaceEdge) !important;
 }
+.sb-nav-icon { transition: transform 0.3s var(--ease-fluid), opacity 0.18s ease-out; }
+.brand-mark { box-shadow: 0 8px 22px -10px var(--accent), inset 0 1px 0 rgba(255,255,255,0.5); }
+.sidebar-footer { background: linear-gradient(180deg, transparent, color-mix(in srgb, var(--surfaceStrong) 70%, transparent)); }
 
 .sb-menu-item {
-  transition: background 0.15s ease;
+  transition: transform 0.24s var(--ease-fluid), opacity 0.18s ease-out;
 }
 .sb-menu-item:hover:not(.sb-menu-item-active) {
   background: var(--s2) !important;
@@ -115,10 +354,50 @@ input[type='number'] { -moz-appearance: textfield; appearance: textfield; }
 }
 
 .sb-settings-btn {
-  transition: background 0.15s ease, color 0.15s ease, box-shadow 0.15s ease;
+  transition: transform 0.28s var(--ease-fluid), opacity 0.18s ease-out;
 }
 .sb-settings-btn:hover {
   color: var(--text) !important;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
+  .ambient-orb { transform: none !important; }
+  .tool-stage, .tool-stage .section-title, .tool-stage .surface-card, .shell-enter-sidebar { transform: none !important; }
+  .ambient-orb, .surface-card-interactive::after { animation: none !important; }
+  .tool-stage {
+    animation: reduced-fade 0.14s ease-out both !important;
+    animation-duration: 0.14s !important;
+  }
+}
+@keyframes reduced-fade { from { opacity: 0; } to { opacity: 1; } }
+
+/* 异步工具与图表的轻量占位：只改变透明度，不阻塞侧栏或触发大面积重排。 */
+.tool-loading-title,
+.tool-loading-line,
+.tool-loading-panel {
+  background: linear-gradient(105deg, var(--surfaceMuted), color-mix(in srgb, var(--surfaceEdge) 68%, var(--surfaceMuted)), var(--surfaceMuted));
+  background-size: 180% 100%;
+  animation: loading-breathe 1.4s ease-in-out infinite alternate;
+}
+.tool-loading-title { width: min(220px, 32vw); height: 20px; }
+.tool-loading-card { max-width: 980px; min-height: 280px; }
+.tool-loading-line { width: min(420px, 62vw); height: 12px; }
+.tool-loading-line-short { width: min(260px, 42vw); }
+.tool-loading-panel { height: 170px; opacity: 0.72; }
+.llm-chart-loading { min-height: 284px; }
+@keyframes loading-breathe {
+  from { opacity: 0.48; }
+  to { opacity: 0.9; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .tool-loading-title, .tool-loading-line, .tool-loading-panel { animation: none !important; opacity: 0.72; }
 }
 
 /* Diff lines */
@@ -147,14 +426,23 @@ textarea:focus-visible { outline: none; }
 }
 
 .ia-shimmer {
-  background: linear-gradient(100deg, color-mix(in srgb, var(--text) 2%, transparent) 30%, color-mix(in srgb, var(--text) 8%, transparent) 50%, color-mix(in srgb, var(--text) 2%, transparent) 70%);
-  background-size: 200% 100%;
+  position: relative;
+  overflow: hidden;
+  background: color-mix(in srgb, var(--text) 3%, transparent);
+}
+.ia-shimmer::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  width: 46%;
+  background: linear-gradient(100deg, transparent, color-mix(in srgb, var(--text) 8%, transparent), transparent);
+  transform: translateX(-120%);
   animation: ia-sh 1.3s infinite linear;
 }
-@keyframes ia-sh { from { background-position: 180% 0 } to { background-position: -40% 0 } }
+@keyframes ia-sh { to { transform: translateX(320%); } }
 
 .ia-card-enter {
-  animation: ia-pop .45s cubic-bezier(.34,1.56,.64,1) both;
+  animation: ia-pop .45s cubic-bezier(.22,1,.36,1) backwards;
 }
 @keyframes ia-pop { from { opacity: 0; transform: translateY(14px) scale(.97) } to { opacity: 1; transform: none } }
 
@@ -165,12 +453,12 @@ textarea:focus-visible { outline: none; }
 }
 
 .ia-toast-in {
-  animation: ia-ti .35s cubic-bezier(.34,1.56,.64,1) both;
+  animation: ia-ti .35s var(--ease-fluid) both;
 }
 @keyframes ia-ti { from { opacity: 0; transform: translateY(-14px) } to { opacity: 1; transform: none } }
 
 .ia-lightbox-enter {
-  animation: ia-lb .3s cubic-bezier(.34,1.56,.64,1) both;
+  animation: ia-lb .3s var(--ease-fluid) both;
 }
 @keyframes ia-lb { from { opacity: 0; transform: scale(.92) } to { opacity: 1; transform: none } }
 
