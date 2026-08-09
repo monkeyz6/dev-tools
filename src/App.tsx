@@ -221,7 +221,7 @@ function Sidebar({ tool, onNavigate, onToolIntent, theme, setTheme, collapsed, o
           {!collapsed && (
             <div className="text-left">
               <div className="text-sm font-bold tracking-tight" style={{ color: 'var(--text)', letterSpacing: '-0.02em' }}>Dev Toolkit</div>
-              <div className="text-xs" style={{ color: 'var(--t3)' }}>纯前端工具箱</div>
+              <div className="text-xs" style={{ color: 'var(--t3)' }}>前端工具箱</div>
             </div>
           )}
         </button>
@@ -440,7 +440,7 @@ export default function App() {
 
   useEffect(() => {
     if (route.kind === 'home') {
-      document.title = 'Dev Toolkit · 纯前端工具箱'
+      document.title = 'Dev Toolkit · 前端工具箱'
     } else {
       document.title = definition ? `${definition.label} · Dev Toolkit` : '工具不存在 · Dev Toolkit'
     }

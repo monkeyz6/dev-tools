@@ -658,7 +658,7 @@ function ImageAnalyzerTool() {
       </section>
 
       <footer className="text-center text-[11px] py-6" style={{ color: 'var(--t3)' }}>
-        纯前端实现 · 所有图片均在本地浏览器解析，不会上传到任何服务器 · FileReader API + Image 动态加载
+        前端实现 · 所有图片均在本地浏览器解析，不会上传到任何服务器 · FileReader API + Image 动态加载
       </footer>
 
       {/* Lightbox */}

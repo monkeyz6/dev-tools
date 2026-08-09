@@ -1,0 +1,2326 @@
+<!DOCTYPE html>
+<html lang="zh-CN" data-theme="light">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="description" content="结构化 Prompt 框架知识教学页，系统讲解 RTF、ICIO、CRISPE、CO-STAR、TIDD-EC 与 BROKE。">
+  <title>结构化 Prompt 框架 | Prompt Engineering</title>
+  <script>
+    (function () {
+      const saved = localStorage.getItem('prompt-theme');
+      const systemDark = window.matchMedia('(prefers-color-scheme: dark)').matches;
+      document.documentElement.dataset.theme = saved || (systemDark ? 'dark' : 'light');
+    })();
+  </script>
+  <script src="https://cdn.jsdelivr.net/npm/@tailwindcss/browser@4"></script>
+  <style>
+    :root {
+      color-scheme: light;
+      --bg: #f5f7fb;
+      --bg-elevated: rgba(255, 255, 255, 0.78);
+      --surface: rgba(255, 255, 255, 0.66);
+      --surface-solid: #ffffff;
+      --surface-soft: rgba(255, 255, 255, 0.46);
+      --ink: #12151a;
+      --ink-2: #303640;
+      --muted: #687080;
+      --line: rgba(18, 21, 26, 0.105);
+      --line-strong: rgba(18, 21, 26, 0.18);
+      --blue: #0a67f5;
+      --blue-soft: rgba(10, 103, 245, 0.1);
+      --cyan: #0aaac2;
+      --violet: #7657e8;
+      --green: #16875f;
+      --amber: #a15c00;
+      --danger: #c34355;
+      --code-bg: #11141a;
+      --code-ink: #edf2ff;
+      --shadow: 0 24px 70px rgba(55, 67, 96, 0.12), 0 2px 10px rgba(55, 67, 96, 0.05);
+      --shadow-soft: 0 12px 36px rgba(55, 67, 96, 0.09);
+      --ease: cubic-bezier(0.22, 1, 0.36, 1);
+    }
+
+    html[data-theme="dark"] {
+      color-scheme: dark;
+      --bg: #080a0f;
+      --bg-elevated: rgba(16, 19, 27, 0.8);
+      --surface: rgba(20, 24, 34, 0.68);
+      --surface-solid: #131720;
+      --surface-soft: rgba(24, 28, 40, 0.54);
+      --ink: #f4f7fb;
+      --ink-2: #cfd5e1;
+      --muted: #929cac;
+      --line: rgba(235, 241, 255, 0.105);
+      --line-strong: rgba(235, 241, 255, 0.19);
+      --blue: #5d9cff;
+      --blue-soft: rgba(93, 156, 255, 0.13);
+      --cyan: #57d2e4;
+      --violet: #a58bff;
+      --green: #56c99a;
+      --amber: #f4b65d;
+      --danger: #ff8290;
+      --code-bg: #0a0c11;
+      --code-ink: #eaf0fb;
+      --shadow: 0 28px 80px rgba(0, 0, 0, 0.4), 0 2px 10px rgba(0, 0, 0, 0.25);
+      --shadow-soft: 0 12px 36px rgba(0, 0, 0, 0.24);
+    }
+
+    * {
+      box-sizing: border-box;
+    }
+
+    html {
+      scroll-behavior: smooth;
+      scroll-padding-top: 88px;
+    }
+
+    body {
+      margin: 0;
+      min-width: 320px;
+      color: var(--ink);
+      background:
+        radial-gradient(circle at 4% 2%, rgba(64, 134, 255, 0.1), transparent 29rem),
+        radial-gradient(circle at 92% 11%, rgba(146, 103, 255, 0.09), transparent 34rem),
+        var(--bg);
+      font-family: -apple-system, BlinkMacSystemFont, "SF Pro Display", "SF Pro Text", "PingFang SC", "Microsoft YaHei", sans-serif;
+      -webkit-font-smoothing: antialiased;
+      text-rendering: optimizeLegibility;
+      overflow-x: hidden;
+      transition: color 0.35s ease, background-color 0.35s ease;
+    }
+
+    ::selection {
+      color: #fff;
+      background: rgba(10, 103, 245, 0.78);
+    }
+
+    .sr-only {
+      position: absolute;
+      width: 1px;
+      height: 1px;
+      padding: 0;
+      margin: -1px;
+      overflow: hidden;
+      clip: rect(0, 0, 0, 0);
+      white-space: nowrap;
+      border: 0;
+    }
+
+    a {
+      color: inherit;
+      text-decoration: none;
+    }
+
+    button {
+      color: inherit;
+      font: inherit;
+    }
+
+    .skip-link {
+      position: fixed;
+      z-index: 200;
+      top: 12px;
+      left: 12px;
+      padding: 10px 14px;
+      color: white;
+      background: var(--blue);
+      border-radius: 12px;
+      transform: translateY(-150%);
+      transition: transform 0.2s ease;
+    }
+
+    .skip-link:focus {
+      transform: translateY(0);
+    }
+
+    .progress-track {
+      position: fixed;
+      z-index: 120;
+      top: 0;
+      left: 0;
+      width: 100%;
+      height: 3px;
+      background: transparent;
+    }
+
+    .progress-bar {
+      width: 0;
+      height: 100%;
+      background: linear-gradient(90deg, var(--blue), var(--cyan), var(--violet));
+      box-shadow: 0 0 14px rgba(67, 132, 255, 0.62);
+      transition: width 0.08s linear;
+    }
+
+    .site-header {
+      position: fixed;
+      z-index: 100;
+      top: 3px;
+      left: 0;
+      right: 0;
+      height: 66px;
+      border-bottom: 1px solid transparent;
+      transition: background 0.3s ease, border-color 0.3s ease, box-shadow 0.3s ease;
+    }
+
+    .site-header.scrolled {
+      background: var(--bg-elevated);
+      border-color: var(--line);
+      box-shadow: 0 8px 30px rgba(25, 35, 55, 0.05);
+      backdrop-filter: saturate(160%) blur(24px);
+      -webkit-backdrop-filter: saturate(160%) blur(24px);
+    }
+
+    .nav-inner {
+      width: min(1440px, calc(100% - 48px));
+      height: 100%;
+      margin: 0 auto;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+    }
+
+    .wordmark {
+      display: inline-flex;
+      align-items: center;
+      gap: 11px;
+      font-size: 13px;
+      font-weight: 700;
+      letter-spacing: 0.13em;
+    }
+
+    .brand-mark {
+      position: relative;
+      width: 28px;
+      height: 28px;
+      border-radius: 9px;
+      background: linear-gradient(145deg, #2c7fff, #7657e8);
+      box-shadow: 0 8px 18px rgba(50, 111, 241, 0.28);
+    }
+
+    .brand-mark::before,
+    .brand-mark::after {
+      content: "";
+      position: absolute;
+      border: 1.5px solid rgba(255, 255, 255, 0.9);
+      border-radius: 50%;
+    }
+
+    .brand-mark::before {
+      inset: 7px;
+    }
+
+    .brand-mark::after {
+      inset: 11px 4px;
+    }
+
+    .nav-actions {
+      display: flex;
+      align-items: center;
+      gap: 9px;
+    }
+
+    .nav-section {
+      margin-right: 10px;
+      color: var(--muted);
+      font-size: 13px;
+    }
+
+    .icon-button {
+      width: 40px;
+      height: 40px;
+      display: inline-grid;
+      place-items: center;
+      padding: 0;
+      border: 1px solid var(--line);
+      border-radius: 13px;
+      color: var(--ink-2);
+      background: var(--surface-soft);
+      cursor: pointer;
+      backdrop-filter: blur(14px);
+      transition: transform 0.25s var(--ease), border-color 0.25s ease, background 0.25s ease;
+    }
+
+    .icon-button:hover {
+      transform: translateY(-2px);
+      border-color: var(--line-strong);
+      background: var(--surface-solid);
+    }
+
+    .icon-button:focus-visible,
+    .primary-button:focus-visible,
+    .secondary-button:focus-visible,
+    .choice-button:focus-visible,
+    summary:focus-visible,
+    .toc-link:focus-visible {
+      outline: 3px solid rgba(40, 121, 255, 0.28);
+      outline-offset: 3px;
+    }
+
+    .theme-sun,
+    html[data-theme="dark"] .theme-moon {
+      display: none;
+    }
+
+    html[data-theme="dark"] .theme-sun {
+      display: block;
+    }
+
+    .hero {
+      position: relative;
+      min-height: 820px;
+      height: 100svh;
+      max-height: 980px;
+      display: grid;
+      place-items: center;
+      overflow: hidden;
+      isolation: isolate;
+      border-bottom: 1px solid var(--line);
+    }
+
+    .hero::before {
+      content: "";
+      position: absolute;
+      z-index: -3;
+      inset: 0;
+      background:
+        linear-gradient(180deg, transparent 60%, var(--bg) 100%),
+        radial-gradient(circle at 50% 44%, rgba(45, 117, 255, 0.13), transparent 34%),
+        radial-gradient(circle at 73% 42%, rgba(126, 85, 232, 0.11), transparent 31%);
+    }
+
+    .hero-grid {
+      position: absolute;
+      z-index: -2;
+      inset: 0;
+      opacity: 0.42;
+      background-image:
+        linear-gradient(var(--line) 1px, transparent 1px),
+        linear-gradient(90deg, var(--line) 1px, transparent 1px);
+      background-size: 72px 72px;
+      mask-image: radial-gradient(circle at 50% 48%, black 10%, transparent 68%);
+      -webkit-mask-image: radial-gradient(circle at 50% 48%, black 10%, transparent 68%);
+    }
+
+    .ambient {
+      position: absolute;
+      z-index: -1;
+      width: 32rem;
+      height: 32rem;
+      border-radius: 50%;
+      filter: blur(72px);
+      opacity: 0.13;
+      pointer-events: none;
+      animation: ambient-drift 13s ease-in-out infinite alternate;
+    }
+
+    .ambient.one {
+      top: 11%;
+      left: -13rem;
+      background: #287dff;
+    }
+
+    .ambient.two {
+      right: -11rem;
+      bottom: 2%;
+      background: #8b62ee;
+      animation-delay: -5s;
+    }
+
+    @keyframes ambient-drift {
+      to { transform: translate3d(4rem, 2rem, 0) scale(1.12); }
+    }
+
+    .hero-inner {
+      width: min(1240px, calc(100% - 64px));
+      margin: 40px auto 0;
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) minmax(440px, 0.9fr);
+      align-items: center;
+      gap: clamp(48px, 7vw, 112px);
+    }
+
+    .hero-copy {
+      max-width: 670px;
+    }
+
+    .eyebrow {
+      margin: 0 0 22px;
+      color: var(--blue);
+      font-size: 12px;
+      font-weight: 760;
+      letter-spacing: 0.18em;
+      text-transform: uppercase;
+    }
+
+    .hero h1 {
+      margin: 0;
+      font-size: clamp(56px, 6.4vw, 92px);
+      font-weight: 760;
+      line-height: 0.98;
+      letter-spacing: -0.065em;
+    }
+
+    .hero h1 span {
+      display: block;
+      margin-top: 12px;
+      color: transparent;
+      background: linear-gradient(95deg, var(--blue), var(--cyan) 45%, var(--violet));
+      background-clip: text;
+      -webkit-background-clip: text;
+    }
+
+    .hero-lead {
+      max-width: 610px;
+      margin: 26px 0 0;
+      color: var(--ink-2);
+      font-size: clamp(17px, 1.5vw, 20px);
+      line-height: 1.75;
+      letter-spacing: -0.012em;
+    }
+
+    .hero-actions {
+      margin-top: 34px;
+      display: flex;
+      flex-wrap: wrap;
+      gap: 12px;
+    }
+
+    .primary-button,
+    .secondary-button {
+      min-height: 48px;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      gap: 9px;
+      padding: 0 20px;
+      border-radius: 15px;
+      font-size: 14px;
+      font-weight: 650;
+      transition: transform 0.28s var(--ease), box-shadow 0.28s ease, background 0.28s ease;
+    }
+
+    .primary-button {
+      color: #fff;
+      border: 1px solid transparent;
+      background: linear-gradient(135deg, #1376ff, #5e63e9);
+      box-shadow: 0 12px 26px rgba(43, 104, 231, 0.26);
+    }
+
+    .secondary-button {
+      border: 1px solid var(--line);
+      background: var(--surface);
+      backdrop-filter: blur(18px);
+    }
+
+    .primary-button:hover,
+    .secondary-button:hover {
+      transform: translateY(-3px);
+    }
+
+    .primary-button:hover {
+      box-shadow: 0 17px 34px rgba(43, 104, 231, 0.34);
+    }
+
+    .hero-visual {
+      position: relative;
+      width: min(100%, 520px);
+      aspect-ratio: 1;
+      margin: auto;
+      animation: hero-visual-in 1.1s 0.25s var(--ease) both;
+    }
+
+    @keyframes hero-visual-in {
+      from { opacity: 0; transform: translateY(26px) scale(0.94); }
+      to { opacity: 1; transform: none; }
+    }
+
+    .orbit,
+    .core-halo {
+      position: absolute;
+      border-radius: 50%;
+      border: 1px solid var(--line-strong);
+    }
+
+    .orbit.one { inset: 8%; }
+    .orbit.two { inset: 22%; border-style: dashed; animation: spin 36s linear infinite; }
+
+    .core-halo {
+      inset: 34%;
+      border: 0;
+      background: radial-gradient(circle at 32% 24%, rgba(255, 255, 255, 0.7), transparent 25%), linear-gradient(145deg, rgba(31, 121, 255, 0.9), rgba(114, 83, 232, 0.9));
+      box-shadow: 0 24px 70px rgba(54, 104, 225, 0.3), inset 0 0 0 1px rgba(255, 255, 255, 0.28);
+      animation: core-pulse 5s ease-in-out infinite;
+    }
+
+    .core-label {
+      position: absolute;
+      inset: 36%;
+      display: grid;
+      place-items: center;
+      color: white;
+      text-align: center;
+      font-size: clamp(11px, 1.2vw, 14px);
+      font-weight: 720;
+      line-height: 1.35;
+      letter-spacing: 0.04em;
+    }
+
+    @keyframes spin { to { transform: rotate(360deg); } }
+    @keyframes core-pulse { 50% { transform: scale(1.035); box-shadow: 0 28px 80px rgba(54, 104, 225, 0.4); } }
+
+    .framework-node {
+      position: absolute;
+      width: 96px;
+      height: 48px;
+      display: grid;
+      place-items: center;
+      border: 1px solid var(--line-strong);
+      border-radius: 16px;
+      color: var(--ink-2);
+      background: var(--bg-elevated);
+      box-shadow: var(--shadow-soft);
+      backdrop-filter: blur(18px);
+      font-size: 12px;
+      font-weight: 760;
+      letter-spacing: 0.04em;
+      transition: transform 0.28s var(--ease), border-color 0.28s ease, color 0.28s ease;
+      animation: node-float 5.5s ease-in-out infinite;
+    }
+
+    .framework-node:hover {
+      z-index: 2;
+      color: var(--blue);
+      border-color: var(--blue);
+      transform: translateY(-5px) scale(1.03);
+    }
+
+    .node-1 { top: 2%; left: 50%; transform: translateX(-50%); }
+    .node-2 { top: 24%; right: 0; animation-delay: -1s; }
+    .node-3 { right: 4%; bottom: 16%; animation-delay: -2s; }
+    .node-4 { bottom: 2%; left: 50%; transform: translateX(-50%); animation-delay: -3s; }
+    .node-5 { left: 3%; bottom: 16%; animation-delay: -4s; }
+    .node-6 { top: 24%; left: 0; animation-delay: -5s; }
+
+    @keyframes node-float {
+      0%, 100% { margin-top: 0; }
+      50% { margin-top: -7px; }
+    }
+
+    .hero-copy > * {
+      animation: copy-in 0.85s var(--ease) both;
+    }
+
+    .hero-copy .eyebrow { animation-delay: 0.05s; }
+    .hero-copy h1 { animation-delay: 0.12s; }
+    .hero-copy .hero-lead { animation-delay: 0.2s; }
+    .hero-copy .hero-actions { animation-delay: 0.28s; }
+
+    @keyframes copy-in {
+      from { opacity: 0; transform: translateY(22px); }
+      to { opacity: 1; transform: none; }
+    }
+
+    .scroll-cue {
+      position: absolute;
+      bottom: 28px;
+      left: 50%;
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      color: var(--muted);
+      font-size: 11px;
+      letter-spacing: 0.12em;
+      transform: translateX(-50%);
+    }
+
+    .scroll-cue i {
+      width: 18px;
+      height: 28px;
+      display: block;
+      border: 1px solid var(--line-strong);
+      border-radius: 9px;
+    }
+
+    .scroll-cue i::after {
+      content: "";
+      width: 3px;
+      height: 5px;
+      display: block;
+      margin: 6px auto;
+      border-radius: 999px;
+      background: var(--blue);
+      animation: scroll-dot 1.8s ease-in-out infinite;
+    }
+
+    @keyframes scroll-dot {
+      70%, 100% { transform: translateY(8px); opacity: 0; }
+    }
+
+    .content-layout {
+      width: min(1260px, calc(100% - 56px));
+      margin: 0 auto;
+      display: grid;
+      grid-template-columns: 226px minmax(0, 850px);
+      justify-content: center;
+      gap: clamp(48px, 6vw, 92px);
+      padding: 112px 0 140px;
+    }
+
+    .toc-side {
+      position: relative;
+    }
+
+    .toc-sticky {
+      position: sticky;
+      top: 98px;
+      max-height: calc(100vh - 126px);
+      overflow: auto;
+      padding-right: 14px;
+      scrollbar-width: thin;
+    }
+
+    .toc-label {
+      margin: 0 0 16px;
+      color: var(--muted);
+      font-size: 11px;
+      font-weight: 740;
+      letter-spacing: 0.16em;
+      text-transform: uppercase;
+    }
+
+    .toc-list {
+      position: relative;
+      margin: 0;
+      padding: 0 0 0 14px;
+      list-style: none;
+      border-left: 1px solid var(--line);
+    }
+
+    .toc-list li {
+      margin: 0;
+    }
+
+    .toc-link {
+      position: relative;
+      display: block;
+      padding: 7px 0 7px 11px;
+      color: var(--muted);
+      font-size: 13px;
+      line-height: 1.35;
+      transition: color 0.2s ease, transform 0.2s ease;
+    }
+
+    .toc-link::before {
+      content: "";
+      position: absolute;
+      top: 50%;
+      left: -15px;
+      width: 2px;
+      height: 0;
+      border-radius: 4px;
+      background: var(--blue);
+      transform: translateY(-50%);
+      transition: height 0.24s var(--ease);
+    }
+
+    .toc-link:hover,
+    .toc-link.active {
+      color: var(--ink);
+      transform: translateX(2px);
+    }
+
+    .toc-link.active::before {
+      height: 21px;
+    }
+
+    .toc-progress {
+      margin-top: 20px;
+      padding: 13px 14px;
+      border: 1px solid var(--line);
+      border-radius: 14px;
+      color: var(--muted);
+      background: var(--surface-soft);
+      font-size: 12px;
+    }
+
+    .toc-progress strong {
+      float: right;
+      color: var(--ink-2);
+      font-variant-numeric: tabular-nums;
+    }
+
+    article {
+      min-width: 0;
+    }
+
+    .article-section {
+      position: relative;
+      margin: 0 0 112px;
+      scroll-margin-top: 94px;
+    }
+
+    .article-section:last-child {
+      margin-bottom: 0;
+    }
+
+    .section-number {
+      display: block;
+      margin-bottom: 13px;
+      color: var(--blue);
+      font-size: 11px;
+      font-weight: 760;
+      letter-spacing: 0.17em;
+      text-transform: uppercase;
+    }
+
+    article h2 {
+      margin: 0 0 25px;
+      color: var(--ink);
+      font-size: clamp(31px, 4vw, 46px);
+      font-weight: 730;
+      line-height: 1.16;
+      letter-spacing: -0.044em;
+    }
+
+    article h3 {
+      margin: 38px 0 15px;
+      font-size: 21px;
+      font-weight: 690;
+      line-height: 1.3;
+      letter-spacing: -0.025em;
+    }
+
+    article p {
+      margin: 0 0 20px;
+      color: var(--ink-2);
+      font-size: 16px;
+      line-height: 1.9;
+    }
+
+    article strong {
+      color: var(--ink);
+      font-weight: 700;
+    }
+
+    .lead-paragraph {
+      color: var(--ink-2);
+      font-size: 19px;
+      line-height: 1.86;
+      letter-spacing: -0.012em;
+    }
+
+    .highlight {
+      padding: 0 0.18em;
+      color: var(--ink);
+      background: linear-gradient(transparent 54%, rgba(75, 142, 255, 0.24) 54%);
+    }
+
+    .term {
+      position: relative;
+      color: var(--blue);
+      border-bottom: 1px dotted currentColor;
+      cursor: help;
+      outline: none;
+    }
+
+    .term::after {
+      content: attr(data-tooltip);
+      position: absolute;
+      z-index: 50;
+      left: 50%;
+      bottom: calc(100% + 10px);
+      width: max-content;
+      max-width: 250px;
+      padding: 9px 11px;
+      color: #fff;
+      background: #161a22;
+      border-radius: 10px;
+      box-shadow: 0 8px 25px rgba(0, 0, 0, 0.25);
+      font-size: 12px;
+      font-weight: 500;
+      line-height: 1.5;
+      opacity: 0;
+      pointer-events: none;
+      transform: translate(-50%, 5px);
+      transition: opacity 0.2s ease, transform 0.2s ease;
+    }
+
+    .term:hover::after,
+    .term:focus::after {
+      opacity: 1;
+      transform: translate(-50%, 0);
+    }
+
+    .lesson-map {
+      display: grid;
+      grid-template-columns: 1.25fr 0.75fr;
+      gap: 18px;
+      margin-top: 34px;
+    }
+
+    .info-panel {
+      padding: 30px;
+      border: 1px solid var(--line);
+      border-radius: 24px;
+      background: var(--surface);
+      box-shadow: var(--shadow-soft);
+      backdrop-filter: blur(18px);
+    }
+
+    .info-panel h3 {
+      margin: 0 0 18px;
+      font-size: 16px;
+    }
+
+    .goal-list {
+      margin: 0;
+      padding: 0;
+      list-style: none;
+      counter-reset: goals;
+    }
+
+    .goal-list li {
+      position: relative;
+      min-height: 34px;
+      margin: 0 0 14px;
+      padding-left: 44px;
+      color: var(--ink-2);
+      font-size: 14px;
+      line-height: 1.7;
+      counter-increment: goals;
+    }
+
+    .goal-list li:last-child { margin-bottom: 0; }
+
+    .goal-list li::before {
+      content: counter(goals, decimal-leading-zero);
+      position: absolute;
+      top: 0;
+      left: 0;
+      width: 29px;
+      height: 29px;
+      display: grid;
+      place-items: center;
+      color: var(--blue);
+      background: var(--blue-soft);
+      border-radius: 9px;
+      font-size: 10px;
+      font-weight: 780;
+    }
+
+    .prereq-list {
+      margin: 0;
+      padding: 0;
+      list-style: none;
+    }
+
+    .prereq-list li {
+      padding: 13px 0;
+      color: var(--ink-2);
+      border-bottom: 1px solid var(--line);
+      font-size: 14px;
+      line-height: 1.5;
+    }
+
+    .prereq-list li:last-child { border-bottom: 0; }
+
+    .overview-visual {
+      position: relative;
+      min-height: 340px;
+      display: grid;
+      grid-template-columns: repeat(3, 1fr);
+      gap: 1px;
+      margin: 34px 0 42px;
+      padding: 1px;
+      overflow: hidden;
+      border: 1px solid var(--line);
+      border-radius: 28px;
+      background: var(--line);
+      box-shadow: var(--shadow);
+    }
+
+    .overview-visual::before {
+      content: "PROMPT";
+      position: absolute;
+      z-index: 0;
+      top: 50%;
+      left: 50%;
+      color: rgba(82, 126, 220, 0.055);
+      font-size: 130px;
+      font-weight: 820;
+      letter-spacing: -0.08em;
+      transform: translate(-50%, -50%);
+      pointer-events: none;
+    }
+
+    .overview-item {
+      position: relative;
+      z-index: 1;
+      min-height: 168px;
+      display: flex;
+      flex-direction: column;
+      justify-content: space-between;
+      padding: 25px;
+      background: var(--surface);
+      backdrop-filter: blur(18px);
+      transition: background 0.28s ease;
+    }
+
+    .overview-item:hover { background: var(--surface-solid); }
+
+    .overview-item .abbr {
+      font-size: 24px;
+      font-weight: 770;
+      letter-spacing: -0.035em;
+    }
+
+    .overview-item .count {
+      width: 27px;
+      height: 27px;
+      display: grid;
+      place-items: center;
+      align-self: flex-end;
+      color: var(--blue);
+      background: var(--blue-soft);
+      border-radius: 50%;
+      font-size: 11px;
+      font-weight: 750;
+    }
+
+    .overview-item small {
+      color: var(--muted);
+      font-size: 12px;
+      line-height: 1.5;
+    }
+
+    .table-wrap {
+      width: 100%;
+      margin: 28px 0;
+      overflow-x: auto;
+      border: 1px solid var(--line);
+      border-radius: 20px;
+      background: var(--surface-soft);
+      box-shadow: 0 1px 0 rgba(255, 255, 255, 0.16) inset;
+    }
+
+    table {
+      width: 100%;
+      min-width: 640px;
+      border-collapse: collapse;
+      color: var(--ink-2);
+      font-size: 13px;
+      line-height: 1.6;
+    }
+
+    th,
+    td {
+      padding: 15px 18px;
+      text-align: left;
+      vertical-align: top;
+      border-bottom: 1px solid var(--line);
+    }
+
+    th {
+      color: var(--muted);
+      background: var(--surface);
+      font-size: 11px;
+      font-weight: 730;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+    }
+
+    tbody tr:last-child td { border-bottom: 0; }
+    tbody tr { transition: background 0.2s ease; }
+    tbody tr:hover { background: var(--blue-soft); }
+    td:first-child { color: var(--ink); font-weight: 700; }
+
+    .framework-head {
+      position: relative;
+      padding-top: 20px;
+      border-top: 1px solid var(--line-strong);
+    }
+
+    .framework-code {
+      position: absolute;
+      top: -27px;
+      right: -4px;
+      color: var(--line);
+      font-size: clamp(78px, 12vw, 128px);
+      font-weight: 820;
+      line-height: 1;
+      letter-spacing: -0.08em;
+      pointer-events: none;
+      user-select: none;
+    }
+
+    .term-grid {
+      display: grid;
+      grid-template-columns: repeat(2, 1fr);
+      margin: 32px 0;
+      border-top: 1px solid var(--line);
+    }
+
+    .term-item {
+      min-height: 108px;
+      padding: 21px 22px 21px 0;
+      border-bottom: 1px solid var(--line);
+    }
+
+    .term-item:nth-child(odd) {
+      padding-right: 30px;
+      border-right: 1px solid var(--line);
+    }
+
+    .term-item:nth-child(even) { padding-left: 30px; }
+
+    .term-item dt {
+      margin-bottom: 7px;
+      color: var(--ink);
+      font-size: 14px;
+      font-weight: 700;
+    }
+
+    .term-item dt span {
+      margin-left: 6px;
+      color: var(--blue);
+      font-size: 11px;
+      font-weight: 730;
+    }
+
+    .term-item dd {
+      margin: 0;
+      color: var(--muted);
+      font-size: 13px;
+      line-height: 1.65;
+    }
+
+    .note {
+      position: relative;
+      margin: 30px 0;
+      padding: 24px 26px 24px 54px;
+      border: 1px solid var(--line);
+      border-radius: 19px;
+      color: var(--ink-2);
+      background: linear-gradient(135deg, var(--blue-soft), var(--surface-soft));
+      font-size: 14px;
+      line-height: 1.75;
+    }
+
+    .note::before {
+      content: "i";
+      position: absolute;
+      top: 24px;
+      left: 22px;
+      width: 20px;
+      height: 20px;
+      display: grid;
+      place-items: center;
+      color: #fff;
+      background: var(--blue);
+      border-radius: 50%;
+      font-size: 12px;
+      font-family: Georgia, serif;
+      font-weight: 700;
+    }
+
+    .note strong {
+      display: block;
+      margin-bottom: 4px;
+    }
+
+    .note.warning {
+      background: linear-gradient(135deg, rgba(226, 153, 50, 0.12), var(--surface-soft));
+    }
+
+    .note.warning::before { content: "!"; background: var(--amber); }
+
+    .example-block {
+      margin: 28px 0;
+      overflow: hidden;
+      border: 1px solid var(--line);
+      border-radius: 20px;
+      background: var(--surface-soft);
+      box-shadow: var(--shadow-soft);
+    }
+
+    .example-block summary {
+      position: relative;
+      min-height: 60px;
+      display: flex;
+      align-items: center;
+      padding: 0 56px 0 20px;
+      cursor: pointer;
+      color: var(--ink-2);
+      font-size: 13px;
+      font-weight: 670;
+      list-style: none;
+      user-select: none;
+    }
+
+    .example-block summary::-webkit-details-marker { display: none; }
+
+    .example-block summary::after {
+      content: "+";
+      position: absolute;
+      right: 20px;
+      width: 27px;
+      height: 27px;
+      display: grid;
+      place-items: center;
+      border: 1px solid var(--line);
+      border-radius: 9px;
+      font-size: 17px;
+      font-weight: 400;
+      transition: transform 0.3s var(--ease), background 0.3s ease;
+    }
+
+    .example-block[open] summary::after {
+      background: var(--blue-soft);
+      transform: rotate(45deg);
+    }
+
+    .example-block[open] summary { border-bottom: 1px solid var(--line); }
+
+    .code-shell {
+      position: relative;
+      overflow: hidden;
+      background: var(--code-bg);
+    }
+
+    .code-topbar {
+      height: 42px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 0 14px 0 18px;
+      color: #8f99aa;
+      border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+      font-size: 11px;
+      letter-spacing: 0.06em;
+    }
+
+    .copy-button {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      padding: 6px 9px;
+      color: #b9c3d2;
+      border: 1px solid rgba(255, 255, 255, 0.1);
+      border-radius: 8px;
+      background: rgba(255, 255, 255, 0.05);
+      cursor: pointer;
+      font-size: 11px;
+      transition: color 0.2s ease, background 0.2s ease;
+    }
+
+    .copy-button:hover { color: white; background: rgba(255, 255, 255, 0.1); }
+
+    pre {
+      margin: 0;
+      padding: 23px 22px 26px;
+      overflow-x: auto;
+      color: var(--code-ink);
+      font: 12.5px/1.75 "SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace;
+      tab-size: 4;
+    }
+
+    code { font-family: inherit; }
+    .token-key { color: #78a9ff; }
+    .token-string { color: #a7d897; }
+    .token-method { color: #d6a8ff; }
+    .token-type { color: #72d3e8; }
+    .token-comment { color: #748094; font-style: italic; }
+
+    .variant-tabs {
+      margin: 28px 0;
+      padding: 6px;
+      border: 1px solid var(--line);
+      border-radius: 18px;
+      background: var(--surface-soft);
+    }
+
+    .tab-buttons {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 6px;
+    }
+
+    .tab-button {
+      padding: 12px 15px;
+      border: 0;
+      border-radius: 13px;
+      color: var(--muted);
+      background: transparent;
+      cursor: pointer;
+      font-size: 13px;
+      font-weight: 670;
+      transition: color 0.22s ease, background 0.22s ease, box-shadow 0.22s ease;
+    }
+
+    .tab-button[aria-selected="true"] {
+      color: var(--ink);
+      background: var(--surface-solid);
+      box-shadow: 0 5px 16px rgba(30, 44, 74, 0.08);
+    }
+
+    .tab-panel {
+      padding: 20px 17px 15px;
+      color: var(--ink-2);
+      font-size: 14px;
+      line-height: 1.75;
+    }
+
+    .tab-panel[hidden] { display: none; }
+
+    .selector {
+      margin-top: 34px;
+      padding: 30px;
+      border: 1px solid var(--line);
+      border-radius: 26px;
+      background: var(--surface);
+      box-shadow: var(--shadow);
+      backdrop-filter: blur(18px);
+    }
+
+    .selector-title {
+      margin: 0 0 7px;
+      font-size: 18px;
+      font-weight: 700;
+    }
+
+    .selector-subtitle {
+      margin: 0 0 22px;
+      color: var(--muted);
+      font-size: 13px;
+    }
+
+    .choice-grid {
+      display: grid;
+      grid-template-columns: repeat(2, 1fr);
+      gap: 9px;
+    }
+
+    .choice-button {
+      min-height: 54px;
+      padding: 12px 14px;
+      text-align: left;
+      color: var(--ink-2);
+      border: 1px solid var(--line);
+      border-radius: 14px;
+      background: var(--surface-soft);
+      cursor: pointer;
+      font-size: 13px;
+      line-height: 1.45;
+      transition: border-color 0.22s ease, transform 0.22s var(--ease), background 0.22s ease;
+    }
+
+    .choice-button:hover { transform: translateY(-2px); border-color: var(--line-strong); }
+
+    .choice-button.active {
+      color: var(--blue);
+      border-color: var(--blue);
+      background: var(--blue-soft);
+    }
+
+    .recommendation {
+      min-height: 92px;
+      display: flex;
+      align-items: center;
+      gap: 16px;
+      margin-top: 14px;
+      padding: 18px;
+      border-radius: 17px;
+      background: linear-gradient(135deg, var(--blue-soft), rgba(118, 87, 232, 0.08));
+    }
+
+    .recommendation-badge {
+      flex: 0 0 auto;
+      width: 54px;
+      height: 54px;
+      display: grid;
+      place-items: center;
+      color: #fff;
+      border-radius: 17px;
+      background: linear-gradient(145deg, var(--blue), var(--violet));
+      box-shadow: 0 10px 24px rgba(56, 101, 220, 0.22);
+      font-size: 11px;
+      font-weight: 780;
+      text-align: center;
+    }
+
+    .recommendation strong { display: block; margin-bottom: 4px; }
+    .recommendation p { margin: 0; color: var(--muted); font-size: 13px; line-height: 1.6; }
+
+    .core-grid {
+      display: grid;
+      grid-template-columns: repeat(2, 1fr);
+      gap: 12px;
+      margin: 34px 0;
+    }
+
+    .core-item {
+      position: relative;
+      min-height: 176px;
+      padding: 25px;
+      overflow: hidden;
+      border: 1px solid var(--line);
+      border-radius: 22px;
+      background: var(--surface-soft);
+      transition: transform 0.28s var(--ease), background 0.28s ease, box-shadow 0.28s ease;
+    }
+
+    .core-item:hover {
+      transform: translateY(-4px);
+      background: var(--surface-solid);
+      box-shadow: var(--shadow-soft);
+    }
+
+    .core-index {
+      color: var(--blue);
+      font-size: 11px;
+      font-weight: 780;
+      letter-spacing: 0.12em;
+    }
+
+    .core-item h3 { margin: 26px 0 7px; font-size: 18px; }
+    .core-item p { margin: 0; color: var(--muted); font-size: 13px; line-height: 1.65; }
+
+    .human-quote {
+      position: relative;
+      margin: 44px 0;
+      padding: 45px 30px;
+      overflow: hidden;
+      border-top: 1px solid var(--line-strong);
+      border-bottom: 1px solid var(--line-strong);
+      text-align: center;
+    }
+
+    .human-quote p {
+      margin: 0;
+      color: var(--ink);
+      font-size: clamp(28px, 5vw, 48px);
+      font-weight: 750;
+      line-height: 1.25;
+      letter-spacing: -0.05em;
+    }
+
+    .human-quote span {
+      position: absolute;
+      left: 50%;
+      color: var(--blue);
+      opacity: 0.05;
+      white-space: nowrap;
+      transform: translateX(-50%);
+      pointer-events: none;
+    }
+
+    .human-quote span:first-child { top: -18px; font-size: 65px; }
+    .human-quote span:last-child { bottom: -18px; font-size: 65px; }
+
+    .iteration-flow {
+      display: grid;
+      grid-template-columns: repeat(5, 1fr);
+      align-items: center;
+      gap: 8px;
+      margin: 32px 0;
+    }
+
+    .flow-step {
+      position: relative;
+      min-height: 100px;
+      display: grid;
+      align-content: center;
+      padding: 14px;
+      border: 1px solid var(--line);
+      border-radius: 17px;
+      background: var(--surface-soft);
+      text-align: center;
+      font-size: 12px;
+      font-weight: 670;
+      line-height: 1.5;
+    }
+
+    .flow-step:not(:last-child)::after {
+      content: "";
+      position: absolute;
+      z-index: 2;
+      top: 50%;
+      right: -11px;
+      width: 12px;
+      height: 1px;
+      background: var(--blue);
+    }
+
+    .flow-step.decision {
+      color: var(--blue);
+      background: var(--blue-soft);
+    }
+
+    .flow-step.adjust {
+      color: var(--violet);
+      border-color: rgba(118, 87, 232, 0.3);
+    }
+
+    .flow-caption {
+      color: var(--muted);
+      font-size: 12px;
+      text-align: center;
+    }
+
+    .summary-list {
+      margin: 32px 0 0;
+      padding: 0;
+      list-style: none;
+      counter-reset: summary;
+      border-top: 1px solid var(--line);
+    }
+
+    .summary-list li {
+      position: relative;
+      padding: 24px 20px 24px 60px;
+      color: var(--ink-2);
+      border-bottom: 1px solid var(--line);
+      font-size: 15px;
+      line-height: 1.75;
+      counter-increment: summary;
+    }
+
+    .summary-list li::before {
+      content: counter(summary);
+      position: absolute;
+      top: 25px;
+      left: 17px;
+      color: var(--blue);
+      font-size: 13px;
+      font-weight: 800;
+      font-variant-numeric: tabular-nums;
+    }
+
+    .quiz {
+      margin-top: 30px;
+      border-top: 1px solid var(--line);
+    }
+
+    .quiz-item {
+      border-bottom: 1px solid var(--line);
+    }
+
+    .quiz-question {
+      width: 100%;
+      min-height: 70px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 20px;
+      padding: 17px 4px;
+      text-align: left;
+      border: 0;
+      background: transparent;
+      cursor: pointer;
+      font-size: 15px;
+      font-weight: 680;
+    }
+
+    .quiz-question span:last-child {
+      color: var(--blue);
+      font-size: 12px;
+      font-weight: 650;
+      white-space: nowrap;
+    }
+
+    .quiz-answer {
+      display: grid;
+      grid-template-rows: 0fr;
+      transition: grid-template-rows 0.42s var(--ease);
+    }
+
+    .quiz-answer > div { overflow: hidden; }
+
+    .quiz-answer p {
+      margin: 0;
+      padding: 0 4px 21px;
+      color: var(--muted);
+      font-size: 14px;
+      line-height: 1.7;
+    }
+
+    .quiz-item.open .quiz-answer { grid-template-rows: 1fr; }
+
+    .footer {
+      padding: 42px 24px 50px;
+      color: var(--muted);
+      border-top: 1px solid var(--line);
+      text-align: center;
+      font-size: 12px;
+    }
+
+    .footer strong { color: var(--ink-2); }
+
+    .reveal {
+      opacity: 0;
+      transform: translateY(28px);
+      transition: opacity 0.8s var(--ease), transform 0.8s var(--ease);
+    }
+
+    .reveal.visible {
+      opacity: 1;
+      transform: none;
+    }
+
+    .mobile-toc-button {
+      position: fixed;
+      z-index: 90;
+      right: 18px;
+      bottom: 18px;
+      min-width: 78px;
+      height: 46px;
+      display: none;
+      align-items: center;
+      justify-content: center;
+      gap: 8px;
+      color: white;
+      border: 0;
+      border-radius: 15px;
+      background: linear-gradient(135deg, #1376ff, #635ee7);
+      box-shadow: 0 14px 34px rgba(37, 91, 205, 0.35);
+      cursor: pointer;
+      font-size: 13px;
+      font-weight: 680;
+    }
+
+    .toc-drawer {
+      position: fixed;
+      z-index: 150;
+      inset: 0;
+      visibility: hidden;
+    }
+
+    .toc-drawer.open { visibility: visible; }
+
+    .drawer-backdrop {
+      position: absolute;
+      inset: 0;
+      border: 0;
+      background: rgba(4, 7, 14, 0.46);
+      opacity: 0;
+      backdrop-filter: blur(6px);
+      transition: opacity 0.28s ease;
+    }
+
+    .drawer-panel {
+      position: absolute;
+      left: 12px;
+      right: 12px;
+      bottom: 12px;
+      max-height: min(72vh, 650px);
+      padding: 20px;
+      overflow-y: auto;
+      border: 1px solid var(--line);
+      border-radius: 26px;
+      background: var(--surface-solid);
+      box-shadow: 0 30px 80px rgba(0, 0, 0, 0.35);
+      transform: translateY(calc(100% + 30px));
+      transition: transform 0.4s var(--ease);
+    }
+
+    .toc-drawer.open .drawer-backdrop { opacity: 1; }
+    .toc-drawer.open .drawer-panel { transform: translateY(0); }
+
+    .drawer-head {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      margin-bottom: 13px;
+    }
+
+    .drawer-head strong { font-size: 17px; }
+    .drawer-panel .toc-list { padding-left: 0; border: 0; }
+    .drawer-panel .toc-link { padding: 11px 8px; border-bottom: 1px solid var(--line); font-size: 14px; }
+    .drawer-panel .toc-link::before { display: none; }
+
+    .toast {
+      position: fixed;
+      z-index: 300;
+      left: 50%;
+      bottom: 28px;
+      padding: 11px 15px;
+      color: white;
+      border-radius: 12px;
+      background: rgba(18, 22, 30, 0.92);
+      box-shadow: 0 12px 36px rgba(0, 0, 0, 0.28);
+      font-size: 12px;
+      opacity: 0;
+      pointer-events: none;
+      transform: translate(-50%, 12px);
+      transition: opacity 0.25s ease, transform 0.25s var(--ease);
+    }
+
+    .toast.show { opacity: 1; transform: translate(-50%, 0); }
+
+    @media (max-width: 1023px) {
+      .hero { min-height: 920px; height: auto; max-height: none; padding: 140px 0 90px; }
+      .hero-inner { grid-template-columns: 1fr; gap: 46px; text-align: center; }
+      .hero-copy { margin: auto; }
+      .hero-lead { margin-left: auto; margin-right: auto; }
+      .hero-actions { justify-content: center; }
+      .hero-visual { width: min(460px, 74vw); }
+      .scroll-cue { display: none; }
+      .content-layout { grid-template-columns: minmax(0, 850px); padding-top: 88px; }
+      .toc-side { display: none; }
+      .mobile-toc-button { display: flex; }
+    }
+
+    @media (max-width: 720px) {
+      .nav-inner { width: calc(100% - 28px); }
+      .wordmark { font-size: 11px; letter-spacing: 0.1em; }
+      .nav-section { display: none; }
+      .hero { min-height: 800px; padding: 116px 0 74px; }
+      .hero-inner { width: calc(100% - 36px); gap: 38px; }
+      .hero h1 { font-size: clamp(46px, 14vw, 68px); }
+      .hero-lead { font-size: 16px; line-height: 1.75; }
+      .hero-actions { flex-direction: column; align-items: stretch; max-width: 330px; margin-left: auto; margin-right: auto; }
+      .hero-visual { width: min(390px, 96vw); transform: scale(0.92); }
+      .framework-node { width: 82px; height: 43px; border-radius: 14px; font-size: 10px; }
+      .content-layout { width: calc(100% - 32px); padding: 72px 0 110px; }
+      .article-section { margin-bottom: 82px; }
+      article h2 { font-size: 32px; }
+      .lead-paragraph { font-size: 17px; }
+      .lesson-map { grid-template-columns: 1fr; }
+      .info-panel { padding: 23px; border-radius: 20px; }
+      .overview-visual { grid-template-columns: repeat(2, 1fr); border-radius: 22px; }
+      .overview-item { min-height: 140px; padding: 20px; }
+      .overview-visual::before { font-size: 80px; }
+      .term-grid { grid-template-columns: 1fr; }
+      .term-item, .term-item:nth-child(odd), .term-item:nth-child(even) { padding: 19px 0; border-right: 0; }
+      .framework-code { top: -13px; font-size: 74px; }
+      .note { padding: 22px 20px 22px 50px; }
+      .note::before { left: 19px; top: 23px; }
+      .selector { padding: 21px; border-radius: 22px; }
+      .choice-grid { grid-template-columns: 1fr; }
+      .core-grid { grid-template-columns: 1fr; }
+      .core-item { min-height: 150px; }
+      .iteration-flow { grid-template-columns: 1fr; }
+      .flow-step { min-height: 68px; }
+      .flow-step:not(:last-child)::after { top: auto; right: 50%; bottom: -9px; width: 1px; height: 10px; }
+      .human-quote { padding-left: 10px; padding-right: 10px; }
+      th, td { padding: 13px 14px; }
+      pre { font-size: 11.5px; }
+    }
+
+    @media (max-width: 420px) {
+      .hero-visual { width: min(340px, 100%); }
+      .hero h1 { font-size: 47px; }
+      .overview-item .abbr { font-size: 20px; }
+      .recommendation { align-items: flex-start; }
+    }
+
+    @media (prefers-reduced-motion: reduce) {
+      html { scroll-behavior: auto; }
+      *, *::before, *::after { animation-duration: 0.01ms !important; animation-iteration-count: 1 !important; transition-duration: 0.01ms !important; }
+      .reveal { opacity: 1; transform: none; }
+    }
+  </style>
+</head>
+<body>
+  <a class="skip-link" href="#article">跳到正文</a>
+  <div class="progress-track" aria-hidden="true"><div class="progress-bar" id="progressBar"></div></div>
+
+  <header class="site-header" id="siteHeader">
+    <nav class="nav-inner" aria-label="主导航">
+      <a class="wordmark" href="#top" aria-label="返回顶部">
+        <span class="brand-mark" aria-hidden="true"></span>
+        <span>PROMPT / STRUCTURE</span>
+      </a>
+      <div class="nav-actions">
+        <span class="nav-section">知识课 · 结构化框架</span>
+        <button class="icon-button" id="themeToggle" type="button" aria-label="切换深浅主题" title="切换深浅主题">
+          <svg class="theme-moon" width="18" height="18" viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="M20.3 15.3A8.5 8.5 0 0 1 8.7 3.7 8.5 8.5 0 1 0 20.3 15.3Z" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"/></svg>
+          <svg class="theme-sun" width="18" height="18" viewBox="0 0 24 24" fill="none" aria-hidden="true"><circle cx="12" cy="12" r="4" stroke="currentColor" stroke-width="1.8"/><path d="M12 2v2M12 20v2M4.93 4.93l1.42 1.42M17.65 17.65l1.42 1.42M2 12h2M20 12h2M4.93 19.07l1.42-1.42M17.65 6.35l1.42-1.42" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg>
+        </button>
+      </div>
+    </nav>
+  </header>
+
+  <main id="top">
+    <section class="hero" aria-labelledby="hero-title">
+      <div class="hero-grid" aria-hidden="true"></div>
+      <div class="ambient one" aria-hidden="true"></div>
+      <div class="ambient two" aria-hidden="true"></div>
+      <div class="hero-inner">
+        <div class="hero-copy">
+          <p class="eyebrow">Prompt Engineering · Lesson 03</p>
+          <h1 id="hero-title">结构化<span>Prompt 框架</span></h1>
+          <p class="hero-lead">六种主流模板，一套底层逻辑。学会用清晰的结构传递角色、任务、上下文与输出要求。</p>
+          <div class="hero-actions">
+            <a class="primary-button" href="#learning">开始学习
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="m6 9 6 6 6-6" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>
+            </a>
+            <a class="secondary-button" href="#compare">快速选型</a>
+          </div>
+        </div>
+
+        <div class="hero-visual" aria-label="六种结构化 Prompt 框架围绕四大核心要素的关系图">
+          <div class="orbit one" aria-hidden="true"></div>
+          <div class="orbit two" aria-hidden="true"></div>
+          <div class="core-halo" aria-hidden="true"></div>
+          <div class="core-label">四大核心<br>要素</div>
+          <a href="#rtf" class="framework-node node-1">RTF</a>
+          <a href="#icio" class="framework-node node-2">ICIO</a>
+          <a href="#crispe" class="framework-node node-3">CRISPE</a>
+          <a href="#costar" class="framework-node node-4">CO-STAR</a>
+          <a href="#tiddec" class="framework-node node-5">TIDD-EC</a>
+          <a href="#broke" class="framework-node node-6">BROKE</a>
+        </div>
+      </div>
+      <div class="scroll-cue" aria-hidden="true"><i></i><span>SCROLL TO LEARN</span></div>
+    </section>
+
+    <div class="content-layout">
+      <aside class="toc-side" aria-label="页面目录">
+        <div class="toc-sticky">
+          <p class="toc-label">Contents</p>
+          <ol class="toc-list" id="desktopToc"></ol>
+          <div class="toc-progress">阅读进度 <strong id="sidePercent">0%</strong></div>
+        </div>
+      </aside>
+
+      <article id="article">
+        <section class="article-section reveal" id="learning" data-toc="学习导航">
+          <span class="section-number">00 · Learning Map</span>
+          <h2>先明确这次要学会什么</h2>
+          <p class="lead-paragraph">本篇整合原始课时「提示词工程 / 结构化 Prompt 框架」，目标不是背公式，而是建立一套可迁移的提示词组织能力。</p>
+          <div class="lesson-map">
+            <div class="info-panel">
+              <h3>学习目标</h3>
+              <ol class="goal-list">
+                <li>理解结构化 Prompt 框架的本质，即一组规范化的提示词模板，而非必须死记硬背的公式。</li>
+                <li>掌握 RTF、ICIO、CRISPE、CO-STAR、TIDD-EC、BROKE 六种主流框架的组成要素与适用场景。</li>
+                <li>能根据任务复杂度与控制需求，选择或组合合适的框架编写提示词。</li>
+                <li>抓住角色定位、任务目标、上下文背景、输出格式四大核心要素，做到灵活运用而不拘泥于形式。</li>
+              </ol>
+            </div>
+            <div class="info-panel">
+              <h3>前置知识</h3>
+              <ul class="prereq-list">
+                <li><strong>2.1</strong><br>什么是 Prompt 与 OpenAI API</li>
+                <li><strong>2.2</strong><br>如何设计 Prompt</li>
+              </ul>
+            </div>
+          </div>
+        </section>
+
+        <section class="article-section reveal" id="essence" data-toc="框架的本质">
+          <span class="section-number">01 · Mental Model</span>
+          <h2>什么是结构化 Prompt 框架</h2>
+          <p class="lead-paragraph">在上一篇《如何设计 Prompt》中，我们介绍过用标题、分节组织提示词的写法。业界在此基础上沉淀出一批标准的通用框架。</p>
+          <p>与其说它们是“框架”，更准确地说，它们是一组 <span class="term" data-tooltip="可复用的提示词结构，将稳定规则与可变输入分开">Prompt Templates</span>：用来规范你向大模型发出的请求，让模型更好地理解你的意图、背景、角色与格式要求。</p>
+
+          <figure class="overview-visual" aria-labelledby="overview-caption">
+            <div class="overview-item"><span class="count">3</span><span class="abbr">RTF</span><small>极简通用</small></div>
+            <div class="overview-item"><span class="count">4</span><span class="abbr">ICIO</span><small>指令与数据分离</small></div>
+            <div class="overview-item"><span class="count">6</span><span class="abbr">CRISPE</span><small>人格化与探索</small></div>
+            <div class="overview-item"><span class="count">6</span><span class="abbr">CO-STAR</span><small>受众与响应控制</small></div>
+            <div class="overview-item"><span class="count">6</span><span class="abbr">TIDD-EC</span><small>允许与禁止行为</small></div>
+            <div class="overview-item"><span class="count">5</span><span class="abbr">BROKE</span><small>结果评估与迭代</small></div>
+            <figcaption id="overview-caption" class="sr-only">结构化 Prompt 六种主流框架概览</figcaption>
+          </figure>
+
+          <h3>六种框架一览</h3>
+          <div class="table-wrap">
+            <table>
+              <thead><tr><th>框架</th><th>全称</th><th>要素数量</th><th>一句话定位</th></tr></thead>
+              <tbody>
+                <tr><td>RTF</td><td>Role–Task–Format</td><td>3</td><td>最基础的模板，简洁高效</td></tr>
+                <tr><td>ICIO</td><td>Instruction–Context–Input–Output</td><td>4</td><td>指令与输入数据分离，适合处理具体数据</td></tr>
+                <tr><td>CRISPE</td><td>Capacity–Role–Insight–Statement–Personality–Experiment</td><td>6</td><td>人格化与可控化，鼓励探索性输出</td></tr>
+                <tr><td>CO-STAR</td><td>Context–Objective–Style–Tone–Audience–Response</td><td>6</td><td>面向受众的结构化输出，可控性高</td></tr>
+                <tr><td>TIDD-EC</td><td>Task Type–Instructions–Do–Don't–Example–Content</td><td>6</td><td>明确允许与禁止行为，输出精准可靠</td></tr>
+                <tr><td>BROKE</td><td>Background–Role–Objective–Key Result–Evolution</td><td>5</td><td>目标导向、结果可评估、支持持续迭代</td></tr>
+              </tbody>
+            </table>
+          </div>
+        </section>
+
+        <section class="article-section reveal" id="rtf" data-toc="RTF 极简模板">
+          <div class="framework-head">
+            <span class="framework-code" aria-hidden="true">RTF</span>
+            <span class="section-number">02 · Foundation</span>
+            <h2>RTF：最小可用结构</h2>
+          </div>
+          <p class="lead-paragraph">RTF 是最基础的提示词模板，强调角色设定、任务说明与输出格式。它简洁高效，适合通用类任务或简单任务。</p>
+          <dl class="term-grid">
+            <div class="term-item"><dt>Role <span>角色</span></dt><dd>定义模型的身份或专业背景。</dd></div>
+            <div class="term-item"><dt>Task <span>任务</span></dt><dd>说明模型要完成的具体目标。</dd></div>
+            <div class="term-item"><dt>Format <span>格式</span></dt><dd>指定输出的格式、风格或语气。</dd></div>
+          </dl>
+          <details class="example-block" open>
+            <summary>查看 RTF 完整示例</summary>
+            <div class="code-shell">
+              <div class="code-topbar"><span>TEXT · RTF</span><button class="copy-button" type="button" aria-label="复制 RTF 示例">复制</button></div>
+              <pre><code><span class="token-key"># Role</span>
+你是一名资深市场分析师。
+
+<span class="token-key"># Task</span>
+请分析当前中国新能源汽车市场的发展趋势，指出未来三年的主要增长点。
+
+<span class="token-key"># Format</span>
+请以 Markdown 表格形式输出，包含“趋势”、“原因”、“预测增长率”三列。</code></pre>
+            </div>
+          </details>
+        </section>
+
+        <section class="article-section reveal" id="icio" data-toc="ICIO 数据分离">
+          <div class="framework-head">
+            <span class="framework-code" aria-hidden="true">ICIO</span>
+            <span class="section-number">03 · Separation</span>
+            <h2>ICIO：把指令与输入分开</h2>
+          </div>
+          <p class="lead-paragraph">ICIO 通过清晰分隔任务指令、背景信息、输入与输出要求，让模型在复杂场景中仍能高效执行。它适合需要上下文理解或多阶段推理的任务。</p>
+          <dl class="term-grid">
+            <div class="term-item"><dt>Instruction <span>指令</span></dt><dd>核心任务说明。</dd></div>
+            <div class="term-item"><dt>Context <span>上下文</span></dt><dd>背景与辅助信息。</dd></div>
+            <div class="term-item"><dt>Input <span>输入</span></dt><dd>具体需要处理的文本或数据。</dd></div>
+            <div class="term-item"><dt>Output <span>输出</span></dt><dd>结果格式或表达要求。</dd></div>
+          </dl>
+          <details class="example-block">
+            <summary>查看 ICIO 营销文案示例</summary>
+            <div class="code-shell">
+              <div class="code-topbar"><span>TEXT · ICIO</span><button class="copy-button" type="button" aria-label="复制 ICIO 示例">复制</button></div>
+              <pre><code><span class="token-key"># Instruction</span>
+请为指定产品生成一段简短、有吸引力的营销文案。
+
+<span class="token-key"># Context</span>
+你是一名资深品牌营销文案策划，擅长为电商产品撰写高转化率的广告语。
+目标受众是年轻、注重品质的都市白领。
+
+<span class="token-key"># Input</span>
+产品名称：AI健康监测手环
+产品特点：实时监测、可测量血压血氧、监测睡眠和呼吸暂停、
+外观时尚简约、佩戴轻盈舒适
+
+<span class="token-key"># Output</span>
+请输出一段不超过100字的营销文案，请使用markdown格式，
+语言简洁、有节奏感，突出健康的生活方式。</code></pre>
+            </div>
+          </details>
+          <div class="note">
+            <strong>工程师视角</strong>
+            Instruction 相当于方法体逻辑，Input 相当于方法入参。指令与数据分离后，同一段指令可以复用于不同输入，这正是后续提示词模板，例如 Spring AI PromptTemplate 的工作方式。
+          </div>
+        </section>
+
+        <section class="article-section reveal" id="crispe" data-toc="CRISPE 人格探索">
+          <div class="framework-head">
+            <span class="framework-code" aria-hidden="true">CRISPE</span>
+            <span class="section-number">04 · Creativity</span>
+            <h2>CRISPE：人格化与探索性</h2>
+          </div>
+          <p class="lead-paragraph">CRISPE 通过能力、角色、洞察、任务、个性及实验性控制，让生成内容更具创造性与一致性，常用于学术、科研、内容创作等领域。</p>
+          <dl class="term-grid">
+            <div class="term-item"><dt>Capacity <span>能力</span></dt><dd>确定智能体的能力边界。</dd></div>
+            <div class="term-item"><dt>Role <span>角色</span></dt><dd>明确身份定位。</dd></div>
+            <div class="term-item"><dt>Insight <span>洞察</span></dt><dd>提供必要的知识视角或上下文背景。</dd></div>
+            <div class="term-item"><dt>Statement <span>声明</span></dt><dd>定义具体的任务目标，也就是 Task。</dd></div>
+            <div class="term-item"><dt>Personality <span>个性</span></dt><dd>设置个性化的语气与风格。</dd></div>
+            <div class="term-item"><dt>Experiment <span>实验</span></dt><dd>指定探索性要求，例如提出假设或生成多个答案。</dd></div>
+          </dl>
+          <details class="example-block">
+            <summary>查看 CRISPE 市场策略示例</summary>
+            <div class="code-shell">
+              <div class="code-topbar"><span>TEXT · CRISPE</span><button class="copy-button" type="button" aria-label="复制 CRISPE 示例">复制</button></div>
+              <pre><code><span class="token-key"># Capacity and Role（能力与角色）</span>
+你是一名资深市场策略分析师，擅长品牌定位与消费趋势洞察，
+熟悉零售行业的数据分析与竞争对比方法。
+
+<span class="token-key"># Insight（洞察）</span>
+某科技品牌计划在明年推出一款主打AI功能的智能手表，
+目标群体为25-40岁的城市白领。
+公司希望通过差异化策略抢占高端可穿戴设备市场。
+
+<span class="token-key"># Statement（声明）</span>
+请撰写一份市场策略分析报告，包含以下内容：
+1. 当前智能手表市场格局与主要竞争者分析
+2. 目标用户画像与购买动机
+3. 产品差异化与品牌定位建议
+4. 三条可执行的市场推广策略
+
+<span class="token-key"># Personality（个性）</span>
+请以专业咨询顾问的语气撰写，逻辑清晰、数据导向。
+报告语言应简洁有力，避免空泛表达。
+
+<span class="token-key"># Experiment（实验）</span>
+在报告结尾，请额外提供一个“创新性市场假设”，
+例如：基于AI健康数据洞察的“主动健康推荐”功能，
+并简要说明这一创新可能带来的商业价值与潜在风险。</code></pre>
+            </div>
+          </details>
+          <div class="note warning">
+            <strong>注意</strong>
+            Capacity 与 Role 常合并成一段来写，二者共同回答“模型是谁、擅长什么”这个问题。
+          </div>
+        </section>
+
+        <section class="article-section reveal" id="costar" data-toc="CO-STAR 受众控制">
+          <div class="framework-head">
+            <span class="framework-code" aria-hidden="true">CO-STAR</span>
+            <span class="section-number">05 · Control</span>
+            <h2>CO-STAR：围绕受众精确表达</h2>
+          </div>
+          <p class="lead-paragraph">CO-STAR 通过明确任务要素，帮助用户更精准地传递需求。任务越复杂、输出越结构化、可控性要求越高，它的效果越明显。</p>
+          <dl class="term-grid">
+            <div class="term-item"><dt>Context <span>背景</span></dt><dd>提供场景、前提或背景，让模型理解“为什么做”。</dd></div>
+            <div class="term-item"><dt>Objective <span>目标</span></dt><dd>明确希望达成的结果，帮助模型聚焦“做什么”。</dd></div>
+            <div class="term-item"><dt>Style / Scope <span>风格 / 范围</span></dt><dd>约束表达风格，或界定任务的内容边界。</dd></div>
+            <div class="term-item"><dt>Tone <span>语气</span></dt><dd>指定正式、幽默、专业或轻松等表达语气。</dd></div>
+            <div class="term-item"><dt>Audience <span>受众</span></dt><dd>说明目标读者，帮助模型选择合适术语与表达。</dd></div>
+            <div class="term-item"><dt>Response <span>响应形式</span></dt><dd>要求列表、短文、步骤或表格等输出结构。</dd></div>
+          </dl>
+
+          <div class="variant-tabs" data-tabs>
+            <div class="tab-buttons" role="tablist" aria-label="CO-STAR 中 S 的两种解释">
+              <button class="tab-button" type="button" role="tab" aria-selected="true" data-tab="style">标准定义：Style</button>
+              <button class="tab-button" type="button" role="tab" aria-selected="false" data-tab="scope">本课变体：Scope</button>
+            </div>
+            <div class="tab-panel" role="tabpanel" data-panel="style"><strong>Style（风格）</strong>约束写作方式，例如叙事化、数据驱动、简洁直接。它关注内容“如何表达”。</div>
+            <div class="tab-panel" role="tabpanel" data-panel="scope" hidden><strong>Scope（范围）</strong>界定内容涵盖范围与限制条件。它关注内容“讲到哪里为止”。两种解释都在给输出加约束，按需选择即可，不必纠结名称。</div>
+          </div>
+
+          <details class="example-block">
+            <summary>查看 CO-STAR 青少年教育示例</summary>
+            <div class="code-shell">
+              <div class="code-topbar"><span>TEXT · CO-STAR</span><button class="copy-button" type="button" aria-label="复制 CO-STAR 示例">复制</button></div>
+              <pre><code><span class="token-key"># Context（背景）</span>
+近年来青少年沉迷社交媒体、遭遇网络不良信息的问题频发，
+学校计划开展相关主题教育活动；
+
+<span class="token-key"># Objective（目标）</span>
+帮助青少年理解合理使用社交媒体的重要性，并提供可操作的建议；
+
+<span class="token-key"># Scope（范围）</span>
+聚焦 13-17 岁青少年，涵盖使用时长管理、信息辨别、隐私保护
+3 个核心方面，避免过于学术化的理论；
+
+<span class="token-key"># Tone（语气）</span>
+亲切、鼓励，像学长学姐的建议，避免说教；
+
+<span class="token-key"># Audience（受众）</span>
+初中至高中阶段的学生；
+
+<span class="token-key"># Response（响应形式）</span>
+分点列出 5 条具体建议，每条配一个简短案例或比喻。</code></pre>
+            </div>
+          </details>
+        </section>
+
+        <section class="article-section reveal" id="tiddec" data-toc="TIDD-EC 行为护栏">
+          <div class="framework-head">
+            <span class="framework-code" aria-hidden="true">TIDD-EC</span>
+            <span class="section-number">06 · Guardrails</span>
+            <h2>TIDD-EC：明确能做与不能做</h2>
+          </div>
+          <p class="lead-paragraph">TIDD-EC 明确任务目标、执行指令、允许与禁止行为，并提供示例和背景信息。它适用于教育培训、法律咨询、技术支持等强规范场景。</p>
+          <dl class="term-grid">
+            <div class="term-item"><dt>Task Type <span>任务类型</span></dt><dd>明确任务的性质和目标。</dd></div>
+            <div class="term-item"><dt>Instructions <span>指令</span></dt><dd>提供执行任务的具体步骤或指导。</dd></div>
+            <div class="term-item"><dt>Do <span>应做</span></dt><dd>列出应当执行的操作或行为。</dd></div>
+            <div class="term-item"><dt>Don't <span>不应做</span></dt><dd>指出应避免的错误或不当行为。</dd></div>
+            <div class="term-item"><dt>Example <span>示例</span></dt><dd>提供期望输出的示例，帮助模型理解结果。</dd></div>
+            <div class="term-item"><dt>Content <span>用户内容</span></dt><dd>用户提供的背景信息或数据。</dd></div>
+          </dl>
+          <details class="example-block">
+            <summary>查看 TIDD-EC 法律意见书示例</summary>
+            <div class="code-shell">
+              <div class="code-topbar"><span>TEXT · TIDD-EC</span><button class="copy-button" type="button" aria-label="复制 TIDD-EC 示例">复制</button></div>
+              <pre><code><span class="token-key"># 任务</span>
+撰写法律意见书
+
+<span class="token-key"># 指令</span>
+根据客户提供的案件信息，分析法律风险并提出可行建议
+
+<span class="token-key"># 你应该做</span>
+- 结合相关法律法规进行分析
+- 条理清晰地列出风险点
+- 提供操作性建议
+
+<span class="token-key"># 你禁止做</span>
+- 不要提供具体的法律诉讼策略或个案判决
+- 避免主观推测，确保内容专业客观
+
+<span class="token-key"># 示例</span>
+客户希望了解合同条款中的潜在风险，分析指出关键条款可能存在的
+履约争议，并给出建议如完善合同条款或加强证据准备
+
+<span class="token-key"># 用户内容</span>
+- 案件类型：商业合同纠纷
+- 关键条款：付款条款、违约责任、交付时间</code></pre>
+            </div>
+          </details>
+          <div class="note">
+            <strong>独特价值</strong>
+            在法律、医疗、金融客服等合规敏感业务中，明确写出禁止行为，往往比只写正向要求更能压住模型的“自由发挥”。这也是生产环境系统提示词中最常见的写法之一。
+          </div>
+        </section>
+
+        <section class="article-section reveal" id="broke" data-toc="BROKE 结果迭代">
+          <div class="framework-head">
+            <span class="framework-code" aria-hidden="true">BROKE</span>
+            <span class="section-number">07 · Outcomes</span>
+            <h2>BROKE：让结果可验收、可迭代</h2>
+          </div>
+          <p class="lead-paragraph">BROKE 通过上下文、身份、任务目标、衡量标准及改进方向，引导模型生成更贴合目标、可评估和可迭代的输出。</p>
+          <dl class="term-grid">
+            <div class="term-item"><dt>Background <span>背景</span></dt><dd>描述任务上下文，提供必要理解依据。</dd></div>
+            <div class="term-item"><dt>Role <span>角色</span></dt><dd>明确模型应扮演的身份，引导输出风格与深度。</dd></div>
+            <div class="term-item"><dt>Objective <span>目标</span></dt><dd>定义任务的具体目标或预期结果。</dd></div>
+            <div class="term-item"><dt>Key Result <span>关键结果</span></dt><dd>设定衡量成功的标准或指标，确保输出可评估。</dd></div>
+            <div class="term-item"><dt>Evolution <span>进化</span></dt><dd>提供改进建议或后续步骤，支持持续优化。</dd></div>
+          </dl>
+          <details class="example-block">
+            <summary>查看 BROKE 校园活动示例</summary>
+            <div class="code-shell">
+              <div class="code-topbar"><span>TEXT · BROKE</span><button class="copy-button" type="button" aria-label="复制 BROKE 示例">复制</button></div>
+              <pre><code><span class="token-key"># 背景（Background）</span>
+学校希望提高学生的环保意识，计划开展一次以校园环保为主题的活动。
+
+<span class="token-key"># 角色（Role）</span>
+作为校园活动策划师，负责设计活动方案并确保可执行性。
+
+<span class="token-key"># 目标（Objective）</span>
+通过活动让学生了解环保知识并积极参与实践。
+
+<span class="token-key"># 关键结果（Key Result）</span>
+活动结束后，学生参与率达到80%以上，
+提交的环保创意作品数量不少于50份。
+
+<span class="token-key"># 进化（Evolution）</span>
+根据活动反馈调整宣传策略和活动形式，优化互动环节，
+使下一次活动更具吸引力。</code></pre>
+            </div>
+          </details>
+          <div class="note">
+            <strong>与 OKR 的联系</strong>
+            BROKE 明显借鉴了管理学中的 OKR 思想：Objective 定方向，Key Result 定可量化的验收标准，Evolution 对应复盘迭代。需要模型输出“可验收、可优化”时，它最合适。
+          </div>
+        </section>
+
+        <section class="article-section reveal" id="compare" data-toc="框架对比与选型">
+          <span class="section-number">08 · Decision Guide</span>
+          <h2>框架对比与选型</h2>
+          <p class="lead-paragraph">先识别任务最突出的特征，再选择框架。任务没有唯一答案，必要时可以组合使用。</p>
+          <div class="table-wrap">
+            <table>
+              <thead><tr><th>框架</th><th>核心特色</th><th>典型适用场景</th><th>复杂度</th></tr></thead>
+              <tbody>
+                <tr><td>RTF</td><td>三要素极简结构</td><td>通用任务、简单任务</td><td>低</td></tr>
+                <tr><td>ICIO</td><td>指令与输入数据分离</td><td>需要上下文理解或多阶段推理、有具体待处理数据</td><td>中</td></tr>
+                <tr><td>CRISPE</td><td>人格化、支持探索性输出</td><td>学术、科研、内容创作</td><td>中高</td></tr>
+                <tr><td>CO-STAR</td><td>强调受众与响应形式，可控性高</td><td>企业报告、课程设计、市场策略分析</td><td>中高</td></tr>
+                <tr><td>TIDD-EC</td><td>明确应做与禁止做</td><td>教育培训、法律咨询、技术支持等强规范场景</td><td>中高</td></tr>
+                <tr><td>BROKE</td><td>关键结果可评估、支持迭代</td><td>活动策划、产品设计、需要持续改进的任务</td><td>中高</td></tr>
+              </tbody>
+            </table>
+          </div>
+
+          <div class="selector" id="frameworkSelector">
+            <h3 class="selector-title">交互式选型导航</h3>
+            <p class="selector-subtitle">你的任务有什么突出特点？选择一项，查看优先推荐。</p>
+            <div class="choice-grid">
+              <button class="choice-button" type="button" data-framework="RTF" data-reason="简单通用、希望快速上手时，用最少结构明确角色、任务与格式。">简单通用，快速上手</button>
+              <button class="choice-button" type="button" data-framework="ICIO" data-reason="有具体文本或数据要处理时，把稳定指令和动态输入清晰分开。">有具体输入数据要处理</button>
+              <button class="choice-button" type="button" data-framework="CRISPE" data-reason="需要稳定人格、专业视角或多个创新假设时，加入能力、个性与实验要求。">需要人格化与创造性探索</button>
+              <button class="choice-button" type="button" data-framework="CO-STAR" data-reason="输出结构复杂且面向特定读者时，显式控制受众、语气与响应形式。">结构复杂且有明确受众</button>
+              <button class="choice-button" type="button" data-framework="TIDD-EC" data-reason="合规或强规范任务中，用 Do 与 Don't 建立明确的行为护栏。">必须规定允许与禁止行为</button>
+              <button class="choice-button" type="button" data-framework="BROKE" data-reason="结果需要量化验收并持续改进时，用 Key Result 与 Evolution 闭环。">结果需可评估、可迭代</button>
+            </div>
+            <div class="recommendation" aria-live="polite">
+              <div class="recommendation-badge" id="recommendBadge">?</div>
+              <div><strong id="recommendTitle">等待你的选择</strong><p id="recommendText">选中最符合任务的特征，系统会给出框架建议。</p></div>
+            </div>
+          </div>
+        </section>
+
+        <section class="article-section reveal" id="core" data-toc="四大核心要素">
+          <span class="section-number">09 · First Principles</span>
+          <h2>万变不离其宗：四大核心要素</h2>
+          <p class="lead-paragraph">不必过于拘泥于框架名称。归根结底，最重要的是明确角色定位、任务目标、上下文背景与输出格式。</p>
+
+          <div class="core-grid">
+            <div class="core-item"><span class="core-index">CORE 01</span><h3>角色定位</h3><p>回答“模型是谁”。对应 RTF 的 Role、CRISPE 的 Capacity 与 Role、BROKE 的 Role，ICIO 中常写入 Context。</p></div>
+            <div class="core-item"><span class="core-index">CORE 02</span><h3>任务目标</h3><p>回答“要做什么”。对应 Task、Instruction、Statement、Objective 等要素。</p></div>
+            <div class="core-item"><span class="core-index">CORE 03</span><h3>上下文背景</h3><p>回答“为什么做、依据什么”。对应 Context、Input、Insight、Content 与 Background。</p></div>
+            <div class="core-item"><span class="core-index">CORE 04</span><h3>输出格式</h3><p>回答“怎么呈现”。对应 Format、Output、Personality、Tone、Response 与 Example。</p></div>
+          </div>
+
+          <div class="table-wrap">
+            <table>
+              <thead><tr><th>核心要素</th><th>回答的问题</th><th>在各框架中的体现</th></tr></thead>
+              <tbody>
+                <tr><td>角色定位</td><td>模型是谁</td><td>RTF 的 Role、CRISPE 的 Capacity 与 Role、BROKE 的 Role、ICIO 常写入 Context</td></tr>
+                <tr><td>任务目标</td><td>要做什么</td><td>RTF 的 Task、ICIO 的 Instruction、CRISPE 的 Statement、CO-STAR 的 Objective、TIDD-EC 的 Task Type 与 Instructions、BROKE 的 Objective</td></tr>
+                <tr><td>上下文背景</td><td>为什么做、依据什么</td><td>ICIO 的 Context 与 Input、CRISPE 的 Insight、CO-STAR 的 Context、TIDD-EC 的 Content、BROKE 的 Background</td></tr>
+                <tr><td>输出格式</td><td>怎么呈现</td><td>RTF 的 Format、ICIO 的 Output、CRISPE 的 Personality、CO-STAR 的 Tone 与 Response、TIDD-EC 的 Example</td></tr>
+              </tbody>
+            </table>
+          </div>
+
+          <blockquote class="human-quote">
+            <span aria-hidden="true">把大模型当人看</span>
+            <p>把大模型当人看</p>
+            <span aria-hidden="true">把大模型当人看</span>
+          </blockquote>
+
+          <p>是人就会犯错，模型也可能不按要求输出。没有达到理想效果时，不要着急，要针对性地指导它：合理调整提示词与格式，保持结构清晰具体，给出明确任务指令；同时避免信息过载，不让模型被过多细节干扰。</p>
+
+          <h3>“调教”本质上是一个迭代循环</h3>
+          <div class="iteration-flow" aria-label="提示词迭代循环">
+            <div class="flow-step">按框架<br>编写提示词</div>
+            <div class="flow-step">发送给<br>大模型</div>
+            <div class="flow-step decision">输出是否<br>符合预期</div>
+            <div class="flow-step">符合：固化为<br>模板复用</div>
+            <div class="flow-step adjust">不符合：调整角色、<br>任务、上下文或格式</div>
+          </div>
+          <p class="flow-caption">调整后回到起点再次验证，直到输出稳定满足目标。</p>
+          <div class="note"><strong>关键结论</strong>只要抓住提示词的主要部分并灵活应用，就能获得高质量、可控的输出。</div>
+        </section>
+
+        <section class="article-section reveal" id="practice" data-toc="Java 工程实践">
+          <span class="section-number">10 · Engineering</span>
+          <h2>工程实践：在 Java 中使用结构化提示词</h2>
+          <p class="lead-paragraph">工程落地时，结构化提示词通常固化为系统提示词，用户的具体问题作为用户消息传入。这正好对应 ICIO 中“指令与输入分离”的思想。</p>
+
+          <div class="example-block">
+            <div class="code-shell">
+              <div class="code-topbar"><span>JAVA · SPRING AI CHATCLIENT</span><button class="copy-button" type="button" aria-label="复制 Java 示例">复制</button></div>
+              <pre><code><span class="token-type">ChatClient</span> chatClient = <span class="token-type">ChatClient</span>.<span class="token-method">builder</span>(chatModel).<span class="token-method">build</span>();
+
+<span class="token-type">String</span> answer = chatClient.<span class="token-method">prompt</span>()
+        .<span class="token-method">system</span>("""
+                <span class="token-key"># Role</span>
+                你是一名资深市场分析师。
+
+                <span class="token-key"># Format</span>
+                请以 Markdown 表格形式输出，包含“趋势”、“原因”、“预测增长率”三列。
+                """)
+        .<span class="token-method">user</span>(<span class="token-string">"请分析当前中国新能源汽车市场的发展趋势，指出未来三年的主要增长点。"</span>)
+        .<span class="token-method">call</span>()
+        .<span class="token-method">content</span>();</code></pre>
+            </div>
+          </div>
+          <p>其中，RTF 的 Role 与 Format 放进系统提示词，作为稳定不变的“模板”；Task 由用户消息动态传入。后续学习提示词模板管理时，还可以把模板中的可变部分抽成占位符参数。</p>
+        </section>
+
+        <section class="article-section reveal" id="summary" data-toc="小结">
+          <span class="section-number">11 · Summary</span>
+          <h2>把框架变成能力，而不是负担</h2>
+          <ol class="summary-list">
+            <li>结构化 Prompt 框架本质上是一批提示词模板，用于规范向大模型传递意图、背景、角色与格式要求的方式。</li>
+            <li>六种框架各有侧重：RTF 极简通用；ICIO 分离指令与输入；CRISPE 人格化且鼓励探索；CO-STAR 强调受众与响应形式；TIDD-EC 明确允许与禁止行为；BROKE 以关键结果驱动可评估、可迭代的输出。</li>
+            <li>所有框架万变不离其宗，核心是四大要素：角色定位、任务目标、上下文背景、输出格式。</li>
+            <li>不要拘泥于框架名称。保持结构清晰、指令明确、避免信息过载，输出不理想时通过迭代调整提示词来指导模型。</li>
+          </ol>
+        </section>
+
+        <section class="article-section reveal" id="selftest" data-toc="快速自测">
+          <span class="section-number">12 · Self Check</span>
+          <h2>三道题，检查是否真正理解</h2>
+          <p>先在心里作答，再点击查看参考答案。</p>
+          <div class="quiz">
+            <div class="quiz-item">
+              <button class="quiz-question" type="button" aria-expanded="false"><span>任务有固定指令，但每次输入数据都不同，优先考虑哪个框架？</span><span>查看答案</span></button>
+              <div class="quiz-answer"><div><p><strong>ICIO。</strong>它显式分离 Instruction 与 Input，稳定指令可以复用，输入数据按次替换。</p></div></div>
+            </div>
+            <div class="quiz-item">
+              <button class="quiz-question" type="button" aria-expanded="false"><span>医疗客服需要严格限制模型不能给出诊断结论，哪个框架最合适？</span><span>查看答案</span></button>
+              <div class="quiz-answer"><div><p><strong>TIDD-EC。</strong>它通过 Do 与 Don't 明确允许和禁止行为，适合强规范、合规敏感场景。</p></div></div>
+            </div>
+            <div class="quiz-item">
+              <button class="quiz-question" type="button" aria-expanded="false"><span>忘记框架名称时，至少应该检查哪四项？</span><span>查看答案</span></button>
+              <div class="quiz-answer"><div><p><strong>角色定位、任务目标、上下文背景、输出格式。</strong>这四项是所有结构化 Prompt 框架的共同底层逻辑。</p></div></div>
+            </div>
+          </div>
+        </section>
+      </article>
+    </div>
+  </main>
+
+  <footer class="footer"><strong>Prompt Engineering</strong> · 结构化 Prompt 框架知识教学页</footer>
+
+  <button class="mobile-toc-button" id="mobileTocButton" type="button" aria-expanded="false" aria-controls="tocDrawer">
+    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="M8 6h13M8 12h13M8 18h13M3 6h.01M3 12h.01M3 18h.01" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>
+    目录
+  </button>
+
+  <div class="toc-drawer" id="tocDrawer" aria-hidden="true">
+    <button class="drawer-backdrop" type="button" aria-label="关闭目录"></button>
+    <div class="drawer-panel" role="dialog" aria-modal="true" aria-label="页面目录">
+      <div class="drawer-head"><strong>页面目录</strong><button class="icon-button" id="drawerClose" type="button" aria-label="关闭目录">×</button></div>
+      <ol class="toc-list" id="mobileToc"></ol>
+    </div>
+  </div>
+
+  <div class="toast" id="toast" role="status" aria-live="polite">已复制到剪贴板</div>
+
+  <script>
+    const root = document.documentElement;
+    const themeToggle = document.getElementById('themeToggle');
+    const progressBar = document.getElementById('progressBar');
+    const sidePercent = document.getElementById('sidePercent');
+    const siteHeader = document.getElementById('siteHeader');
+    const toast = document.getElementById('toast');
+
+    // Theme choice persists; system changes remain active until a manual choice is made.
+    themeToggle.addEventListener('click', () => {
+      const next = root.dataset.theme === 'dark' ? 'light' : 'dark';
+      root.dataset.theme = next;
+      localStorage.setItem('prompt-theme', next);
+    });
+
+    window.matchMedia('(prefers-color-scheme: dark)').addEventListener('change', event => {
+      if (!localStorage.getItem('prompt-theme')) root.dataset.theme = event.matches ? 'dark' : 'light';
+    });
+
+    function updateReadingProgress() {
+      const scrollTop = window.scrollY;
+      const scrollable = document.documentElement.scrollHeight - window.innerHeight;
+      const progress = scrollable > 0 ? Math.min(100, Math.max(0, scrollTop / scrollable * 100)) : 0;
+      progressBar.style.width = progress + '%';
+      sidePercent.textContent = Math.round(progress) + '%';
+      siteHeader.classList.toggle('scrolled', scrollTop > 20);
+    }
+
+    window.addEventListener('scroll', updateReadingProgress, { passive: true });
+    window.addEventListener('resize', updateReadingProgress);
+    updateReadingProgress();
+
+    // Build both desktop and mobile TOCs from content headings.
+    const tocSections = [...document.querySelectorAll('.article-section[data-toc]')];
+    const desktopToc = document.getElementById('desktopToc');
+    const mobileToc = document.getElementById('mobileToc');
+
+    function createTocItems(target) {
+      tocSections.forEach((section, index) => {
+        const li = document.createElement('li');
+        const link = document.createElement('a');
+        link.href = '#' + section.id;
+        link.className = 'toc-link';
+        link.dataset.target = section.id;
+        link.textContent = String(index + 1).padStart(2, '0') + '  ' + section.dataset.toc;
+        li.appendChild(link);
+        target.appendChild(li);
+      });
+    }
+
+    createTocItems(desktopToc);
+    createTocItems(mobileToc);
+
+    const tocLinks = [...document.querySelectorAll('.toc-link')];
+    const sectionObserver = new IntersectionObserver(entries => {
+      const visible = entries
+        .filter(entry => entry.isIntersecting)
+        .sort((a, b) => a.boundingClientRect.top - b.boundingClientRect.top)[0];
+      if (!visible) return;
+      tocLinks.forEach(link => {
+        const active = link.dataset.target === visible.target.id;
+        link.classList.toggle('active', active);
+        if (active) link.setAttribute('aria-current', 'location');
+        else link.removeAttribute('aria-current');
+      });
+    }, { rootMargin: '-18% 0px -70% 0px', threshold: 0 });
+    tocSections.forEach(section => sectionObserver.observe(section));
+
+    const revealObserver = new IntersectionObserver(entries => {
+      entries.forEach(entry => {
+        if (entry.isIntersecting) {
+          entry.target.classList.add('visible');
+          revealObserver.unobserve(entry.target);
+        }
+      });
+    }, { rootMargin: '0px 0px -8% 0px', threshold: 0.08 });
+    document.querySelectorAll('.reveal').forEach(element => revealObserver.observe(element));
+
+    // Mobile TOC drawer.
+    const mobileTocButton = document.getElementById('mobileTocButton');
+    const tocDrawer = document.getElementById('tocDrawer');
+    const drawerClose = document.getElementById('drawerClose');
+    const drawerBackdrop = tocDrawer.querySelector('.drawer-backdrop');
+
+    function setDrawer(open) {
+      tocDrawer.classList.toggle('open', open);
+      tocDrawer.setAttribute('aria-hidden', String(!open));
+      mobileTocButton.setAttribute('aria-expanded', String(open));
+      document.body.style.overflow = open ? 'hidden' : '';
+      if (open) drawerClose.focus();
+    }
+
+    mobileTocButton.addEventListener('click', () => setDrawer(true));
+    drawerClose.addEventListener('click', () => setDrawer(false));
+    drawerBackdrop.addEventListener('click', () => setDrawer(false));
+    mobileToc.querySelectorAll('a').forEach(link => link.addEventListener('click', () => setDrawer(false)));
+    document.addEventListener('keydown', event => {
+      if (event.key === 'Escape' && tocDrawer.classList.contains('open')) setDrawer(false);
+    });
+
+    // Copy exact code text without syntax markup.
+    let toastTimer;
+    document.querySelectorAll('.copy-button').forEach(button => {
+      button.addEventListener('click', async () => {
+        const code = button.closest('.code-shell').querySelector('code').textContent;
+        try {
+          await navigator.clipboard.writeText(code);
+          button.textContent = '已复制';
+          toast.textContent = '已复制到剪贴板';
+        } catch (error) {
+          const textarea = document.createElement('textarea');
+          textarea.value = code;
+          document.body.appendChild(textarea);
+          textarea.select();
+          document.execCommand('copy');
+          textarea.remove();
+          button.textContent = '已复制';
+          toast.textContent = '已复制到剪贴板';
+        }
+        toast.classList.add('show');
+        clearTimeout(toastTimer);
+        toastTimer = setTimeout(() => {
+          toast.classList.remove('show');
+          button.textContent = '复制';
+        }, 1800);
+      });
+    });
+
+    // CO-STAR variant tabs.
+    document.querySelectorAll('[data-tabs]').forEach(tabs => {
+      const buttons = [...tabs.querySelectorAll('[data-tab]')];
+      const panels = [...tabs.querySelectorAll('[data-panel]')];
+      buttons.forEach(button => button.addEventListener('click', () => {
+        buttons.forEach(item => item.setAttribute('aria-selected', String(item === button)));
+        panels.forEach(panel => panel.hidden = panel.dataset.panel !== button.dataset.tab);
+      }));
+    });
+
+    // Framework recommendation tool.
+    const choices = [...document.querySelectorAll('.choice-button')];
+    const recommendBadge = document.getElementById('recommendBadge');
+    const recommendTitle = document.getElementById('recommendTitle');
+    const recommendText = document.getElementById('recommendText');
+    choices.forEach(choice => choice.addEventListener('click', () => {
+      choices.forEach(item => item.classList.toggle('active', item === choice));
+      recommendBadge.textContent = choice.dataset.framework;
+      recommendTitle.textContent = '优先推荐 ' + choice.dataset.framework;
+      recommendText.textContent = choice.dataset.reason;
+    }));
+
+    // Self-check answers expand independently.
+    document.querySelectorAll('.quiz-question').forEach(button => {
+      button.addEventListener('click', () => {
+        const item = button.closest('.quiz-item');
+        const open = item.classList.toggle('open');
+        button.setAttribute('aria-expanded', String(open));
+        button.lastElementChild.textContent = open ? '收起答案' : '查看答案';
+      });
+    });
+
+    document.querySelectorAll('.term').forEach(term => term.tabIndex = 0);
+  </script>
+</body>
+</html>

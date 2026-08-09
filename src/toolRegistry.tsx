@@ -2,11 +2,11 @@ import React, { lazy } from 'react'
 import SeedanceTool from './tools/SeedanceTool'
 import {
   IconSeedance, IconJson, IconClock, IconConvert, IconBatch, IconImgTest, IconProbe,
-  IconImage, IconVideo, IconId, IconCode, IconType, IconGraphql,
+  IconImage, IconVideo, IconId, IconCode, IconType, IconGraphql, IconPromptOpt,
 } from './shared/icons'
 
-export type ToolKey = 'seedance' | 'json' | 'timestamp' | 'aiconvert' | 'llmbatch' | 'imgtest' | 'modelprobe' | 'imganalyze'
-  | 'videoanalyze' | 'idgen' | 'base64' | 'unicode' | 'graphql'
+export type ToolKey = 'seedance' | 'json' | 'timestamp' | 'aiconvert' | 'llmbatch' | 'imgtest' | 'modelprobe' | 'promptopt'
+  | 'imganalyze' | 'videoanalyze' | 'idgen' | 'base64' | 'unicode' | 'graphql'
 export type ToolIntent = 'hover' | 'focus' | 'activate'
 export type ToolPath = `/tools/${ToolKey}`
 export type ToolRoute =
@@ -39,6 +39,7 @@ const loaders: Record<AsyncToolKey, ToolLoader> = {
   llmbatch: () => import('./tools/LlmBatchTool'),
   imgtest: () => import('./tools/ImgApiTestTool'),
   modelprobe: () => import('./tools/ModelProbeTool'),
+  promptopt: () => import('./tools/PromptOptTool'),
   imganalyze: () => import('./tools/ImageAnalyzerTool'),
   videoanalyze: () => import('./tools/VideoAnalyzerTool'),
   idgen: () => import('./tools/IdGenTool'),
@@ -67,6 +68,7 @@ const lazyComponents: Record<AsyncToolKey, React.LazyExoticComponent<React.Compo
   llmbatch: lazy(() => loadToolModule('llmbatch')),
   imgtest: lazy(() => loadToolModule('imgtest')),
   modelprobe: lazy(() => loadToolModule('modelprobe')),
+  promptopt: lazy(() => loadToolModule('promptopt')),
   imganalyze: lazy(() => loadToolModule('imganalyze')),
   videoanalyze: lazy(() => loadToolModule('videoanalyze')),
   idgen: lazy(() => loadToolModule('idgen')),
@@ -83,6 +85,7 @@ export const TOOL_DEFINITIONS: ToolDefinition[] = [
   { key: 'llmbatch', path: toolPath('llmbatch'), label: 'LLM 批量测试', desc: 'Token 计费口径、一致性、波动与模型验真', icon: <IconBatch />, fullHeight: true, component: lazyComponents.llmbatch },
   { key: 'imgtest', path: toolPath('imgtest'), label: '图片接口测试', desc: '多渠道图片生成接口批测、价格与响应校验', icon: <IconImgTest />, fullHeight: true, component: lazyComponents.imgtest },
   { key: 'modelprobe', path: toolPath('modelprobe'), label: '模型探测', desc: 'API 渠道兼容性、参数降级与缓存实验台', icon: <IconProbe />, fullHeight: true, component: lazyComponents.modelprobe },
+  { key: 'promptopt', path: toolPath('promptopt'), label: '提示词优化', desc: '结构化框架选型、系统提示词撰写与智能优化', icon: <IconPromptOpt />, fullHeight: false, component: lazyComponents.promptopt },
   { key: 'imganalyze', path: toolPath('imganalyze'), label: '图片信息识别', desc: '图片分辨率、格式、尺寸与等级识别', icon: <IconImage />, fullHeight: false, component: lazyComponents.imganalyze },
   { key: 'videoanalyze', path: toolPath('videoanalyze'), label: '视频信息检测', desc: '本地文件或 URL 视频元信息与播放检测', icon: <IconVideo />, fullHeight: false, component: lazyComponents.videoanalyze },
   { key: 'idgen', path: toolPath('idgen'), label: 'ID 生成器', desc: 'UUID v4/v7 与安全随机字符串批量生成', icon: <IconId />, fullHeight: false, component: lazyComponents.idgen },

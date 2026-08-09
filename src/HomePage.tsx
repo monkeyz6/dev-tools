@@ -43,7 +43,7 @@ export default function HomePage({ themeMenu, onNavigate, onToolIntent, onHome }
           <span className="home-brand-mark" aria-hidden="true"><img src="/logo.svg" alt="" /></span>
           <span>
             <span className="home-brand-name">Dev Toolkit</span>
-            <span className="home-brand-sub">纯前端工具箱</span>
+            <span className="home-brand-sub">前端工具箱</span>
           </span>
         </a>
         <div className="home-controls">{themeMenu}</div>
@@ -53,12 +53,12 @@ export default function HomePage({ themeMenu, onNavigate, onToolIntent, onHome }
         <span className="home-hero-badge">
           <span className="home-dot" aria-hidden="true" />
           <span className="home-badge-copy">
-            13 个工具 · 持续迭代中
+            {TOOL_DEFINITIONS.length} 个工具 · 持续迭代中
             <span className="home-ellipsis" aria-hidden="true"><span className="home-ellipsis-dot">.</span><span className="home-ellipsis-dot">.</span><span className="home-ellipsis-dot">.</span></span>
           </span>
         </span>
         <h1><span>Dev Toolkit </span><span className="home-hero-grad">工具集合</span></h1>
-        <p>纯前端实现的工具箱，覆盖前后端开发者高频场景，所有数据均在浏览器本地处理。</p>
+        <p>纯前端技术实现的工具箱，覆盖前后端开发者高频场景，所有数据均在浏览器本地处理。</p>
       </section>
 
       <main className="home-grid">
@@ -100,7 +100,7 @@ export default function HomePage({ themeMenu, onNavigate, onToolIntent, onHome }
       </main>
 
       <footer className="home-footer">
-        <div className="home-copyright">© {new Date().getFullYear()} cvking.cn · 纯前端工具箱</div>
+        <div className="home-copyright">© {new Date().getFullYear()} cvking.cn · 前端工具箱</div>
         <div className="home-beian">
           <a href="https://beian.miit.gov.cn" target="_blank" rel="noopener nofollow">皖ICP备20012269号</a>
           <span className="home-sep">·</span>
