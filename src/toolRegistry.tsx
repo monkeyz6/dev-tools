@@ -2,11 +2,11 @@ import React, { lazy } from 'react'
 import SeedanceTool from './tools/SeedanceTool'
 import {
   IconSeedance, IconJson, IconClock, IconConvert, IconBatch, IconImgTest, IconProbe,
-  IconImage, IconVideo, IconId, IconCode, IconType, IconGraphql, IconPromptOpt,
+  IconImage, IconVideo, IconId, IconCode, IconType, IconGraphql, IconPromptOpt, IconReport,
 } from './shared/icons'
 
 export type ToolKey = 'seedance' | 'json' | 'timestamp' | 'aiconvert' | 'llmbatch' | 'imgtest' | 'modelprobe' | 'promptopt'
-  | 'imganalyze' | 'videoanalyze' | 'idgen' | 'base64' | 'unicode' | 'graphql'
+  | 'imganalyze' | 'videoanalyze' | 'idgen' | 'base64' | 'unicode' | 'graphql' | 'llmreport'
 export type ToolIntent = 'hover' | 'focus' | 'activate'
 export type ToolPath = `/tools/${ToolKey}`
 export type ToolRoute =
@@ -37,6 +37,7 @@ const loaders: Record<AsyncToolKey, ToolLoader> = {
   timestamp: () => import('./tools/TimestampTool'),
   aiconvert: () => import('./tools/AiConvertTool'),
   llmbatch: () => import('./tools/LlmBatchTool'),
+  llmreport: () => import('./tools/LlmReportTool'),
   imgtest: () => import('./tools/ImgApiTestTool'),
   modelprobe: () => import('./tools/ModelProbeTool'),
   promptopt: () => import('./tools/PromptOptTool'),
@@ -66,6 +67,7 @@ const lazyComponents: Record<AsyncToolKey, React.LazyExoticComponent<React.Compo
   timestamp: lazy(() => loadToolModule('timestamp')),
   aiconvert: lazy(() => loadToolModule('aiconvert')),
   llmbatch: lazy(() => loadToolModule('llmbatch')),
+  llmreport: lazy(() => loadToolModule('llmreport')),
   imgtest: lazy(() => loadToolModule('imgtest')),
   modelprobe: lazy(() => loadToolModule('modelprobe')),
   promptopt: lazy(() => loadToolModule('promptopt')),
@@ -83,6 +85,7 @@ export const TOOL_DEFINITIONS: ToolDefinition[] = [
   { key: 'timestamp', path: toolPath('timestamp'), label: '时间戳转换', desc: '毫秒/秒/纳秒时间戳与日期时间双向转换', icon: <IconClock />, fullHeight: false, component: lazyComponents.timestamp },
   { key: 'aiconvert', path: toolPath('aiconvert'), label: 'AI 格式转换', desc: 'OpenAI、Anthropic、Responses 请求体互转', icon: <IconConvert />, fullHeight: true, component: lazyComponents.aiconvert },
   { key: 'llmbatch', path: toolPath('llmbatch'), label: 'LLM 批量测试', desc: 'Token 计费口径、一致性、波动与模型验真', icon: <IconBatch />, fullHeight: true, component: lazyComponents.llmbatch },
+  { key: 'llmreport', path: toolPath('llmreport'), label: 'LLM 报告生成', desc: '日志导入生成性能/稳定性分析报告，可导出 HTML', icon: <IconReport />, fullHeight: false, component: lazyComponents.llmreport },
   { key: 'imgtest', path: toolPath('imgtest'), label: '图片接口测试', desc: '多渠道图片生成接口批测、价格与响应校验', icon: <IconImgTest />, fullHeight: true, component: lazyComponents.imgtest },
   { key: 'modelprobe', path: toolPath('modelprobe'), label: '模型探测', desc: 'API 渠道兼容性、参数降级与缓存实验台', icon: <IconProbe />, fullHeight: true, component: lazyComponents.modelprobe },
   { key: 'promptopt', path: toolPath('promptopt'), label: '提示词优化', desc: '结构化框架选型、系统提示词撰写与智能优化', icon: <IconPromptOpt />, fullHeight: false, component: lazyComponents.promptopt },

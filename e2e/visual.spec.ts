@@ -22,7 +22,7 @@ test('首页浅色视觉基线', async ({ page }) => {
   })
   await page.goto('/')
   await expect(page.getByRole('heading', { name: /工具集合/ })).toBeVisible()
-  await expect(page.locator('.home-card')).toHaveCount(14)
+  await expect(page.locator('.home-card')).toHaveCount(15)
   await expect(page).toHaveScreenshot('home-light.png', { animations: 'disabled' })
 })
 
