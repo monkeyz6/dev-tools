@@ -4,7 +4,7 @@ import { goto } from './helpers'
 test('Excel 上传生成报告', async ({ page }) => {
   await page.goto('/tools/llmreport')
   await page.getByRole('button', { name: 'Excel / CSV' }).click()
-  await page.locator('input[type=file]').setInputFiles('logs_archive_202607.xlsx')
+  await page.locator('input[type=file]').setInputFiles('e2e/fixtures/logs_archive_202607.xlsx')
   await page.getByRole('button', { name: '生成报告' }).click()
   await expect(page.getByText('LLM 日志性能分析报告')).toBeVisible()
   await expect(page.getByText('EXCEL', { exact: true })).toBeVisible()

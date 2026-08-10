@@ -203,8 +203,7 @@ const RENDER_JS = `
   // 头部
   var head = el('div');
   head.appendChild(el('div', 'eyebrow', 'LLM LOG REPORT · ' + esc(D.generatedAt.slice(0, 16).replace('T', ' '))));
-  head.appendChild(el('h1', null, 'LLM 日志性能分析报告' +
-    '<span class="badge">' + esc(D.source.kind === 'excel' ? 'EXCEL' : 'JSON') + '</span>' +
+  head.appendChild(el('h1', null, esc(D.title || 'LLM 日志性能分析报告') +
     (D.fail ? '<span class="badge" style="background:rgba(240,86,106,.15);color:#f0566a">失败 ' + D.fail + '</span>' : '')));
   var models = (D.models || []).slice(0, 5).join(' · ');
   head.appendChild(el('div', 'subline',
@@ -322,12 +321,13 @@ const RENDER_JS = `
 export function buildReportHtml(report: Report): string {
   // 内联数据 JSON 转义 `<`，避免 `</script>` 提前闭合
   const dataStr = JSON.stringify(report).replace(/</g, '\\u003c')
+  const docTitle = report.title || 'LLM 日志性能分析报告'
   return `<!doctype html>
 <html lang="zh-CN" data-theme="light">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>LLM 日志性能分析报告</title>
+<title>${docTitle}</title>
 <script>
 (function () {
   var t = 'light';
@@ -350,7 +350,13 @@ export function buildReportHtml(report: Report): string {
 export function reportFileName(report: Report): string {
   const d = new Date(report.timeStart * 1000)
   const pad = (n: number) => String(n).padStart(2, '0')
-  return `llm-report_${d.getFullYear()}${pad(d.getMonth() + 1)}${pad(d.getDate())}_${pad(d.getHours())}${pad(d.getMinutes())}.html`
+  const stamp = `${d.getFullYear()}${pad(d.getMonth() + 1)}${pad(d.getDate())}_${pad(d.getHours())}${pad(d.getMinutes())}`
+  const base = (report.title || 'llm-report')
+    .replace(/[\\/:*?"<>|]/g, '_')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .slice(0, 60) || 'llm-report'
+  return `${base}_${stamp}.html`
 }
 
 export function downloadReportHtml(report: Report): void {

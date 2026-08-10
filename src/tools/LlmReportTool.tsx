@@ -1,7 +1,7 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react'
 import { Btn, Label, Card, Badge, CustomTextarea, CustomInput, SegmentedControl, SectionTitle, CopyBtn } from '../shared/ui'
 import {
-  parseJsonText, parseExcelBuffer, buildReport, SAMPLE_JSON,
+  parseJsonText, parseExcelBuffer, buildReport, SAMPLE_JSON, DEFAULT_REPORT_TITLE,
   type Report,
 } from '../shared/llm-report'
 import {
@@ -136,13 +136,24 @@ function FailureDetails({ report }: { report: Report }) {
 
 // ─── 报告视图 ─────────────────────────────────────────────────────────────────
 
-function ReportView({ report, onBack }: { report: Report; onBack: () => void }) {
+function ReportView({ report, onBack, onRenameTitle }: {
+  report: Report; onBack: () => void; onRenameTitle: (t: string) => void
+}) {
   const models = report.models.slice(0, 5).join(' · ')
   const [exporting, setExporting] = useState(false)
+  const [editing, setEditing] = useState(false)
+  const [draft, setDraft] = useState(report.title)
   const onExport = useCallback(() => {
     setExporting(true)
     import('./LlmReportExport').then(m => m.downloadReportHtml(report)).finally(() => setExporting(false))
   }, [report])
+  const startEdit = () => { setDraft(report.title); setEditing(true) }
+  const saveTitle = () => {
+    const next = draft.trim() ? draft.trim() : DEFAULT_REPORT_TITLE
+    onRenameTitle(next)
+    setEditing(false)
+  }
+  const cancelEdit = () => { setDraft(report.title); setEditing(false) }
   return (
     <div className="flex flex-col gap-4">
       <Card>
@@ -150,9 +161,25 @@ function ReportView({ report, onBack }: { report: Report; onBack: () => void }) 
           <div className="min-w-0">
             <div className="text-[10.5px] font-bold tracking-[0.2em]" style={{ color: 'var(--accent)' }}>LLM LOG REPORT</div>
             <h3 className="mt-1 text-xl font-bold tracking-tight flex items-center gap-2 flex-wrap" style={{ color: 'var(--text)' }}>
-              LLM 日志性能分析报告
-              <Badge color={report.source.kind === 'excel' ? 'default' : 'ok'}>{report.source.kind === 'excel' ? 'EXCEL' : 'JSON'}</Badge>
-              {report.fail > 0 && <Badge color="err">失败 {report.fail}</Badge>}
+              {editing ? (
+                <>
+                  <CustomInput value={draft} onChange={setDraft} className="w-72" />
+                  <Btn small variant="primary" onClick={saveTitle}>✓ 保存</Btn>
+                  <Btn small variant="ghost" onClick={cancelEdit}>✕ 取消</Btn>
+                </>
+              ) : (
+                <>
+                  {report.title}
+                  <button
+                    onClick={startEdit}
+                    title="重命名报告标题"
+                    className="text-[11px] px-2 py-0.5 rounded-full border-0 cursor-pointer outline-none font-medium"
+                    style={{ background: 'var(--s2)', color: 'var(--t2)', fontFamily: 'inherit', border: '1px solid var(--border)' }}
+                  >✎ 重命名</button>
+                  <Badge color={report.source.kind === 'excel' ? 'default' : 'ok'}>{report.source.kind === 'excel' ? 'EXCEL' : 'JSON'}</Badge>
+                  {report.fail > 0 && <Badge color="err">失败 {report.fail}</Badge>}
+                </>
+              )}
             </h3>
             <div className="mt-1 text-xs leading-relaxed" style={{ color: 'var(--t2)' }}>
               <span className="font-mono">{models}</span>
@@ -190,6 +217,9 @@ function LlmReportTool() {
   const [mode, setMode] = useState<'json' | 'excel'>(() => {
     try { return localStorage.getItem(OPT_KEY) === 'excel' ? 'excel' : 'json' } catch { return 'json' }
   })
+  const [title, setTitle] = useState(() => {
+    try { return localStorage.getItem('llmreport-title') || DEFAULT_REPORT_TITLE } catch { return DEFAULT_REPORT_TITLE }
+  })
   const [jsonText, setJsonText] = useState('')
   const [fileName, setFileName] = useState('')
   const [fileBuf, setFileBuf] = useState<ArrayBuffer | null>(null)
@@ -202,6 +232,10 @@ function LlmReportTool() {
   useEffect(() => {
     try { localStorage.setItem(OPT_KEY, mode) } catch { /* noop */ }
   }, [mode])
+
+  useEffect(() => {
+    try { localStorage.setItem('llmreport-title', title) } catch { /* noop */ }
+  }, [title])
 
   const onFile = useCallback((f: File | undefined | null) => {
     if (!f) return
@@ -234,7 +268,7 @@ function LlmReportTool() {
       skipped: rows.skipped,
       fileName: mode === 'excel' ? fileName : undefined,
       concurrency: concurrency.trim() && Number.isFinite(cNum) && cNum > 0 ? cNum : undefined,
-    })
+    }, title)
     setReport(rep)
   }
 
@@ -248,7 +282,11 @@ function LlmReportTool() {
   if (report) {
     return (
       <div className="mx-auto px-6 py-10" style={{ maxWidth: 1180 }}>
-        <ReportView report={report} onBack={() => setReport(null)} />
+        <ReportView
+          report={report}
+          onBack={() => setReport(null)}
+          onRenameTitle={t => { setTitle(t); setReport(prev => (prev ? { ...prev, title: t } : prev)) }}
+        />
       </div>
     )
   }
@@ -257,11 +295,16 @@ function LlmReportTool() {
     <div className="mx-auto max-w-2xl px-6 py-12">
       <SectionTitle>LLM 报告生成</SectionTitle>
       <p className="text-sm mt-1 mb-6" style={{ color: 'var(--t2)' }}>
-        导入日志数据（JSON 粘贴或 Excel/CSV 文件），生成性能/稳定性分析报告：成功率、TTFT 延迟、时间趋势、流式对比与错误分布。
+        导入日志数据（JSON 粘贴或 Excel/CSV 文件），生成性能/稳定性分析报告：成功率、TTFT 延迟、时间趋势与错误分布。
       </p>
 
       <div className="grid gap-5">
         <Card>
+          <div className="mb-4">
+            <Label className="block mb-1">报告标题</Label>
+            <CustomInput value={title} onChange={setTitle} placeholder={DEFAULT_REPORT_TITLE} />
+          </div>
+
           <div className="flex items-center justify-between gap-3 mb-4">
             <SegmentedControl
               value={mode}
@@ -307,18 +350,18 @@ function LlmReportTool() {
             </>
           )}
 
-          {error && (
-            <div className="mt-4 rounded-xl px-4 py-3 flex items-start gap-2 text-sm" style={{ background: 'var(--errBg)', border: '1px solid var(--err)' }}>
-              <Badge color="err">错误</Badge>
-              <span style={{ color: 'var(--text)' }}>{error}</span>
-            </div>
-          )}
-          {note && !error && (
-            <div className="mt-4 rounded-xl px-4 py-3 flex items-start gap-2 text-sm" style={{ background: 'var(--okBg)', border: '1px solid var(--ok)' }}>
-              <Badge color="ok">提示</Badge>
-              <span style={{ color: 'var(--text)' }}>{note}</span>
-            </div>
-          )}
+          {/* 状态栏：常驻显示，错误/提示/空闲三态，避免内容变化时布局跳动 */}
+          <div
+            className="mt-4 rounded-xl px-4 py-3 flex items-start gap-2 text-sm transition-colors"
+            style={error
+              ? { background: 'var(--errBg)', border: '1px solid var(--err)' }
+              : note
+                ? { background: 'var(--okBg)', border: '1px solid var(--ok)' }
+                : { background: 'var(--s1)', border: '1px dashed var(--border)' }}
+          >
+            <Badge color={error ? 'err' : note ? 'ok' : 'default'}>{error ? '错误' : note ? '提示' : '状态'}</Badge>
+            <span style={{ color: error ? 'var(--err)' : 'var(--text)' }}>{error ?? note ?? '等待导入日志数据，点击「生成报告」开始分析'}</span>
+          </div>
 
           <div className="mt-4 flex items-end gap-3 flex-wrap">
             <div style={{ width: 140 }}>
@@ -337,7 +380,7 @@ function LlmReportTool() {
 
         <Card>
           <div className="text-xs font-semibold mb-2" style={{ color: 'var(--text)' }}>
-            支持的日志字段<span className="font-normal" style={{ color: 'var(--t3)' }}>（字段名大小写、下划线容错）</span>
+            支持的日志字段
           </div>
           <div className="overflow-x-auto">
             <table className="w-full text-xs" style={{ borderCollapse: 'collapse' }}>

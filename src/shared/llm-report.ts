@@ -59,8 +59,11 @@ export interface FailureItem {
 
 export type Granularity = 'minute' | 'hour' | 'day'
 
+export const DEFAULT_REPORT_TITLE = 'LLM 日志性能分析报告'
+
 export interface Report {
   generatedAt: string
+  title: string
   source: { kind: string; rows: number; skipped: number; fileName?: string; concurrency?: number }
   total: number
   ok: number
@@ -271,7 +274,7 @@ export function chooseGranularity(spanS: number): Granularity {
   return 'day'
 }
 
-export function buildReport(rows: LogRow[], source: Report['source']): Report {
+export function buildReport(rows: LogRow[], source: Report['source'], title?: string): Report {
   const total = rows.length
   const ok = rows.filter(r => r.ok).length
   const fail = total - ok
@@ -361,6 +364,7 @@ export function buildReport(rows: LogRow[], source: Report['source']): Report {
 
   return {
     generatedAt: new Date().toISOString(),
+    title: title?.trim() ? title.trim() : DEFAULT_REPORT_TITLE,
     source,
     total,
     ok,

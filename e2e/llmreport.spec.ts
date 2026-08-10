@@ -75,3 +75,22 @@ test('非法 JSON 提示错误', async ({ page }) => {
   await page.getByRole('button', { name: '生成报告' }).click()
   await expect(page.getByText('JSON 解析失败')).toBeVisible()
 })
+
+test('状态栏常驻显示：空闲时也可见', async ({ page }) => {
+  await page.goto('/tools/llmreport')
+  await expect(page.getByText('等待导入日志数据')).toBeVisible()
+})
+
+test('自定义标题生成并可在报告内重命名', async ({ page }) => {
+  await page.goto('/tools/llmreport')
+  const titleInput = page.locator('label:has-text("报告标题")').locator('..').locator('input')
+  await titleInput.fill('7月性能报告')
+  await page.getByRole('button', { name: '载入示例' }).click()
+  await page.getByRole('button', { name: '生成报告' }).click()
+  await expect(page.getByRole('heading', { name: /7月性能报告/ })).toBeVisible()
+  // 重命名
+  await page.getByRole('button', { name: /重命名/ }).click()
+  await page.locator('input').last().fill('改名后的标题')
+  await page.getByRole('button', { name: '✓ 保存' }).click()
+  await expect(page.getByRole('heading', { name: /改名后的标题/ })).toBeVisible()
+})
