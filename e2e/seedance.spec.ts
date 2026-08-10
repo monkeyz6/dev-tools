@@ -41,30 +41,20 @@ test.describe('Seedance 计费', () => {
     await expect(page.getByText(/单价/).first()).toBeVisible()
   })
 
-  test('海外 2.5 未填价时警告，填写后计算并持久化', async ({ page }) => {
+  test('海外 2.5 官方单价直接计算并展示', async ({ page }) => {
     await goto(page, /Seedance 计费/)
     await page.getByRole('button', { name: '海外', exact: true }).click()
-    await selectOption(page, '模型变体', 'dreamina-seedance-2-5')
+    await selectOption(page, '模型变体', 'dreamina-seedance-2-5-260628')
 
-    // 未填价 → 无法计算
-    await expect(page.getByText('无法计算')).toBeVisible()
-
-    // 展开默认收起的价目表，再填单价 → 出结果
-    await page.getByRole('button', { name: /价目表/ }).click()
-    await page.getByPlaceholder('不含视频', { exact: true }).fill('10')
-    await page.getByPlaceholder('含视频', { exact: true }).fill('6')
+    // 官方已公布价格，无需手填即可计算
     await expect(page.getByText(/^¥/).first()).toBeVisible()
+    await expect(page.getByText(/^\$/).first()).toBeVisible()
+    await expect(page.getByText(/单价/).first()).toBeVisible()
+    await expect(page.getByText(/\$10\.7/)).toBeVisible()
 
-    // 持久化到 localStorage
-    const stored = await page.evaluate(() => localStorage.getItem('seedance-intl-25-prices'))
-    expect(JSON.parse(stored!)).toEqual({ no: 10, yes: 6 })
-
-    // reload 后仍保留
-    await page.reload()
-    await page.getByRole('button', { name: '海外', exact: true }).click()
-    await selectOption(page, '模型变体', 'dreamina-seedance-2-5')
+    // 价目表中不再有手填输入框
     await page.getByRole('button', { name: /价目表/ }).click()
-    await expect(page.getByPlaceholder('不含视频', { exact: true })).toHaveValue('10')
-    await expect(page.getByPlaceholder('含视频', { exact: true })).toHaveValue('6')
+    await expect(page.getByPlaceholder('不含视频', { exact: true })).not.toBeVisible()
+    await expect(page.getByText('$10.7', { exact: false }).first()).toBeVisible()
   })
 })

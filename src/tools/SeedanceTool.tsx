@@ -4,7 +4,7 @@ import { IconChevron } from '../shared/icons'
 
 // ─── Seedance Pricing（每百万 Token 计费） ────────────────────────────────────
 // 国内：火山方舟官方定价（元/百万Token）。海外：BytePlus ModelArk 官方美元定价
-// （美元/百万Token）。海外 2.5 官方尚未公布，单价留空由用户填写并保存到本地。
+// （美元/百万Token）。海外 2.5 于 2026-08 官方公布：不含视频 $10.70、含视频 $6.40。
 
 type RegionKey = 'cn' | 'us'
 
@@ -12,7 +12,7 @@ interface TierPrice { no: number | null; yes: number | null }
 interface PriceTier { id: string; label: string; resolutions: string[]; price: TierPrice }
 interface ModelDef { name: string; desc: string; tiers: PriceTier[] }
 
-const INTL_25_KEY = 'dreamina-seedance-2-5'
+const INTL_25_KEY = 'dreamina-seedance-2-5-260628'
 const DEFAULT_RATE = 7
 
 type SeedCalcResult =
@@ -68,8 +68,8 @@ const SEEDANCE_PRICING: Record<RegionKey, Record<string, ModelDef>> = {
     },
     [INTL_25_KEY]: {
       name: INTL_25_KEY,
-      desc: '海外 2.5 官方单价尚未公布，可在价目表内手动填写（单位：美元/百万 Token），改动自动保存到本地。',
-      tiers: [{ id: 'flat', label: '480p/720p', resolutions: ['480p', '720p'], price: { no: null, yes: null } }],
+      desc: '2026-08 官方公布。当前最高支持 720p 输出，1080p/4K 暂未开放。',
+      tiers: [{ id: 'flat', label: '480p/720p', resolutions: ['480p', '720p'], price: { no: 10.7, yes: 6.4 } }],
     },
   },
 }
@@ -85,32 +85,6 @@ const fmtTotal = (n: number): string => n.toLocaleString('zh-CN', { maximumFract
 
 // ─── Tool: Seedance 计费 ───────────────────────────────────────────────────────
 
-function MiniNumInput({ value, placeholder, onChange }: {
-  value: number | null; placeholder: string; onChange: (v: number | null) => void
-}) {
-  const [focused, setFocused] = useState(false)
-  return (
-    <input
-      type="number"
-      value={value ?? ''}
-      placeholder={placeholder}
-      onChange={e => { const t = e.target.value.trim(); onChange(t === '' ? null : (parseFloat(t) || 0)) }}
-      onFocus={() => setFocused(true)}
-      onBlur={() => setFocused(false)}
-      onClick={e => e.stopPropagation()}
-      className="no-spinner w-20 text-right rounded-lg border-0 outline-none px-2 py-1 text-xs tabular-nums"
-      style={{
-        background: 'var(--inputBg)',
-        border: `1px solid ${focused ? 'var(--accent)' : 'var(--inputBorder)'}`,
-        boxShadow: focused ? '0 0 0 3px var(--accentSub)' : 'none',
-        color: 'var(--text)',
-        fontFamily: '"JetBrains Mono", "JetBrainsMono Nerd Font", "SF Mono", "Fira Code", "Fira Mono", "Roboto Mono", "Droid Sans Mono", "Cascadia Code", Consolas, "Courier New", monospace',
-        WebkitAppearance: 'none', MozAppearance: 'none',
-      }}
-    />
-  )
-}
-
 function SeedanceTool() {
   const [region, setRegion] = useState<RegionKey>('cn')
   const [model, setModel] = useState('doubao-seedance-2.0')
@@ -124,25 +98,15 @@ function SeedanceTool() {
     }
     return String(DEFAULT_RATE)
   })
-  const [userIntl25, setUserIntl25] = useState<{ no: number | null; yes: number | null } | null>(() => {
-    if (typeof window !== 'undefined') {
-      try {
-        const raw = localStorage.getItem('seedance-intl-25-prices')
-        if (!raw) return null
-        const p = JSON.parse(raw)
-        if (p && typeof p.no === 'number' && typeof p.yes === 'number') return { no: p.no, yes: p.yes }
-      } catch { /* ignore */ }
-    }
-    return null
-  })
   const [tableOpen, setTableOpen] = useState(false)
 
   useEffect(() => {
     localStorage.setItem('seedance-fx-rate', rate)
   }, [rate])
   useEffect(() => {
-    if (userIntl25) localStorage.setItem('seedance-intl-25-prices', JSON.stringify(userIntl25))
-  }, [userIntl25])
+    // 旧版本手填单价入口已移除（官方价格已公布），清理遗留数据
+    localStorage.removeItem('seedance-intl-25-prices')
+  }, [])
 
   const def = SEEDANCE_PRICING[region][model]
   const availableRes = def ? modelResolutions(def) : []
@@ -167,19 +131,9 @@ function SeedanceTool() {
     const tier = tierFor(def, resolution)
     if (!tier) return { ready: false, reason: '当前分辨率不在该模型支持范围内' }
 
-    const editable = region === 'us' && model === INTL_25_KEY
-    const price = editable && userIntl25
-      ? (hasVideo === '是' ? userIntl25.yes : userIntl25.no)
-      : (hasVideo === '是' ? tier.price.yes : tier.price.no)
+    const price = hasVideo === '是' ? tier.price.yes : tier.price.no
 
-    if (price == null) {
-      return {
-        ready: false,
-        reason: editable
-          ? '海外 2.5 单价未填写，请在下方价目表中补全（自动保存到本地）'
-          : '该档位暂无定价',
-      }
-    }
+    if (price == null) return { ready: false, reason: '该档位暂无定价' }
 
     const base = (tok / 1_000_000) * price
     return {
@@ -189,11 +143,7 @@ function SeedanceTool() {
       unitCN: region === 'cn' ? price : price * xr,
       unitUSD: region === 'us' ? price : price / xr,
     }
-  }, [region, model, resolution, hasVideo, tokens, rate, userIntl25])
-
-  const setIntl25Price = (k: 'no' | 'yes', v: number | null) => {
-    setUserIntl25(prev => ({ no: prev?.no ?? null, yes: prev?.yes ?? null, [k]: v }))
-  }
+  }, [region, model, resolution, hasVideo, tokens, rate])
 
   return (
     <div className="mx-auto max-w-2xl px-6 py-12">
@@ -294,7 +244,6 @@ function SeedanceTool() {
           {tableOpen && (
             <div style={{ borderTop: '1px solid var(--border)' }}>
               {Object.entries(SEEDANCE_PRICING[region]).map(([mk, md]) => {
-                const isEditable = region === 'us' && mk === INTL_25_KEY
                 const activeTierId = model === mk ? tierFor(md, resolution)?.id : null
                 return (
                   <div key={mk}>
@@ -303,18 +252,6 @@ function SeedanceTool() {
                     </div>
                     {md.tiers.map(tier => {
                       const isActive = mk === model && tier.id === activeTierId
-                      if (isEditable) {
-                        return (
-                          <div key={`${mk}:${tier.id}`} className="grid grid-cols-[1fr_auto_auto] items-center gap-3 px-4 py-2 text-xs"
-                            style={{ borderTop: '1px solid var(--border)' }}>
-                            <span className="font-medium" style={{ color: 'var(--text)' }}>{tier.label}</span>
-                            <MiniNumInput value={userIntl25?.no ?? null} placeholder="不含视频"
-                              onChange={v => setIntl25Price('no', v)} />
-                            <MiniNumInput value={userIntl25?.yes ?? null} placeholder="含视频"
-                              onChange={v => setIntl25Price('yes', v)} />
-                          </div>
-                        )
-                      }
                       return (
                         <button key={`${mk}:${tier.id}`} onClick={() => { onModelChange(mk); setResolution(tier.resolutions[0]) }}
                           className="w-full grid grid-cols-[1fr_auto_auto] items-center gap-3 px-4 py-2 text-xs border-0 outline-none cursor-pointer text-left transition-all duration-100 active:scale-[0.995]"
@@ -327,11 +264,6 @@ function SeedanceTool() {
                         </button>
                       )
                     })}
-                    {isEditable && (
-                      <div className="px-4 pb-2.5 text-[11px] leading-relaxed" style={{ color: 'var(--t3)' }}>
-                        海外 2.5 官方单价未公布，手动填写（美元/百万 Token）后自动保存到本地。
-                      </div>
-                    )}
                   </div>
                 )
               })}
