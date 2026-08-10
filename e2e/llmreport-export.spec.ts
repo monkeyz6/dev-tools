@@ -1,10 +1,32 @@
 import { test, expect } from '@playwright/test'
 import { goto } from './helpers'
+import * as os from 'node:os'
+import * as path from 'node:path'
+import * as fs from 'node:fs'
+
+// Excel 测试夹具：运行前动态生成（避免依赖工作区文件被外部清理），含数据 sheet + Query sheet
+const XLSX_PATH = path.join(os.tmpdir(), 'llmreport-logs_archive_202607.xlsx')
+test.beforeAll(async () => {
+  const XLSX = await import('xlsx')
+  const headers = ['id', 'user_id', 'created_at', 'type', 'content', 'username', 'token_name', 'model_name', 'quota', 'prompt_tokens', 'completion_tokens', 'use_time', 'is_stream', 'channel_id', 'channel_name', 'token_id', 'group', 'ip', 'request_id', 'upstream_request_id', 'other']
+  const rows = [
+    [46200553, 64, 1785318047, 2, '', 'yeshenyue', 'yeshenyue', 'qwen3.7-max', 519, 33, 191, 6, 1, 62, null, 329, 'PRO', '', 'r1', '', JSON.stringify({ request_path: '/v1/chat/completions', frt: 2659, stream_status: { end_reason: 'done', status: 'ok' } })],
+    [46200554, 64, 1785318048, 2, '', 'yeshenyue', 'yeshenyue', 'qwen3.7-max', 1858, 68, 700, 21, 1, 62, null, 329, 'PRO', '', 'r2', '', JSON.stringify({ request_path: '/v1/responses', frt: 3505, stream_status: { end_reason: 'eof', status: 'ok' } })],
+    [46200555, 64, 1785318053, 2, '', 'yeshenyue', 'yeshenyue', 'qwen3.7-max', 1393, 68, 519, 16, 1, 62, null, 329, 'PRO', '', 'r3', '', JSON.stringify({ request_path: '/v1/responses', frt: 2197, stream_status: { end_reason: 'eof', status: 'ok' } })],
+    [46200556, 64, 1785318054, 2, '', 'yeshenyue', 'yeshenyue', 'qwen3.7-max', 414, 33, 150, 6, 0, 62, null, 329, 'PRO', '', 'r4', '', JSON.stringify({ request_path: '/v1/chat/completions', frt: -1000 })],
+    [46200557, 64, 1785318060, 2, '', 'yeshenyue', 'yeshenyue', 'qwen3.7-max', 247, 33, 85, 3, 1, 62, null, 329, 'PRO', '', 'r5', '', JSON.stringify({ request_path: '/v1/chat/completions', frt: 1793, stream_status: { end_reason: 'done', status: 'ok' } })],
+    [46200558, 64, 1785318078, 2, '', 'yeshenyue', 'yeshenyue', 'qwen3.7-max', 1761, 378, 559, 16, 1, 62, null, 329, 'PRO', '', 'r6', '', JSON.stringify({ request_path: '/v1/messages', frt: 1543, stream_status: { end_reason: 'eof', status: 'ok' } })],
+  ]
+  const wb = XLSX.utils.book_new()
+  XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet([headers, ...rows]), 'Result 1')
+  XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet([['SELECT t.*'], ['FROM oinone_api.logs_archive_202607 t']]), 'Query')
+  XLSX.writeFile(wb, XLSX_PATH)
+})
 
 test('Excel 上传生成报告', async ({ page }) => {
   await page.goto('/tools/llmreport')
   await page.getByRole('button', { name: 'Excel / CSV' }).click()
-  await page.locator('input[type=file]').setInputFiles('e2e/fixtures/logs_archive_202607.xlsx')
+  await page.locator('input[type=file]').setInputFiles(XLSX_PATH)
   await page.getByRole('button', { name: '生成报告' }).click()
   await expect(page.getByText('LLM 日志性能分析报告')).toBeVisible()
   await expect(page.getByText('EXCEL', { exact: true })).toBeVisible()

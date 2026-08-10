@@ -12,7 +12,14 @@ export default defineConfig(({ mode }) => {
     base: '/',
     build: {
       sourcemap: emitSourcemaps ? 'inline' : false,
-      minify: !emitSourcemaps,
+      minify: emitSourcemaps ? false : 'terser',
+      terserOptions: emitSourcemaps
+        ? undefined
+        : {
+            mangle: true,
+            compress: true,
+            format: { comments: false },
+          },
     },
     plugins: [
       react(),
