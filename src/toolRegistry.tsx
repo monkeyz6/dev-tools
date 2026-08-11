@@ -2,10 +2,10 @@ import React, { lazy } from 'react'
 import SeedanceTool from './tools/SeedanceTool'
 import {
   IconSeedance, IconJson, IconClock, IconConvert, IconBatch, IconImgTest, IconProbe,
-  IconImage, IconVideo, IconId, IconCode, IconType, IconGraphql, IconPromptOpt, IconReport,
+  IconImage, IconVideo, IconId, IconCode, IconType, IconGraphql, IconPromptOpt, IconReport, IconMultiCost,
 } from './shared/icons'
 
-export type ToolKey = 'seedance' | 'json' | 'timestamp' | 'aiconvert' | 'llmbatch' | 'imgtest' | 'modelprobe' | 'promptopt'
+export type ToolKey = 'seedance' | 'multicost' | 'json' | 'timestamp' | 'aiconvert' | 'llmbatch' | 'imgtest' | 'modelprobe' | 'promptopt'
   | 'imganalyze' | 'videoanalyze' | 'idgen' | 'base64' | 'unicode' | 'graphql' | 'llmreport'
 export type ToolIntent = 'hover' | 'focus' | 'activate'
 export type ToolPath = `/tools/${ToolKey}`
@@ -29,6 +29,8 @@ export interface ToolDefinition {
   fullHeight: boolean
   component: React.ComponentType
   group: ToolGroupKey
+  /** 侧栏菜单名后追加 Beta 徽章 */
+  beta?: boolean
 }
 
 export function toolPath(key: ToolKey): ToolPath {
@@ -36,6 +38,7 @@ export function toolPath(key: ToolKey): ToolPath {
 }
 
 const loaders: Record<AsyncToolKey, ToolLoader> = {
+  multicost: () => import('./tools/MultiCostTool'),
   json: () => import('./tools/JsonTool'),
   timestamp: () => import('./tools/TimestampTool'),
   aiconvert: () => import('./tools/AiConvertTool'),
@@ -66,6 +69,7 @@ function loadToolModule(key: AsyncToolKey): Promise<ToolModule> {
 }
 
 const lazyComponents: Record<AsyncToolKey, React.LazyExoticComponent<React.ComponentType>> = {
+  multicost: lazy(() => loadToolModule('multicost')),
   json: lazy(() => loadToolModule('json')),
   timestamp: lazy(() => loadToolModule('timestamp')),
   aiconvert: lazy(() => loadToolModule('aiconvert')),
@@ -91,6 +95,7 @@ export const TOOL_GROUPS: { key: ToolGroupKey; label: string }[] = [
 export const TOOL_DEFINITIONS: ToolDefinition[] = [
   // AI 模型工具
   { key: 'seedance', path: toolPath('seedance'), label: 'Seedance 计费', desc: '视频生成模型计费计算器，人民币/美元自动换算', icon: <IconSeedance />, fullHeight: false, component: SeedanceTool, group: 'ai' },
+  { key: 'multicost', path: toolPath('multicost'), label: '图片视频计费', desc: '多模型图片/视频生成计费，双币种与 JSON 自动识别', icon: <IconMultiCost />, fullHeight: false, component: lazyComponents.multicost, group: 'ai', beta: true },
   { key: 'modelprobe', path: toolPath('modelprobe'), label: '模型探测', desc: 'API 渠道兼容性、参数降级与缓存实验台', icon: <IconProbe />, fullHeight: true, component: lazyComponents.modelprobe, group: 'ai' },
   { key: 'llmbatch', path: toolPath('llmbatch'), label: 'LLM 批量测试', desc: 'Token 计费口径、一致性、波动与模型验真', icon: <IconBatch />, fullHeight: true, component: lazyComponents.llmbatch, group: 'ai' },
   { key: 'llmreport', path: toolPath('llmreport'), label: 'LLM 报告生成', desc: '日志导入生成性能/稳定性分析报告，可导出 HTML', icon: <IconReport />, fullHeight: false, component: lazyComponents.llmreport, group: 'ai' },

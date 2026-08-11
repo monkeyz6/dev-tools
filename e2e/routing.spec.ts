@@ -3,6 +3,7 @@ import { test, expect } from '@playwright/test'
 const tools = [
   // AI 模型工具
   { key: 'seedance', label: 'Seedance 计费', heading: 'Seedance 计费计算器' },
+  { key: 'multicost', label: '图片视频计费', heading: '图片视频计费计算器' },
   { key: 'modelprobe', label: '模型探测', heading: '模型探测' },
   { key: 'llmbatch', label: 'LLM 批量测试', heading: 'LLM 批量测试 & 验真' },
   { key: 'llmreport', label: 'LLM 报告生成', heading: 'LLM 报告生成' },
@@ -34,7 +35,7 @@ test('根路径渲染首页且不重定向', async ({ page }) => {
   await expect(page).toHaveURL('/?from=legacy#old-route')
   await expect(page).toHaveTitle('Dev Toolkit · 前端工具箱')
   await expect(page.getByRole('heading', { name: /工具集合/ })).toBeVisible()
-  await expect(page.locator('.home-card')).toHaveCount(15)
+  await expect(page.locator('.home-card')).toHaveCount(16)
   await expect(page.locator('aside')).toHaveCount(0)
   const lengths = await page.evaluate(() => ({
     before: (window as Window & { historyLengthBeforeApp?: number }).historyLengthBeforeApp,
@@ -43,7 +44,7 @@ test('根路径渲染首页且不重定向', async ({ page }) => {
   expect(lengths.after).toBe(lengths.before)
 })
 
-test('15 个工具路径均可直接进入并同步标题与侧栏状态', async ({ page }) => {
+test('16 个工具路径均可直接进入并同步标题与侧栏状态', async ({ page }) => {
   for (const tool of tools) {
     await page.goto(`/tools/${tool.key}`)
     await expect(page).toHaveURL(`/tools/${tool.key}`)

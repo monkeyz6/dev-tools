@@ -371,7 +371,7 @@ export function Toggle({ value, onChange, label }: { value: boolean; onChange: (
 
 // Segmented control (replaces inline button groups)
 export function SegmentedControl({ value, options, onChange, className = '' }: {
-  value: string; options: { value: string; label: string }[]; onChange: (v: string) => void; className?: string
+  value: string; options: { value: string; label: string; icon?: React.ReactNode }[]; onChange: (v: string) => void; className?: string
 }) {
   return (
     <div className={`segmented-control inline-flex rounded-xl p-1 gap-1 ${className}`} style={{ background: 'var(--s2)', border: '1px solid var(--border)' }}>
@@ -381,7 +381,7 @@ export function SegmentedControl({ value, options, onChange, className = '' }: {
           <button
             key={o.value}
             onClick={() => onChange(o.value)}
-            className="segmented-option flex-1 px-3 py-1.5 text-sm font-medium rounded-lg cursor-pointer border-0 outline-none whitespace-nowrap"
+            className="segmented-option flex-1 px-3 py-1.5 text-sm font-medium rounded-lg cursor-pointer border-0 outline-none whitespace-nowrap inline-flex items-center justify-center gap-1.5"
             style={{
               background: active ? 'var(--bg)' : 'transparent',
               color: active ? 'var(--text)' : 'var(--t2)',
@@ -389,6 +389,7 @@ export function SegmentedControl({ value, options, onChange, className = '' }: {
               fontFamily: 'inherit',
             }}
           >
+            {o.icon ? <span className="shrink-0 inline-flex items-center justify-center">{o.icon}</span> : null}
             {o.label}
           </button>
         )

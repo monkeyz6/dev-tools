@@ -65,6 +65,7 @@
 | 工具 | 直达路径 | 说明 |
 |------|----------|------|
 | **Seedance 计费** | `/tools/seedance` | 火山方舟 / BytePlus ModelArk 视频生成模型计费计算器，自动计算人民币和美元 |
+| **图片视频计费**（Beta） | `/tools/multicost` | 多模型图片/视频生成计费：Seedance、Grok Image/Video、GPT Image、Gemini Image，双币种与粘贴 JSON 自动识别 |
 | **JSON 可视化** | `/tools/json` | 双栏 JSON 查看/编辑、折叠、行号与 A/B Diff 对比 |
 | **时间戳转换** | `/tools/timestamp` | 毫秒/秒/纳秒级时间戳与日期时间双向转换 |
 | **AI 格式转换** | `/tools/aiconvert` | OpenAI Chat、Anthropic Messages、OpenAI Responses 请求体互转 |

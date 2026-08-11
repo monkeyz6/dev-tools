@@ -6,9 +6,10 @@ test.beforeEach(async ({ page }) => {
 })
 
 test.describe('全局导航与主题', () => {
-  test('侧栏 14 个工具可逐个切换且渲染对应内容', async ({ page }) => {
+  test('侧栏 15 个工具可逐个切换且渲染对应内容', async ({ page }) => {
     const tools: [RegExp, string][] = [
       [/Seedance 计费/, 'Seedance 计费计算器'],
+      [/图片视频计费/, '图片视频计费计算器'],
       [/JSON 可视化/, 'JSON 可视化 & Diff'],
       [/时间戳转换/, '时间戳转换'],
       [/AI 格式转换/, 'AI 请求体格式转换'],

@@ -178,4 +178,50 @@ export function IconReport() {
   )
 }
 
+export function IconMultiCost() {
+  return (
+    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round">
+      <rect x="4.5" y="2.5" width="15" height="19" rx="2.5"/>
+      <line x1="8" y1="6.5" x2="16" y2="6.5"/>
+      <line x1="8" y1="11" x2="16" y2="11"/>
+      <line x1="8" y1="15" x2="16" y2="15"/>
+      <line x1="8" y1="18.5" x2="16" y2="18.5"/>
+    </svg>
+  )
+}
+export function IconGrokImage() {
+  return (
+    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round">
+      <rect x="2.5" y="3.5" width="19" height="17" rx="2.5"/>
+      <circle cx="8.5" cy="9" r="1.6"/>
+      <path d="m3.5 15.5 4.5-4.5 3 3 3-3 5.5 5"/>
+    </svg>
+  )
+}
+export function IconGrokVideo() {
+  return (
+    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round">
+      <rect x="2.5" y="4.5" width="19" height="15" rx="2.5"/>
+      <path d="M9.5 8.5v7l5.5-3.5-5.5-3.5z"/>
+    </svg>
+  )
+}
+export function IconGptImage() {
+  return (
+    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round">
+      <path d="M15 4l5 5-10.5 10.5H5.5v-4.5L15 4z"/>
+      <path d="M13 6.5l4.5 4.5"/>
+      <path d="M5.5 19.5h4"/>
+    </svg>
+  )
+}
+export function IconGeminiImage() {
+  return (
+    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round">
+      <path d="M12 3l1.8 5.2L19 10l-5.2 1.8L12 17l-1.8-5.2L5 10l5.2-1.8L12 3z"/>
+      <path d="M18.5 15l.9 2.6 2.6.9-2.6.9-.9 2.6-.9-2.6-2.6-.9 2.6-.9.9-2.6z"/>
+    </svg>
+  )
+}
+
 // ─── Utilities ────────────────────────────────────────────────────────────────

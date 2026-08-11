@@ -262,7 +262,12 @@ function Sidebar({ tool, onNavigate, onToolIntent, theme, setTheme, collapsed, o
                         style={{ background: active ? 'var(--accentSubHard)' : 'var(--s2)', color: active ? 'var(--accent)' : 'var(--t2)' }}>
                         {t.icon}
                       </span>
-                      {!collapsed && <span className="text-sm font-semibold leading-tight truncate" style={{ color: 'var(--text)' }}>{t.label}</span>}
+                      {!collapsed && (
+                        <span className="flex items-center gap-1.5 min-w-0">
+                          <span className="text-sm font-semibold leading-tight truncate" style={{ color: 'var(--text)' }}>{t.label}</span>
+                          {t.beta && <span className="beta-badge">Beta</span>}
+                        </span>
+                      )}
                     </div>
                   </a>
                 )
