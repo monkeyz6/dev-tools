@@ -218,7 +218,7 @@ test.describe('模型探测', () => {
   test('渠道 API Key 加密持久化：reload 后仍在，localStorage 无明文', async ({ page }) => {
     await goto(page, /模型探测/)
     await addChannel(page, { name: '测试渠道', apiKey: 'sk-enc-secret-abc123' })
-    await expect(page.getByText('测试渠道', { exact: true })).toBeVisible()
+    await expect(page.locator('div.pr-16', { hasText: '测试渠道' })).toBeVisible()
     await expect(page.getByText('✓ 当前使用')).toBeVisible()
 
     const stored = await page.evaluate(() => localStorage.getItem('modelprobe-channels'))
@@ -228,7 +228,7 @@ test.describe('模型探测', () => {
     await page.reload()
     await goto(page, /模型探测/)
     await page.getByRole('button', { name: /渠道管理/ }).click()
-    await expect(page.getByText('测试渠道', { exact: true })).toBeVisible()
+    await expect(page.locator('div.pr-16', { hasText: '测试渠道' })).toBeVisible()
     await expect(page.getByText('✓ 当前使用')).toBeVisible()
     await inputByLabel(page, '模型名称').fill('probe-model')
     await expect(page.getByRole('button', { name: /开始测试/ })).toBeEnabled()

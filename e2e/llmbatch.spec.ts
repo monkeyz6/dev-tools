@@ -224,7 +224,7 @@ test.describe('LLM 批量测试', () => {
   test('渠道 API Key 加密后持久化：reload 后仍在，localStorage 中不含明文', async ({ page }) => {
     await goto(page, /LLM 批量测试/)
     await addChannel(page, { name: '测试渠道', apiKey: 'sk-test-secret-abc123' })
-    await expect(page.getByText('测试渠道', { exact: true })).toBeVisible()
+    await expect(page.locator('div.pr-16', { hasText: '测试渠道' })).toBeVisible()
     await expect(page.getByText('✓ 当前使用')).toBeVisible()
 
     const stored = await page.evaluate(() => localStorage.getItem('llmbatch-channels'))
@@ -235,7 +235,7 @@ test.describe('LLM 批量测试', () => {
     await page.getByRole('link', { name: /LLM 批量测试/ }).first().click()
     await page.getByRole('button', { name: /渠道管理/ }).click()
     // reload 后渠道列表与「当前使用」状态仍从 localStorage 正确恢复
-    await expect(page.getByText('测试渠道', { exact: true })).toBeVisible()
+    await expect(page.locator('div.pr-16', { hasText: '测试渠道' })).toBeVisible()
     await expect(page.getByText('✓ 当前使用')).toBeVisible()
     await expect(page.getByRole('button', { name: /开始批量请求/ })).toBeEnabled()
   })

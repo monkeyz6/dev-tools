@@ -415,7 +415,7 @@ function PromptOptTool() {
         <div className="flex items-center gap-3 flex-wrap">
           <div className="w-full sm:w-96 flex-shrink-0">
             <Label className="block mb-1.5">使用渠道</Label>
-            <CustomSelect value={activeChId ?? ''} onChange={v => setActiveChId(v)} options={channels.map(c => ({ value: c.id, label: `${c.name} — ${c.baseUrl} · ${c.model}` }))} />
+            <CustomSelect value={activeChId ?? ''} onChange={v => setActiveChId(v)} options={channels.map(c => ({ value: c.id, label: c.name }))} />
           </div>
           <div className="ml-auto">
             <Btn variant="soft" onClick={() => setShowChannels(s => !s)}>

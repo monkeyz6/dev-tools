@@ -1272,7 +1272,7 @@ function ImgApiTestTool() {
         <div className="flex flex-col gap-3">
           <div>
             <Label className="block mb-1.5">使用渠道</Label>
-            <CustomSelect value={activeChId ?? ''} onChange={v => setActiveChId(v)} options={channels.map(c => ({ value: c.id, label: `${c.name} — ${c.baseUrl}` }))} />
+            <CustomSelect value={activeChId ?? ''} onChange={v => setActiveChId(v)} options={channels.map(c => ({ value: c.id, label: c.name }))} />
             {channels.length === 0 && <p className="text-xs mt-1.5" style={{ color: 'var(--warn)' }}>⚠ 请先到「渠道管理」标签页添加渠道。</p>}
           </div>
           <div>

@@ -47,7 +47,7 @@ test.describe('提示词优化', () => {
 
     await inputByLabel(page, 'apiKey').fill('sk-test-key-123')
     await page.getByRole('button', { name: '保存渠道' }).click()
-    await expect(page.getByText('测试渠道', { exact: true })).toBeVisible()
+    await expect(page.locator('div.pr-16', { hasText: '测试渠道' })).toBeVisible()
     await expect(page.getByText('gpt-4o-mini', { exact: true })).toBeVisible()
 
     const stored = await page.evaluate(() => localStorage.getItem('promptopt-channels'))
