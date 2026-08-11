@@ -1,21 +1,24 @@
 import { test, expect } from '@playwright/test'
 
 const tools = [
+  // AI 模型工具
   { key: 'seedance', label: 'Seedance 计费', heading: 'Seedance 计费计算器' },
-  { key: 'json', label: 'JSON 可视化', heading: 'JSON 可视化 & Diff' },
-  { key: 'timestamp', label: '时间戳转换', heading: '时间戳转换' },
-  { key: 'aiconvert', label: 'AI 格式转换', heading: 'AI 请求体格式转换' },
+  { key: 'modelprobe', label: '模型探测', heading: '模型探测' },
   { key: 'llmbatch', label: 'LLM 批量测试', heading: 'LLM 批量测试 & 验真' },
   { key: 'llmreport', label: 'LLM 报告生成', heading: 'LLM 报告生成' },
   { key: 'imgtest', label: '图片接口测试', text: '本次测试配置' },
-  { key: 'modelprobe', label: '模型探测', heading: '模型探测' },
-  { key: 'promptopt', label: '提示词优化', heading: '提示词优化' },
   { key: 'imganalyze', label: '图片信息识别', heading: '图片信息识别器' },
   { key: 'videoanalyze', label: '视频信息检测', heading: '视频信息检测' },
-  { key: 'idgen', label: 'ID 生成器', heading: 'ID 生成器' },
+  // 数据格式工具
+  { key: 'json', label: 'JSON 可视化', heading: 'JSON 可视化 & Diff' },
+  { key: 'graphql', label: 'GraphQL 格式化', heading: 'GraphQL 格式化' },
+  { key: 'aiconvert', label: 'AI 格式转换', heading: 'AI 请求体格式转换' },
+  // 编码与辅助工具
   { key: 'base64', label: 'Base64 编解码', heading: 'Base64 编解码' },
   { key: 'unicode', label: 'Unicode 转换', heading: 'Unicode 转换' },
-  { key: 'graphql', label: 'GraphQL 格式化', heading: 'GraphQL 格式化' },
+  { key: 'timestamp', label: '时间戳转换', heading: '时间戳转换' },
+  { key: 'promptopt', label: '提示词优化', heading: '提示词优化' },
+  { key: 'idgen', label: 'ID 生成器', heading: 'ID 生成器' },
 ] as const
 
 test.beforeEach(async ({ page }) => {

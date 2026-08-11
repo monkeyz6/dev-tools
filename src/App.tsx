@@ -2,7 +2,7 @@ import React, { Suspense, useCallback, useEffect, useRef, useState } from 'react
 import HomePage from './HomePage'
 import { IconCheck, IconSettings } from './shared/icons'
 import {
-  TOOL_DEFINITIONS, preloadTool, resolveToolRoute,
+  TOOL_DEFINITIONS, TOOL_GROUP_SECTIONS, preloadTool, resolveToolRoute,
   type ToolIntent, type ToolKey, type ToolRoute,
 } from './toolRegistry'
 
@@ -228,41 +228,48 @@ function Sidebar({ tool, onNavigate, onToolIntent, theme, setTheme, collapsed, o
       </div>
 
       {/* Nav */}
-      <nav className={"flex-1 overflow-y-auto " + (collapsed ? "px-1.5" : "px-3")}>
-        <div className="flex flex-col gap-0.5">
-          {TOOL_DEFINITIONS.map(t => {
-            const active = tool === t.key
-            return (
-              <a key={t.key}
-                href={t.path}
-                data-tool-key={t.key}
-                onPointerEnter={e => scheduleHover(t.key, e.pointerType)}
-                onPointerLeave={cancelHover}
-                onFocus={() => onToolIntent(t.key, 'focus')}
-                onPointerDown={() => onToolIntent(t.key, 'activate')}
-                onClick={event => {
-                  cancelHover()
-                  if (!shouldHandleClientNavigation(event)) return
-                  event.preventDefault()
-                  onToolIntent(t.key, 'activate')
-                  onNavigate(t.key)
-                }}
-                title={collapsed ? t.label : undefined}
-                aria-current={active ? 'page' : undefined}
-                className={"sb-nav-item block w-full text-left px-3 py-2.5 rounded-xl cursor-pointer border-0 outline-none no-underline " + (collapsed ? "flex justify-center !px-0 " : "") + (active ? "sb-nav-item-active" : "")}
-                style={{ fontFamily: 'inherit' }}
-              >
-                <div className="flex items-center gap-3">
-                  <span className="sb-nav-icon w-7 h-7 rounded-lg flex items-center justify-center flex-shrink-0"
-                    style={{ background: active ? 'var(--accentSubHard)' : 'var(--s2)', color: active ? 'var(--accent)' : 'var(--t2)' }}>
-                    {t.icon}
-                  </span>
-                  {!collapsed && <span className="text-sm font-semibold leading-tight truncate" style={{ color: 'var(--text)' }}>{t.label}</span>}
-                </div>
-              </a>
-            )
-          })}
-        </div>
+      <nav className={"sb-nav flex-1 overflow-y-auto " + (collapsed ? "sb-nav-collapsed px-1.5" : "px-3")}>
+        {TOOL_GROUP_SECTIONS.map(group => (
+          <div key={group.key} className="sb-nav-group" role="group" aria-label={group.label}>
+            {!collapsed && (
+              <p className="sb-nav-group-title px-3" aria-hidden="true" style={{ color: 'var(--t3)', letterSpacing: '0.08em' }}>{group.label}</p>
+            )}
+            <div className="flex flex-col gap-0.5">
+              {group.tools.map(t => {
+                const active = tool === t.key
+                return (
+                  <a key={t.key}
+                    href={t.path}
+                    data-tool-key={t.key}
+                    onPointerEnter={e => scheduleHover(t.key, e.pointerType)}
+                    onPointerLeave={cancelHover}
+                    onFocus={() => onToolIntent(t.key, 'focus')}
+                    onPointerDown={() => onToolIntent(t.key, 'activate')}
+                    onClick={event => {
+                      cancelHover()
+                      if (!shouldHandleClientNavigation(event)) return
+                      event.preventDefault()
+                      onToolIntent(t.key, 'activate')
+                      onNavigate(t.key)
+                    }}
+                    title={collapsed ? t.label : undefined}
+                    aria-current={active ? 'page' : undefined}
+                    className={"sb-nav-item block w-full text-left px-3 py-2.5 rounded-xl cursor-pointer border-0 outline-none no-underline " + (collapsed ? "flex justify-center !px-0 " : "") + (active ? "sb-nav-item-active" : "")}
+                    style={{ fontFamily: 'inherit' }}
+                  >
+                    <div className="flex items-center gap-3">
+                      <span className="sb-nav-icon w-7 h-7 rounded-lg flex items-center justify-center flex-shrink-0"
+                        style={{ background: active ? 'var(--accentSubHard)' : 'var(--s2)', color: active ? 'var(--accent)' : 'var(--t2)' }}>
+                        {t.icon}
+                      </span>
+                      {!collapsed && <span className="text-sm font-semibold leading-tight truncate" style={{ color: 'var(--text)' }}>{t.label}</span>}
+                    </div>
+                  </a>
+                )
+              })}
+            </div>
+          </div>
+        ))}
       </nav>
 
       {/* Footer */}
