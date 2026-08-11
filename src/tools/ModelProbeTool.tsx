@@ -2,6 +2,7 @@ import React, { useState, useCallback, useRef, useEffect, useLayoutEffect, useMe
 import { Btn, Label, Card, Badge, CustomInput, CustomSelect, SearchableSelect, CustomTextarea, Toggle, SegmentedControl, SectionTitle, CopyBtn } from '../shared/ui'
 import { highlightJson } from '../shared/json'
 import { decryptLlmApiKey, encryptLlmApiKey } from '../shared/api-key-crypto'
+import { historyDbGetAll, historyDbPutOne, historyDbDeleteOne, historyDbDeleteMany, historyDbClear, historyDbMigrateFromLocalStorage } from '../shared/history-db'
 
 // ─── Tool: 模型探测 ─────────────────────────────────────────────────────────────
 // 定位：API 渠道兼容性实验台 —— 三种协议格式 × 参数/流式/缓存/Token 计数稳定性，
@@ -374,33 +375,31 @@ async function probeBuildCfgFromChannel(ch: ProbeChannel, model: string, timeout
   }
 }
 
-function loadProbeHistory(): ProbeReport[] {
-  if (typeof window === 'undefined') return []
-  try {
-    const raw = localStorage.getItem(PROBE_HISTORY_KEY)
-    const list = raw ? JSON.parse(raw) : []
-    return Array.isArray(list) ? list : []
-  } catch { return [] }
+// 历史记录存于共享 IndexedDB（dev-toolkit-history / modelprobe store），不再整份塞进
+// localStorage：老版本会在配额超限时静默从最旧记录开始裁剪，极端情况下只剩最新 1 条。
+async function probeHistMigrateOnce(): Promise<void> {
+  await historyDbMigrateFromLocalStorage<ProbeReport>('modelprobe', PROBE_HISTORY_KEY)
 }
-function saveProbeHistory(rep: ProbeReport): ProbeReport[] {
-  let list = [rep, ...loadProbeHistory()]
-  while (list.length > PROBE_HISTORY_MAX) list.pop()
-  while (typeof window !== 'undefined') {
-    try { localStorage.setItem(PROBE_HISTORY_KEY, JSON.stringify(list)); break }
-    catch {
-      if (list.length > 1) list.pop()
-      else { try { localStorage.removeItem(PROBE_HISTORY_KEY) } catch { /* ignore */ }; break }
-    }
+async function loadProbeHistory(): Promise<ProbeReport[]> {
+  const list = await historyDbGetAll<ProbeReport>('modelprobe')
+  return list.sort((a, b) => b.completedAt.localeCompare(a.completedAt))
+}
+async function saveProbeHistory(rep: ProbeReport): Promise<ProbeReport[]> {
+  await historyDbPutOne('modelprobe', rep)
+  let list = await loadProbeHistory()
+  if (list.length > PROBE_HISTORY_MAX) {
+    const overflow = list.slice(PROBE_HISTORY_MAX)
+    await historyDbDeleteMany('modelprobe', overflow.map(r => r.id))
+    list = list.slice(0, PROBE_HISTORY_MAX)
   }
   return list
 }
-function deleteProbeHistory(id: string): ProbeReport[] {
-  const list = loadProbeHistory().filter(r => r.id !== id)
-  try { localStorage.setItem(PROBE_HISTORY_KEY, JSON.stringify(list)) } catch { /* ignore */ }
-  return list
+async function deleteProbeHistory(id: string): Promise<ProbeReport[]> {
+  await historyDbDeleteOne('modelprobe', id)
+  return loadProbeHistory()
 }
-function clearProbeHistory() {
-  try { localStorage.removeItem(PROBE_HISTORY_KEY) } catch { /* ignore */ }
+async function clearProbeHistory(): Promise<void> {
+  await historyDbClear('modelprobe')
 }
 function probeDownload(content: string, type: string, name: string) {
   const blob = new Blob([content], { type })
@@ -625,7 +624,7 @@ function ModelProbeTool() {
   const [nameModal, setNameModal] = useState(false)
   const [testName, setTestName] = useState('')
   const [report, setReport] = useState<ProbeReport | null>(null)
-  const [history, setHistory] = useState<ProbeReport[]>(() => loadProbeHistory())
+  const [history, setHistory] = useState<ProbeReport[]>([])
   const [logs, setLogs] = useState<ProbeLog[]>([])
   const [logFilter, setLogFilter] = useState('all')
   const [openLogs, setOpenLogs] = useState<Record<string, boolean>>({})
@@ -638,6 +637,16 @@ function ModelProbeTool() {
   const logsRef = useRef<ProbeLog[]>([])
   const stopRef = useRef(false)
   const activeAbortRef = useRef<AbortController | null>(null)
+
+  useEffect(() => {
+    let cancelled = false
+    ;(async () => {
+      await probeHistMigrateOnce()
+      const list = await loadProbeHistory()
+      if (!cancelled) setHistory(list)
+    })()
+    return () => { cancelled = true }
+  }, [])
 
   const pushLog = (log: ProbeLog) => {
     logsRef.current.push(log)
@@ -1101,7 +1110,7 @@ function ModelProbeTool() {
         results: resultsObj, summary, logs: logsRef.current,
       }
       setReport(rep)
-      setHistory(saveProbeHistory({ ...rep, logs: [] }))
+      setHistory(await saveProbeHistory({ ...rep, logs: [] }))
       setRunning(false)
       setProgress({ done: total, total, label: '测试完成' })
       setPane('report')
@@ -1460,7 +1469,7 @@ function ModelProbeTool() {
               <div className="p-6">
                 <div className="flex items-center justify-between mb-4">
                   <p className="text-sm" style={{ color: 'var(--t2)' }}>已存 {history.length} / {PROBE_HISTORY_MAX} 条历史报告</p>
-                  {history.length > 0 && <Btn small variant="danger" onClick={() => { clearProbeHistory(); setHistory([]) }}>清空历史</Btn>}
+                  {history.length > 0 && <Btn small variant="danger" onClick={() => { setHistory([]); clearProbeHistory().catch(() => {}) }}>清空历史</Btn>}
                 </div>
                 {history.length === 0 ? (
                   <div className="py-16 text-center text-sm" style={{ color: 'var(--t3)' }}>暂无历史报告，完成一轮测试后自动入库</div>
@@ -1479,7 +1488,7 @@ function ModelProbeTool() {
                         <div className="flex gap-2 flex-shrink-0">
                           <Btn small variant="soft" onClick={() => viewHistoryReport(h)}>查看</Btn>
                           <Btn small variant="soft" onClick={() => reuseHistoryConfig(h)}>回填配置</Btn>
-                          <Btn small variant="ghost" onClick={() => setHistory(deleteProbeHistory(h.id))}>删除</Btn>
+                          <Btn small variant="ghost" onClick={() => { deleteProbeHistory(h.id).then(setHistory) }}>删除</Btn>
                         </div>
                       </div>
                     ))}

@@ -24,3 +24,23 @@ export async function goto(page: Page, navText: RegExp | string): Promise<void> 
   await page.goto('/')
   await page.getByRole('link', { name: navText }).first().click()
 }
+
+/**
+ * 读取共享历史记录 IndexedDB（dev-toolkit-history）里某个工具的 store 全部记录。
+ * LLM 批量测试 / 模型探测 / 图片接口测试的历史记录都已从 localStorage 迁移到这里，
+ * store 名分别是 'llmbatch' / 'modelprobe' / 'imgtest'。
+ */
+export function readHistoryStore(page: Page, store: string): Promise<any[]> {
+  return page.evaluate(store => new Promise<any[]>((resolve, reject) => {
+    const req = indexedDB.open('dev-toolkit-history')
+    req.onsuccess = () => {
+      const db = req.result
+      if (!db.objectStoreNames.contains(store)) { resolve([]); return }
+      const tx = db.transaction(store, 'readonly')
+      const getReq = tx.objectStore(store).getAll()
+      getReq.onsuccess = () => resolve(getReq.result)
+      getReq.onerror = () => reject(getReq.error)
+    }
+    req.onerror = () => reject(req.error)
+  }), store)
+}

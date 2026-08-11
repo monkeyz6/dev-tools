@@ -1,5 +1,5 @@
 import { test, expect } from '@playwright/test'
-import { goto, inputByLabel, fieldOf } from './helpers'
+import { goto, inputByLabel, fieldOf, readHistoryStore } from './helpers'
 
 test.beforeEach(async ({ page }) => {
   // 仅在标签页首次加载时清空 localStorage；reload 不再清，便于测试历史报告持久化
@@ -193,9 +193,8 @@ test.describe('LLM 批量测试', () => {
     await page.getByRole('button', { name: /开始批量请求/ }).click()
     await expect(page.locator('main')).toContainText('总请求')
 
-    const stored = await page.evaluate(() => localStorage.getItem('llmbatch-history'))
-    expect(stored).toBeTruthy()
-    expect(JSON.parse(stored!)).toHaveLength(1)
+    const stored = await readHistoryStore(page, 'llmbatch')
+    expect(stored).toHaveLength(1)
 
     await page.reload()
     await page.getByRole('link', { name: /LLM 批量测试/ }).first().click()
@@ -219,6 +218,33 @@ test.describe('LLM 批量测试', () => {
       page.getByRole('button', { name: '导出 CSV' }).click(),
     ])
     expect(download.suggestedFilename()).toMatch(/^report_\d{8}_\d{6}\.csv$/)
+  })
+
+  // 回归用例：html2canvas 1.x 无法解析 color-mix()/color() 等现代 CSS 颜色函数（Tailwind v4
+  // 主题大量使用），导出图片/HTML/PDF 曾经全部静默失败且完全没有测试覆盖到；已换成兼容新
+  // CSS 颜色函数的 html2canvas-pro，这里锁定三种格式都能正常触发下载、不再弹失败提示。
+  test('报告支持导出图片 / HTML / PDF（html2canvas-pro）', async ({ page }) => {
+    const dialogs: string[] = []
+    page.on('dialog', async d => { dialogs.push(d.message()); await d.dismiss() })
+
+    await page.route('**/v1/messages', route =>
+      route.fulfill({ status: 200, contentType: 'application/json', body: ANTHROPIC_OK_BODY('claude-3-5-sonnet-20241022', 9, 4) }))
+
+    await goto(page, /LLM 批量测试/)
+    await addChannel(page, { apiKey: 'sk-test' })
+    await fieldOf(page, '每模型次数 N').locator('input').fill('1')
+    await page.getByRole('button', { name: /开始批量请求/ }).click()
+    await expect(page.locator('main')).toContainText('总请求')
+
+    for (const [label, ext] of [['导出图片', 'png'], ['导出 HTML', 'html'], ['导出 PDF', 'pdf']] as const) {
+      await page.getByRole('button', { name: /^导出/ }).click()
+      const [download] = await Promise.all([
+        page.waitForEvent('download'),
+        page.getByRole('button', { name: label }).click(),
+      ])
+      expect(download.suggestedFilename().endsWith('.' + ext)).toBe(true)
+    }
+    expect(dialogs).toEqual([]) // 三种格式都没有触发失败提示的 alert
   })
 
   test('渠道 API Key 加密后持久化：reload 后仍在，localStorage 中不含明文', async ({ page }) => {
@@ -314,7 +340,7 @@ test.describe('LLM 批量测试', () => {
 
     expect(seenBody.stream_options).toEqual({ include_usage: true })
 
-    const stored = JSON.parse((await page.evaluate(() => localStorage.getItem('llmbatch-history')))!)
+    const stored = await readHistoryStore(page, 'llmbatch')
     const result = stored[0].results[0]
     expect(result.status).toBe('ok')
     expect(result.inputTokens).toBe(15)
@@ -351,7 +377,7 @@ test.describe('LLM 批量测试', () => {
     // include_usage 被强制合并为 true，且未破坏 stream_options 里其它已存在的子字段结构
     expect(seenBody.stream_options.include_usage).toBe(true)
 
-    const stored = JSON.parse((await page.evaluate(() => localStorage.getItem('llmbatch-history')))!)
+    const stored = await readHistoryStore(page, 'llmbatch')
     const result = stored[0].results[0]
     expect(result.inputTokens).toBe(12)
     expect(result.outputTokens).toBe(4)
@@ -379,7 +405,7 @@ test.describe('LLM 批量测试', () => {
     await expect(main).toContainText('成功 1') // 请求本身仍算成功，不因缺 usage 而判失败
     await expect(main).toContainText('⚠ 流式响应未包含 usage 数据')
 
-    const stored = JSON.parse((await page.evaluate(() => localStorage.getItem('llmbatch-history')))!)
+    const stored = await readHistoryStore(page, 'llmbatch')
     const result = stored[0].results[0]
     expect(result.status).toBe('ok')
     expect(result.inputTokens).toBeNull()

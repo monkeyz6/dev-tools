@@ -1,5 +1,6 @@
 import React, { useState, useCallback, useRef, useEffect, useLayoutEffect, useMemo, useDeferredValue } from 'react'
 import { Btn, Label, Card, Badge, CustomInput, CustomSelect, SearchableSelect, CustomTextarea, Toggle, SegmentedControl, SectionTitle, CopyBtn } from '../shared/ui'
+import { historyDbGetAll, historyDbPutOne, historyDbDeleteOne, historyDbDeleteMany, historyDbClear, historyDbMigrateFromLocalStorage } from '../shared/history-db'
 
 // ─── Tool: 图片接口测试 ─────────────────────────────────────────────────────────
 
@@ -335,26 +336,19 @@ function imgLoadChannels(): ImgChannel[] {
   } catch { /* ignore */ }
   return []
 }
-function imgLoadHistory(): ImgRecord[] {
-  if (typeof window === 'undefined') return []
-  try {
-    const raw = localStorage.getItem(IMG_HIST_KEY)
-    if (raw) {
-      const l = JSON.parse(raw)
-      if (Array.isArray(l)) return l.map(imgMigrateHistoryRecord)
-    }
-  } catch { /* ignore */ }
-  return []
+// 历史记录存于共享 IndexedDB（dev-toolkit-history / imgtest store），不再整份塞进
+// localStorage：老版本会在配额超限时静默从最旧记录开始裁剪，极端情况下只剩最新 1 条。
+async function imgHistMigrateOnce(): Promise<void> {
+  await historyDbMigrateFromLocalStorage<ImgRecord>('imgtest', IMG_HIST_KEY, imgMigrateHistoryRecord)
 }
-function imgPersistHistory(list: ImgRecord[]): ImgRecord[] {
-  let cur = [...list]
-  for (;;) {
-    try { localStorage.setItem(IMG_HIST_KEY, JSON.stringify(cur)); return cur }
-    catch {
-      if (cur.length === 0) return cur
-      cur = cur.slice(0, -1)
-    }
-  }
+async function imgLoadHistory(): Promise<ImgRecord[]> {
+  const list = await historyDbGetAll<ImgRecord>('imgtest')
+  return list.map(imgMigrateHistoryRecord).sort((a, b) => b.time - a.time)
+}
+async function imgHistTrim(maxCount: number): Promise<void> {
+  const list = await imgLoadHistory()
+  const overflow = list.slice(maxCount)
+  if (overflow.length) await historyDbDeleteMany('imgtest', overflow.map(r => r.id))
 }
 function imgLoadUi(): { apiType?: ImgApiType; model?: string; prompt?: string } {
   if (typeof window === 'undefined') return {}
@@ -735,6 +729,75 @@ function imgMakeSentPreview(plan: ImgPlan): string {
   return JSON.stringify({ _multipart: true, fields: truncate(plan.multipart!.fields), images: `[${plan.multipart!.images.length} 张参考图 blob]` }, null, 2)
 }
 
+// ─── 导出：HTML 报告 / 图片（DOM 截图模式，参考 LlmBatchTool.tsx 的 html2canvas 套路）─
+// 导出内容严禁包含明文 apiKey：渠道标识只用 ImgRecord.channelName（不含 baseUrl），
+// 从不调用 imgDecryptApiKey；已发送请求体/响应头/响应体的展示逻辑（renderResultBody）
+// 本来就只用占位符 {{APIKEY}}，不会回显真实 key。
+
+function imgDownloadBlob(name: string, blob: Blob) {
+  const a = document.createElement('a')
+  a.href = URL.createObjectURL(blob)
+  a.download = name
+  document.body.appendChild(a)
+  a.click()
+  setTimeout(() => { URL.revokeObjectURL(a.href); a.remove() }, 500)
+}
+function imgDownloadText(name: string, content: string, mime: string) {
+  imgDownloadBlob(name, new Blob([content], { type: mime }))
+}
+function imgWithExpandedScrollAreas<T>(root: HTMLElement, fn: () => Promise<T>): Promise<T> {
+  const els = Array.from(root.querySelectorAll<HTMLElement>('[data-export-scroll]'))
+  const saved = els.map(el => ({ maxHeight: el.style.maxHeight, overflowY: el.style.overflowY, overflowX: el.style.overflowX }))
+  els.forEach(el => { el.style.maxHeight = 'none'; el.style.overflowY = 'visible'; el.style.overflowX = 'visible' })
+  return fn().finally(() => els.forEach((el, i) => { el.style.maxHeight = saved[i].maxHeight; el.style.overflowY = saved[i].overflowY; el.style.overflowX = saved[i].overflowX }))
+}
+async function imgCaptureReportCanvas(rootEl: HTMLElement): Promise<HTMLCanvasElement> {
+  // html2canvas 1.x 无法解析 color-mix()/color() 等现代 CSS 颜色函数（Tailwind v4 主题大量
+  // 使用，getComputedStyle 会把它们解析成 html2canvas 看不懂的 color(...) 语法直接抛异常），
+  // 用兼容新 CSS 颜色函数的社区 fork html2canvas-pro 替代，API 完全兼容
+  const { default: html2canvas } = await import('html2canvas-pro')
+  return imgWithExpandedScrollAreas(rootEl, () => html2canvas(rootEl, {
+    backgroundColor: getComputedStyle(rootEl).getPropertyValue('--bg').trim() || '#ffffff',
+    scale: Math.min(2, window.devicePixelRatio || 1),
+    useCORS: true,
+    ignoreElements: el => el.hasAttribute('data-html2canvas-ignore'),
+  }))
+}
+async function imgExportAsImage(rootEl: HTMLElement, filename: string) {
+  try {
+    const canvas = await imgCaptureReportCanvas(rootEl)
+    canvas.toBlob(blob => { if (blob) imgDownloadBlob(filename, blob) }, 'image/png')
+  } catch (e) {
+    console.error('[imgExportAsImage]', e)
+    window.alert('导出图片失败，请稍后重试。')
+  }
+}
+async function imgExportAsHtml(rootEl: HTMLElement, filename: string) {
+  try {
+    await imgWithExpandedScrollAreas(rootEl, async () => {
+      const clone = rootEl.cloneNode(true) as HTMLElement
+      clone.querySelectorAll('[data-html2canvas-ignore]').forEach(el => el.remove())
+      const varNames = ['bg', 's1', 's2', 'border', 'borderHard', 'text', 't2', 't3', 'accent', 'accentFg', 'accentSub', 'accentSubHard', 'primary', 'primaryFg', 'sidebar', 'code', 'shadow', 'shadowMd', 'ok', 'okBg', 'err', 'errBg', 'warn', 'warnBg', 'inputBg', 'inputBorder']
+      const cs = getComputedStyle(rootEl)
+      const varsCss = ':root{' + varNames.map(n => `--${n}:${cs.getPropertyValue('--' + n).trim()}`).join(';') + '}'
+      let appCss = ''
+      for (const sheet of Array.from(document.styleSheets)) {
+        try { for (const rule of Array.from(sheet.cssRules)) appCss += rule.cssText + '\n' } catch { /* 跨域样式表跳过 */ }
+      }
+      const htmlContent = `<!doctype html><html><head><meta charset="utf-8"><title>图片接口测试报告</title><style>${varsCss}\nbody{margin:0;padding:24px;background:var(--bg);color:var(--text);font-family:Inter,system-ui,sans-serif}\n${appCss}</style></head><body>${clone.outerHTML}</body></html>`
+      imgDownloadText(filename, htmlContent, 'text/html;charset=utf-8')
+    })
+  } catch {
+    window.alert('导出 HTML 失败，请稍后重试。')
+  }
+}
+function imgExportFilename(apiType: ImgApiType, ext: 'png' | 'html'): string {
+  const t = new Date()
+  const pad = (n: number) => String(n).padStart(2, '0')
+  const stamp = `${t.getFullYear()}${pad(t.getMonth() + 1)}${pad(t.getDate())}${pad(t.getHours())}${pad(t.getMinutes())}${pad(t.getSeconds())}`
+  return `imgtest-report-${apiType}-${stamp}.${ext}`
+}
+
 function ImgApiTestTool() {
   const ui0 = imgLoadUi()
   const [pane, setPane] = useState<'test' | 'channels' | 'prices' | 'history'>('test')
@@ -749,7 +812,7 @@ function ImgApiTestTool() {
   const [refImages, setRefImages] = useState<ImgRef[]>([])
   const [prices, setPrices] = useState<ImgPrice[]>(() => imgLoadPrices())
   const [rateStr, setRateStr] = useState(() => imgLoadRate())
-  const [history, setHistory] = useState<ImgRecord[]>(() => imgLoadHistory())
+  const [history, setHistory] = useState<ImgRecord[]>([])
 
   const [chForm, setChForm] = useState({ name: '', baseUrl: '', apiKey: '' })
   const [editingChId, setEditingChId] = useState<string | null>(null)
@@ -770,6 +833,10 @@ function ImgApiTestTool() {
   const [fApiType, setFApiType] = useState('')
   const [fModel, setFModel] = useState('')
   const [fResult, setFResult] = useState('')
+  const [selHistIds, setSelHistIds] = useState<Set<string>>(new Set())
+  const [exportJob, setExportJob] = useState<{ records: ImgRecord[]; format: 'png' | 'html' } | null>(null)
+  const [exportBusy, setExportBusy] = useState(false)
+  const reportRootRef = useRef<HTMLDivElement>(null)
 
   const toastRef = useRef<number | null>(null)
   const stopRef = useRef(false)
@@ -789,13 +856,35 @@ function ImgApiTestTool() {
   useEffect(() => { imgSavePrices(prices) }, [prices])
   useEffect(() => { imgSaveRate(rateStr) }, [rateStr])
   useEffect(() => {
-    const next = imgPersistHistory(history)
-    if (next.length !== history.length) setHistory(next)
-  }, [history])
+    let cancelled = false
+    ;(async () => {
+      await imgHistMigrateOnce()
+      const list = await imgLoadHistory()
+      if (!cancelled) setHistory(list)
+    })()
+    return () => { cancelled = true }
+  }, [])
   useEffect(() => { try { localStorage.setItem(IMG_UI_KEY, JSON.stringify({ apiType, model, prompt })) } catch { /* ignore */ } }, [apiType, model, prompt])
   useEffect(() => {
     setCases(cs => cs.map(c => c.editedPreview == null ? { ...c, plan: null } : c))
   }, [apiType, model, prompt])
+  useEffect(() => {
+    if (!exportJob) return
+    const root = reportRootRef.current
+    if (!root) { setExportJob(null); return }
+    let cancelled = false
+    ;(async () => {
+      setExportBusy(true)
+      try {
+        const filename = imgExportFilename(apiType, exportJob.format === 'png' ? 'png' : 'html')
+        if (exportJob.format === 'png') await imgExportAsImage(root, filename)
+        else await imgExportAsHtml(root, filename)
+      } finally {
+        if (!cancelled) { setExportBusy(false); setExportJob(null) }
+      }
+    })()
+    return () => { cancelled = true }
+  }, [exportJob])
 
   const toastShow = (m: string) => {
     setToast(m)
@@ -1034,6 +1123,9 @@ function ImgApiTestTool() {
         images: rec.images.map(im => ({ ...im, dataUri: null })),
       }
       setHistory(h => [histRec, ...h].slice(0, IMG_HIST_MAX))
+      historyDbPutOne('imgtest', histRec)
+        .then(() => imgHistTrim(IMG_HIST_MAX))
+        .catch(() => toastShow('历史记录写入失败'))
     } catch { /* 收尾失败不阻塞状态更新 */ }
     setCases([...casesRef.current])
   }
@@ -1136,7 +1228,7 @@ function ImgApiTestTool() {
     </div>
   )
 
-  const renderResultBody = (r: ImgRecord) => (
+  const renderResultBody = (r: ImgRecord, opts: { hidePrice?: boolean } = {}) => (
     <div className="flex flex-col gap-4">
       {r.checks.length > 0 && (
         <div>
@@ -1148,7 +1240,7 @@ function ImgApiTestTool() {
         <span>HTTP <b style={{ color: 'var(--text)' }}>{r.status}</b></span>
         <span>耗时 <b style={{ color: 'var(--text)' }}>{r.durationMs}ms</b></span>
         <span>返回张数 <b style={{ color: 'var(--text)' }}>{r.returnedN || 0}</b></span>
-        {r.price && (
+        {r.price && !opts.hidePrice && (
           <span>参考价格（档位 {r.price.tier} · 1美元={rate}元）：<b style={{ color: 'var(--warn)' }}>${(r.price.usd * (r.price.count || 1)).toFixed(3)} / ¥{(r.price.cny * (r.price.count || 1)).toFixed(3)}</b>
             {(r.price.count || 1) > 1 ? `（${r.price.count} 张 × $${r.price.usd.toFixed(3)}）` : ''}{r.price.note ? ' · ' + r.price.note : ''}</span>
         )}
@@ -1265,6 +1357,26 @@ function ImgApiTestTool() {
     (!fModel || r.model === fModel) &&
     (!fResult || classify(r) === fResult))
 
+  const startExport = (records: ImgRecord[], format: 'png' | 'html') => {
+    if (!records.length) { toastShow('没有可导出的记录'); return }
+    if (exportBusy) { toastShow('正在导出中，请稍候'); return }
+    setExportJob({ records, format })
+  }
+  const toggleHistSel = (id: string, v: boolean) => {
+    setSelHistIds(prev => { const next = new Set(prev); if (v) next.add(id); else next.delete(id); return next })
+  }
+
+  const renderExportRecHeader = (r: ImgRecord) => (
+    <div className="flex flex-wrap gap-x-5 gap-y-1 text-xs mb-3" style={{ color: 'var(--t2)' }}>
+      <span>用例 <b style={{ color: 'var(--text)' }}>{imgEsc(r.caseName || '')}</b></span>
+      <span>模型 <b style={{ color: 'var(--text)' }}>{imgEsc(r.model)}</b></span>
+      {/* 只用渠道名标识来源，绝不展示 apiKey/baseUrl */}
+      <span>渠道 <b style={{ color: 'var(--text)' }}>{imgEsc(r.channelName)}</b></span>
+      <span>接口 <b style={{ color: 'var(--text)' }}>{IMG_API_LABEL[r.apiType] || r.apiType}</b></span>
+      <span>时间 <b style={{ color: 'var(--text)' }}>{imgFmtTime(r.time)}</b></span>
+    </div>
+  )
+
   const leftPanel = (
     <div className="w-[340px] flex-shrink-0 overflow-y-auto p-5 flex flex-col gap-4">
       <Card>
@@ -1350,6 +1462,8 @@ function ImgApiTestTool() {
             setCases(arr)
           }}>↺ 重置状态</Btn>
           <Btn small variant="danger" disabled={!running} onClick={() => { stopRef.current = true; toastShow('将在当前用例结束后停止') }}>■ 停止</Btn>
+          <Btn small variant="soft" disabled={exportBusy || !cases.some(c => c.result)} onClick={() => startExport(cases.filter(c => c.result).map(c => c.result!), 'png')}>⬇ 导出图片</Btn>
+          <Btn small variant="soft" disabled={exportBusy || !cases.some(c => c.result)} onClick={() => startExport(cases.filter(c => c.result).map(c => c.result!), 'html')}>⬇ 导出 HTML</Btn>
           <div className="flex-1 min-w-40 h-2 rounded-full overflow-hidden" style={{ background: 'var(--s2)' }}>
             <div className="h-full rounded-full transition-all duration-300" style={{ background: 'var(--accent)', width: (cases.length ? (doneCount / cases.length * 100) : 0) + '%' }} />
           </div>
@@ -1494,7 +1608,13 @@ function ImgApiTestTool() {
     <Card>
       <div className="flex items-center justify-between flex-wrap gap-2 mb-3">
         <p className="text-sm font-bold" style={{ color: 'var(--text)' }}>历史测试记录 <span className="inline-flex items-center justify-center rounded-full px-2 py-0.5 text-xs font-bold ml-1" style={{ background: 'var(--accentSub)', color: 'var(--accent)' }}>{history.length}</span></p>
-        <Btn small variant="danger" onClick={() => { if (window.confirm('清空所有历史记录？')) { setHistory([]); toastShow('已清空') } }}>清空全部</Btn>
+        <div className="flex items-center gap-2">
+          <Btn small variant="soft" disabled={exportBusy || selHistIds.size === 0}
+            onClick={() => startExport(filteredHistory.filter(r => selHistIds.has(r.id)), 'png')}>⬇ 导出选中图片 ({selHistIds.size})</Btn>
+          <Btn small variant="soft" disabled={exportBusy || selHistIds.size === 0}
+            onClick={() => startExport(filteredHistory.filter(r => selHistIds.has(r.id)), 'html')}>⬇ 导出选中 HTML ({selHistIds.size})</Btn>
+          <Btn small variant="danger" onClick={() => { if (window.confirm('清空所有历史记录？')) { setHistory([]); setSelHistIds(new Set()); historyDbClear('imgtest').catch(() => {}); toastShow('已清空') } }}>清空全部</Btn>
+        </div>
       </div>
       <div className="flex items-center gap-3 flex-wrap mb-3">
         <div className="w-44"><CustomSelect value={fChannel} onChange={setFChannel} options={[{ value: '', label: '全部渠道' }, ...channels.map(c => ({ value: c.name, label: c.name }))]} /></div>
@@ -1506,6 +1626,11 @@ function ImgApiTestTool() {
         <table className="w-full text-xs">
           <thead>
             <tr className="text-left sticky top-0" style={{ background: 'var(--s1)', color: 'var(--t3)' }}>
+              <th className="px-3 py-2 font-semibold">
+                <input type="checkbox" className="w-4 h-4 cursor-pointer" style={{ accentColor: 'var(--accent)' }}
+                  checked={filteredHistory.length > 0 && filteredHistory.every(r => selHistIds.has(r.id))}
+                  onChange={e => setSelHistIds(e.target.checked ? new Set(filteredHistory.map(r => r.id)) : new Set())} />
+              </th>
               <th className="px-3 py-2 font-semibold">图</th>
               <th className="px-3 py-2 font-semibold">时间</th>
               <th className="px-3 py-2 font-semibold">渠道</th>
@@ -1522,7 +1647,7 @@ function ImgApiTestTool() {
           </thead>
           <tbody>
             {filteredHistory.length === 0 && (
-              <tr><td colSpan={12} className="px-3 py-8 text-center" style={{ color: 'var(--t3)' }}>暂无记录</td></tr>
+              <tr><td colSpan={13} className="px-3 py-8 text-center" style={{ color: 'var(--t3)' }}>暂无记录</td></tr>
             )}
             {filteredHistory.map(r => {
               const cls = classify(r)
@@ -1536,6 +1661,10 @@ function ImgApiTestTool() {
                 <tr key={r.id} style={{ borderTop: '1px solid var(--border)' }} className="transition-colors duration-100"
                   onPointerEnter={e => { (e.currentTarget as HTMLTableRowElement).style.background = 'var(--s1)' }}
                   onPointerLeave={e => { (e.currentTarget as HTMLTableRowElement).style.background = 'transparent' }}>
+                  <td className="px-3 py-2">
+                    <input type="checkbox" className="w-4 h-4 cursor-pointer" style={{ accentColor: 'var(--accent)' }}
+                      checked={selHistIds.has(r.id)} onChange={e => toggleHistSel(r.id, e.target.checked)} />
+                  </td>
                   <td className="px-3 py-2">
                     {thumb ? <img src={thumb} className="w-10 h-10 rounded-lg object-cover" style={{ border: '1px solid var(--border)' }} /> : <span style={{ color: 'var(--t3)' }}>—</span>}
                   </td>
@@ -1554,7 +1683,7 @@ function ImgApiTestTool() {
                   <td className="px-3 py-2 whitespace-nowrap">
                     <Btn small variant="soft" onClick={() => setDetailRec(r)}>详情</Btn>
                     <span className="inline-block w-1" />
-                    <Btn small variant="danger" onClick={() => { if (window.confirm('删除该记录？')) setHistory(h => h.filter(x => x.id !== r.id)) }}>删</Btn>
+                    <Btn small variant="danger" onClick={() => { if (window.confirm('删除该记录？')) { setHistory(h => h.filter(x => x.id !== r.id)); historyDbDeleteOne('imgtest', r.id).catch(() => {}) } }}>删</Btn>
                   </td>
                 </tr>
               )
@@ -1590,8 +1719,12 @@ function ImgApiTestTool() {
           <div className="floating-material w-full max-w-3xl rounded-2xl ia-card-enter" style={{ background: 'var(--bg)', boxShadow: 'var(--shadowMd)', border: '1px solid var(--border)', maxHeight: '82vh', overflow: 'auto' }} onClick={e => e.stopPropagation()}>
             <div className="flex items-center justify-between px-5 py-4 sticky top-0" style={{ borderBottom: '1px solid var(--border)', background: 'var(--bg)' }}>
               <p className="text-base font-bold" style={{ color: 'var(--text)' }}>测试记录详情</p>
-              <button onClick={() => setDetailRec(null)} className="w-8 h-8 rounded-lg border-0 cursor-pointer text-lg flex items-center justify-center transition-colors duration-150" style={{ color: 'var(--t3)', background: 'transparent' }}
-                onPointerEnter={e => { (e.currentTarget as HTMLButtonElement).style.background = 'var(--s1)' }} onPointerLeave={e => { (e.currentTarget as HTMLButtonElement).style.background = 'transparent' }}>×</button>
+              <div className="flex items-center gap-2">
+                <Btn small variant="soft" disabled={exportBusy} onClick={() => startExport([detailRec], 'png')}>导出图片</Btn>
+                <Btn small variant="soft" disabled={exportBusy} onClick={() => startExport([detailRec], 'html')}>导出 HTML</Btn>
+                <button onClick={() => setDetailRec(null)} className="w-8 h-8 rounded-lg border-0 cursor-pointer text-lg flex items-center justify-center transition-colors duration-150" style={{ color: 'var(--t3)', background: 'transparent' }}
+                  onPointerEnter={e => { (e.currentTarget as HTMLButtonElement).style.background = 'var(--s1)' }} onPointerLeave={e => { (e.currentTarget as HTMLButtonElement).style.background = 'transparent' }}>×</button>
+              </div>
             </div>
             <div className="p-5">
               <div className="flex flex-wrap gap-x-5 gap-y-1 text-xs mb-4" style={{ color: 'var(--t2)' }}>
@@ -1602,6 +1735,34 @@ function ImgApiTestTool() {
                 <span>时间 <b style={{ color: 'var(--text)' }}>{imgFmtTime(detailRec.time)}</b></span>
               </div>
               {renderResultBody(detailRec)}
+            </div>
+          </div>
+        </div>
+      )}
+
+      {exportJob && (
+        // html2canvas 只能正确截图「真实渲染在正常文档流里的可见内容」——之前用
+        // position:fixed + 负坐标把这个容器藏到屏幕外，会导致 html2canvas 截图失败/
+        // 空白，且导出 HTML 时 clone 出来的节点也带着同样的离屏定位，打开后自然一片空白。
+        // 改成一个真实可见的全屏遮罩预览层，导出完成后自动关闭。
+        <div className="fixed inset-0 z-[200] flex flex-col items-center overflow-auto p-8" style={{ background: 'rgba(0,0,0,0.6)' }}>
+          <div className="sticky top-0 mb-3">
+            <span className="inline-flex items-center gap-2 rounded-full px-4 py-2 text-xs font-semibold" style={{ background: 'var(--bg)', color: 'var(--text)', boxShadow: 'var(--shadowMd)' }}>
+              {exportBusy ? '⏳ 正在生成导出文件…' : '导出预览'}
+            </span>
+          </div>
+          <div ref={reportRootRef} style={{ width: 900, maxWidth: '100%', background: 'var(--bg)', color: 'var(--text)', padding: 24, borderRadius: 16 }}>
+            <div style={{ marginBottom: 16 }}>
+              <p className="text-lg font-bold" style={{ color: 'var(--text)' }}>图片接口测试报告</p>
+              <p className="text-xs mt-1" style={{ color: 'var(--t3)' }}>生成时间 {imgFmtTime(Date.now())} · 共 {exportJob.records.length} 条记录</p>
+            </div>
+            <div className="flex flex-col gap-6">
+              {exportJob.records.map(r => (
+                <div key={r.id} className="rounded-2xl p-4" style={{ border: '1px solid var(--border)' }}>
+                  {renderExportRecHeader(r)}
+                  {renderResultBody(r, { hidePrice: true })}
+                </div>
+              ))}
             </div>
           </div>
         </div>

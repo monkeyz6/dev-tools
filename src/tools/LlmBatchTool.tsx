@@ -7,6 +7,7 @@ import { IconEye, IconRepeat, IconTrash, IconExpand } from '../shared/icons'
 import { formatJson, formatJsonWithPlaceholders, highlightJson, computeDiff, findMatchingBracket, JSON_ROW, JSON_PAD_TB, JSON_PAD_L, JSON_LINE_NO_W, JSON_FOLD_W, JSON_GUTTER_W, JSON_CONTENT_X, JSON_EDITOR_STYLE, computeFoldRanges, getVisibleLines } from '../shared/json'
 import { convertFormat, type AiFmt } from '../shared/ai-format'
 import { decryptLlmApiKey, encryptLlmApiKey } from '../shared/api-key-crypto'
+import { historyDbGetAll, historyDbPutOne, historyDbDeleteOne, historyDbDeleteMany, historyDbClear, historyDbMigrateFromLocalStorage } from '../shared/history-db'
 
 // ─── Shared: 只读 JSON 查看器（复用 JSON 可视化工具的高亮/折叠/虚拟滚动能力）───
 
@@ -836,7 +837,10 @@ function withExpandedScrollAreas<T>(root: HTMLElement, fn: () => Promise<T>): Pr
 }
 
 async function captureReportCanvas(rootEl: HTMLElement): Promise<HTMLCanvasElement> {
-  const { default: html2canvas } = await import('html2canvas')
+  // html2canvas 1.x 无法解析 color-mix()/color() 等现代 CSS 颜色函数（Tailwind v4 主题大量
+  // 使用，getComputedStyle 会把它们解析成 html2canvas 看不懂的 color(...) 语法直接抛异常），
+  // 用兼容新 CSS 颜色函数的社区 fork html2canvas-pro 替代，API 完全兼容
+  const { default: html2canvas } = await import('html2canvas-pro')
   return withExpandedScrollAreas(rootEl, async () => {
     const chartRoots = Array.from(rootEl.querySelectorAll<SVGSVGElement>('[data-chart-root] svg'))
     const restores: (() => void)[] = []
@@ -952,40 +956,40 @@ function saveLlmCfg(cfg: LlmBatchCfgStored) {
   try { localStorage.setItem(LLM_CFG_KEY, JSON.stringify(cfg)) } catch { /* ignore */ }
 }
 
-function loadLlmHistory(): BatchReport[] {
-  if (typeof window === 'undefined') return []
-  try {
-    const raw = localStorage.getItem(LLM_HIST_KEY)
-    if (!raw) return []
-    const list = JSON.parse(raw)
-    return Array.isArray(list) ? list : []
-  } catch { return [] }
+// 历史记录存于共享 IndexedDB（dev-toolkit-history / llmbatch store），不再整份塞进
+// localStorage：老版本会在配额超限时静默从最旧记录开始裁剪，极端情况下只剩最新 1 条。
+async function llmHistMigrateOnce(): Promise<void> {
+  await historyDbMigrateFromLocalStorage<BatchReport>('llmbatch', LLM_HIST_KEY)
 }
-// 存满 20 条后淘汰最早；QuotaExceededError 时继续删最早的重试，返回是否发生了淘汰
-function saveLlmHistory(report: BatchReport): { list: BatchReport[]; dropped: boolean } {
-  let list = [report, ...loadLlmHistory()]
+async function loadLlmHistory(): Promise<BatchReport[]> {
+  const list = await historyDbGetAll<BatchReport>('llmbatch')
+  return list.sort((a, b) => b.startTime - a.startTime)
+}
+// 存满 20 条后淘汰最早，返回是否发生了淘汰
+async function saveLlmHistory(report: BatchReport): Promise<{ list: BatchReport[]; dropped: boolean }> {
+  await historyDbPutOne('llmbatch', report)
+  let list = await loadLlmHistory()
   let dropped = false
-  while (list.length > LLM_HIST_MAX) { list.pop(); dropped = true }
-  while (typeof window !== 'undefined') {
-    try { localStorage.setItem(LLM_HIST_KEY, JSON.stringify(list)); break }
-    catch {
-      if (list.length > 0) { list.pop(); dropped = true } else break
-    }
+  if (list.length > LLM_HIST_MAX) {
+    const overflow = list.slice(LLM_HIST_MAX)
+    await historyDbDeleteMany('llmbatch', overflow.map(r => r.id))
+    list = list.slice(0, LLM_HIST_MAX)
+    dropped = true
   }
   return { list, dropped }
 }
-function deleteLlmHistoryItem(id: string): BatchReport[] {
-  const list = loadLlmHistory().filter(r => r.id !== id)
-  try { localStorage.setItem(LLM_HIST_KEY, JSON.stringify(list)) } catch { /* ignore */ }
-  return list
+async function deleteLlmHistoryItem(id: string): Promise<BatchReport[]> {
+  await historyDbDeleteOne('llmbatch', id)
+  return loadLlmHistory()
 }
-function renameLlmHistoryItem(id: string, title: string): BatchReport[] {
-  const list = loadLlmHistory().map(r => r.id === id ? { ...r, title } : r)
-  try { localStorage.setItem(LLM_HIST_KEY, JSON.stringify(list)) } catch { /* ignore */ }
-  return list
+async function renameLlmHistoryItem(id: string, title: string): Promise<BatchReport[]> {
+  const list = await loadLlmHistory()
+  const rec = list.find(r => r.id === id)
+  if (rec) await historyDbPutOne('llmbatch', { ...rec, title })
+  return loadLlmHistory()
 }
-function clearLlmHistory() {
-  try { localStorage.removeItem(LLM_HIST_KEY) } catch { /* ignore */ }
+async function clearLlmHistory(): Promise<void> {
+  await historyDbClear('llmbatch')
 }
 
 const DEFAULT_LLM_BODY = `{
@@ -1792,11 +1796,21 @@ function LlmBatchTool() {
 
   // ── 报告 / 历史 ──
   const [report, setReport] = useState<BatchReport | null>(null)
-  const [history, setHistory] = useState<BatchReport[]>(() => loadLlmHistory())
+  const [history, setHistory] = useState<BatchReport[]>([])
   const [lastRunReportId, setLastRunReportId] = useState<string | null>(null)
   const [compareIds, setCompareIds] = useState<string[]>([])
   const [histNotice, setHistNotice] = useState('')
   const [jsonViewerBody, setJsonViewerBody] = useState<{ body: string; model: string } | null>(null)
+
+  useEffect(() => {
+    let cancelled = false
+    ;(async () => {
+      await llmHistMigrateOnce()
+      const list = await loadLlmHistory()
+      if (!cancelled) setHistory(list)
+    })()
+    return () => { cancelled = true }
+  }, [])
 
   const toggleCompare = (id: string) => setCompareIds(prev =>
     prev.includes(id) ? prev.filter(x => x !== id) : (prev.length >= 2 ? prev : [...prev, id]))
@@ -1895,7 +1909,7 @@ function LlmBatchTool() {
       fail: finalResults.filter(r => r.status === 'error').length,
       results: finalResults,
     }
-    const { list, dropped } = saveLlmHistory(rep)
+    const { list, dropped } = await saveLlmHistory(rep)
     setHistory(list)
     setHistNotice(dropped ? '存储空间有限，已自动删除最早的历史报告为新报告腾出空间。' : '')
     setReport(rep)
@@ -2227,7 +2241,7 @@ function LlmBatchTool() {
                   {history.length > 0 && (
                     <Btn small variant="danger" onClick={() => {
                       if (window.confirm('确认清空全部历史报告？此操作不可恢复。')) {
-                        clearLlmHistory(); setHistory([]); setCompareIds([])
+                        setHistory([]); setCompareIds([]); clearLlmHistory().catch(() => {})
                       }
                     }}>清空全部</Btn>
                   )}
@@ -2258,7 +2272,7 @@ function LlmBatchTool() {
                           <InlineEditableTitle
                             value={rep.title ?? ''}
                             placeholder={llmFmtTime(rep.startTime)}
-                            onSave={title => { setHistory(renameLlmHistoryItem(rep.id, title)) }}
+                            onSave={title => { renameLlmHistoryItem(rep.id, title).then(list => setHistory(list)) }}
                           />
                           <div className="text-[11px] mt-0.5" style={{ color: 'var(--t3)' }}>
                             {llmFmtTime(rep.startTime)} · 模型 {rep.models.join(', ')} · 成功 <span style={{ color: 'var(--ok)' }}>{rep.success}</span>/{rep.total} · {llmFmtDur(rep.durationMs)}
@@ -2271,9 +2285,10 @@ function LlmBatchTool() {
                         <IconBtn icon={<IconRepeat />} tooltip="复用此配置" onClick={() => reuseHistoryReport(rep)} />
                         <IconBtn icon={<IconTrash />} tooltip="删除该历史报告" danger onClick={() => {
                           if (window.confirm('确认删除该条历史报告？此操作不可恢复。')) {
-                            const list = deleteLlmHistoryItem(rep.id)
-                            setHistory(list)
-                            setCompareIds(ids => ids.filter(id => id !== rep.id))
+                            deleteLlmHistoryItem(rep.id).then(list => {
+                              setHistory(list)
+                              setCompareIds(ids => ids.filter(id => id !== rep.id))
+                            })
                           }
                         }} />
                       </div>

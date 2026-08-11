@@ -1,4 +1,5 @@
 import { test, expect } from '@playwright/test'
+import { readHistoryStore } from './helpers'
 
 const CORS = { 'Access-Control-Allow-Origin': '*', 'Access-Control-Expose-Headers': '*' }
 
@@ -215,10 +216,12 @@ test('旧历史记录加载后自动迁移并重新判定', async ({ page }) => 
 
   await expect(page.getByText('✓ 通过 7/7')).toBeVisible()
   await expect(page.getByText('2K 档 16:9 ×2')).toBeVisible()
-  await expect.poll(() => page.evaluate(() => JSON.parse(localStorage.getItem('imgtest-history') || '[]')[0])).toMatchObject({
+  await expect.poll(() => readHistoryStore(page, 'imgtest').then(list => list[0])).toMatchObject({
     validationVersion: 2,
     targets: { resolutionTierBaseReq: 2048, resolutionTierLabelReq: '2K' },
   })
+  // 迁移成功后旧版 localStorage key 应被清空
+  await expect.poll(() => page.evaluate(() => localStorage.getItem('imgtest-history'))).toBeNull()
 })
 
 test('请求失败时记录错误并可查看', async ({ page }) => {
