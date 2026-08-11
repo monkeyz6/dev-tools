@@ -256,4 +256,113 @@ test.describe('LLM 批量测试', () => {
     await page.getByRole('button', { name: '✕' }).click()
     await expect(page.getByText('cURL 命令含明文 API Key')).not.toBeVisible()
   })
+
+  // 通过 localStorage 直接种一条 OpenAI Chat 协议的流式提示词，绕开提示词编辑弹窗操作，
+  // 专注验证 doLlmRequest 里 stream_options 注入与 SSE usage 提取的行为。
+  function seedOpenaiChatStreamPrompt(page: import('@playwright/test').Page, bodyObj: Record<string, unknown>) {
+    return page.addInitScript(([cfg, prompt]) => {
+      localStorage.setItem('llmbatch-config', cfg as string)
+      localStorage.setItem('llmbatch-prompts', prompt as string)
+    }, [
+      JSON.stringify({ apiType: 'openai_chat', baseUrl: 'https://api.example.com' }),
+      JSON.stringify([{ id: 'p1', title: 'stream-test', body: JSON.stringify(bodyObj), createdAt: 1, updatedAt: 1 }]),
+    ])
+  }
+
+  test('流式（OpenAI Chat）：请求体未带 stream_options 时自动注入 include_usage 并正确识别 token', async ({ page }) => {
+    await seedOpenaiChatStreamPrompt(page, { model: '{{model}}', stream: true, messages: [{ role: 'user', content: 'hi' }] })
+
+    const sse = [
+      `data: ${JSON.stringify({ id: '1', object: 'chat.completion.chunk', model: 'gpt-4o-mini', choices: [{ delta: { content: 'Hi' } }] })}`,
+      `data: ${JSON.stringify({ id: '1', object: 'chat.completion.chunk', choices: [{ delta: { content: ' there' } }] })}`,
+      `data: ${JSON.stringify({ id: '1', object: 'chat.completion.chunk', choices: [], usage: { prompt_tokens: 15, completion_tokens: 7, total_tokens: 22 } })}`,
+      'data: [DONE]',
+    ].join('\n\n') + '\n\n'
+
+    let seenBody: any = null
+    await page.route('**/v1/chat/completions', async route => {
+      seenBody = route.request().postDataJSON()
+      await route.fulfill({ status: 200, contentType: 'text/event-stream', body: sse })
+    })
+
+    await goto(page, /LLM 批量测试/)
+    await inputByLabel(page, 'API Key').fill('sk-test')
+    await fieldOf(page, '每模型次数 N').locator('input').fill('1')
+    await page.getByRole('button', { name: /开始批量请求/ }).click()
+    await expect(page.locator('main')).toContainText('总请求 1')
+
+    expect(seenBody.stream_options).toEqual({ include_usage: true })
+
+    const stored = JSON.parse((await page.evaluate(() => localStorage.getItem('llmbatch-history')))!)
+    const result = stored[0].results[0]
+    expect(result.status).toBe('ok')
+    expect(result.inputTokens).toBe(15)
+    expect(result.outputTokens).toBe(7)
+    expect(result.tokenNote ?? null).toBeNull()
+  })
+
+  test('流式（OpenAI Chat）：请求体已自带 stream_options 时仍会合并注入 include_usage（回归用例）', async ({ page }) => {
+    // 请求体自带 stream_options.include_usage: false —— 修复前的旧逻辑遇到这种情况会整体跳过注入，
+    // 导致网关不下发 usage、token 无法识别。
+    await seedOpenaiChatStreamPrompt(page, {
+      model: '{{model}}', stream: true, stream_options: { include_usage: false },
+      messages: [{ role: 'user', content: 'hi' }],
+    })
+
+    const sse = [
+      `data: ${JSON.stringify({ id: '1', object: 'chat.completion.chunk', model: 'gpt-4o-mini', choices: [{ delta: { content: 'Hi' } }] })}`,
+      `data: ${JSON.stringify({ id: '1', object: 'chat.completion.chunk', choices: [], usage: { prompt_tokens: 12, completion_tokens: 4, total_tokens: 16 } })}`,
+      'data: [DONE]',
+    ].join('\n\n') + '\n\n'
+
+    let seenBody: any = null
+    await page.route('**/v1/chat/completions', async route => {
+      seenBody = route.request().postDataJSON()
+      await route.fulfill({ status: 200, contentType: 'text/event-stream', body: sse })
+    })
+
+    await goto(page, /LLM 批量测试/)
+    await inputByLabel(page, 'API Key').fill('sk-test')
+    await fieldOf(page, '每模型次数 N').locator('input').fill('1')
+    await page.getByRole('button', { name: /开始批量请求/ }).click()
+    await expect(page.locator('main')).toContainText('总请求 1')
+
+    // include_usage 被强制合并为 true，且未破坏 stream_options 里其它已存在的子字段结构
+    expect(seenBody.stream_options.include_usage).toBe(true)
+
+    const stored = JSON.parse((await page.evaluate(() => localStorage.getItem('llmbatch-history')))!)
+    const result = stored[0].results[0]
+    expect(result.inputTokens).toBe(12)
+    expect(result.outputTokens).toBe(4)
+  })
+
+  test('流式（OpenAI Chat）：网关未返回 usage 时明细表格给出非阻断提示而非静默空白', async ({ page }) => {
+    await seedOpenaiChatStreamPrompt(page, { model: '{{model}}', stream: true, messages: [{ role: 'user', content: 'hi' }] })
+
+    // 只有内容增量，没有任何带 usage 字段的 chunk
+    const sse = [
+      `data: ${JSON.stringify({ id: '1', object: 'chat.completion.chunk', model: 'gpt-4o-mini', choices: [{ delta: { content: 'Hi there' } }] })}`,
+      'data: [DONE]',
+    ].join('\n\n') + '\n\n'
+
+    await page.route('**/v1/chat/completions', route =>
+      route.fulfill({ status: 200, contentType: 'text/event-stream', body: sse }))
+
+    await goto(page, /LLM 批量测试/)
+    await inputByLabel(page, 'API Key').fill('sk-test')
+    await fieldOf(page, '每模型次数 N').locator('input').fill('1')
+    await page.getByRole('button', { name: /开始批量请求/ }).click()
+    await expect(page.locator('main')).toContainText('总请求 1')
+
+    const main = page.locator('main')
+    await expect(main).toContainText('成功 1') // 请求本身仍算成功，不因缺 usage 而判失败
+    await expect(main).toContainText('⚠ 流式响应未包含 usage 数据')
+
+    const stored = JSON.parse((await page.evaluate(() => localStorage.getItem('llmbatch-history')))!)
+    const result = stored[0].results[0]
+    expect(result.status).toBe('ok')
+    expect(result.inputTokens).toBeNull()
+    expect(result.outputTokens).toBeNull()
+    expect(result.tokenNote).toContain('流式响应未包含 usage 数据')
+  })
 })

@@ -215,6 +215,7 @@ export interface BatchResult {
   inputTokens: number | null
   outputTokens: number | null
   error: string | null
+  tokenNote?: string | null // 非阻断诊断：status 为 'ok' 但流式响应未识别到 usage 时的原因提示，与 error（真正失败）区分开
   responseHeaders?: Record<string, string> | null
   responseBody?: string | null
   responseBodyTruncated?: boolean
@@ -358,13 +359,20 @@ function compatiblePromptApiTypes(obj: Record<string, unknown>): ApiType[] {
   return out
 }
 
-// 单一归约：真正需要发起转换时才用（候选为 0 个→无法识别；候选为 2 个时固定选 anthropic——
-// 可证明这种二义性只发生在请求体完全不含 system 信息时，此时后续的有损判定/展平预处理对
-// Anthropic 和 Chat 两条分支检查的是同一批 messages[].content，选哪个不影响最终结果）。
-function detectPromptApiType(obj: Record<string, unknown>): ApiType | null {
+// 单一归约：真正需要发起转换时才用（候选为 0 个→无法识别；候选为 2 个且目标协议就是候选
+// 之一时，直接选目标协议本身——这种二义性只发生在请求体完全不含 system 信息时，此时
+// messages[].content 的文本性检查（isTextOnlyContent 的 allowedType 对 Anthropic/Chat 两边
+// 都是字面量 'text'）对两条分支完全等价，选目标协议不会带来任何额外的内容损失风险，
+// 反而能避免走一趟有损的字段转换：convertFormat 只搬运 model/messages/max_tokens/system/
+// temperature 五个字段，stream/stream_options 等请求体里的其它字段会被静默丢弃，
+// 这正是"流式请求 token 无法识别"问题的根因之一——请求体只要没写 system 且没写
+// stream_options（典型的极简流式模板），就会被误判为二义性从而被迫转换、连带把 stream
+// 字段一起丢掉。目标协议不在候选内时才退回固定选 anthropic 作为转换源）。
+function detectPromptApiType(obj: Record<string, unknown>, targetApiType?: ApiType): ApiType | null {
   const c = compatiblePromptApiTypes(obj)
   if (c.length === 0) return null
   if (c.length === 1) return c[0]
+  if (targetApiType && c.includes(targetApiType)) return targetApiType
   return 'anthropic'
 }
 
@@ -448,14 +456,14 @@ function convertPromptBodyForApiType(bodyText: string, targetApiType: ApiType): 
   }
 
   // 先算出"这段请求体到底是哪种协议"的单一归约判断（detectPromptApiType 内部已经处理了
-  // 0/1/2 个候选的所有情况），再拿它跟目标协议比较——只有当归约结果就是目标协议本身时，
-  // 才是"无需转换、原样透传"，此时不做任何有损检查（因为压根没有发生任何结构重组，
-  // image/tool_use 等复杂 content block 原样保留，不存在丢失的问题）。
-  // 注意：不能用"结构上是否兼容目标协议"（candidates.includes(targetApiType)）来判断是否透传——
-  // 结构兼容只保证顶层字段（messages/system 等）说得通，不代表 content 里的非文本 block
-  // 就是该目标协议的原生写法（比如 Anthropic 的 image block 结构和 OpenAI 的 image_url 完全不同，
-  // 但顶层 messages 数组本身两边都认，会被误判为"结构兼容"）。
-  const srcApiType = detectPromptApiType(obj)
+  // 0/1/2 个候选的所有情况，2 个候选且目标协议就在其中时会直接选目标协议，见该函数注释），
+  // 再拿它跟目标协议比较——只有当归约结果就是目标协议本身时，才是"无需转换、原样透传"，
+  // 此时不做任何有损检查（因为压根没有发生任何结构重组，image/tool_use 等复杂 content
+  // block、以及 stream/stream_options 等转换环节不认识的自定义字段，都原样保留）。
+  // 注意：不能在只有单个候选、且它不等于目标协议时也直接透传——单候选意味着结构已经明确
+  // 排除了目标协议（比如候选是 openai_responses 但目标是 anthropic），这种情况必须走真正的
+  // 转换（或因内容有损被拒绝），不能囫囵放行。
+  const srcApiType = detectPromptApiType(obj, targetApiType)
   if (srcApiType === null) {
     return { ok: false, error: `无法识别该提示词请求体所属的 API 协议格式（既不符合 Anthropic、也不符合 OpenAI Chat、也不符合 OpenAI Responses 的结构特征），因此无法自动转换为「${LLM_API_LABELS[targetApiType]}」。请检查请求体结构，或手动调整为该协议对应的格式。` }
   }
@@ -592,8 +600,11 @@ async function doLlmRequest(cfg: LlmBatchCfg, task: BatchTask): Promise<BatchRes
       return rec
     }
     const isStream = bodyObj.stream === true
-    if (isStream && cfg.apiType === 'openai_chat' && bodyObj.stream_options == null) {
-      bodyObj.stream_options = { include_usage: true }
+    // 始终合并 include_usage:true（而非只在 stream_options 完全不存在时才注入），
+    // 否则请求体模板里只要带了 stream_options（哪怕是空对象或 include_usage:false），
+    // 网关默认就不会在最后一个 SSE chunk 里下发 usage，token 会全程识别不到。
+    if (isStream && cfg.apiType === 'openai_chat') {
+      bodyObj.stream_options = { ...(bodyObj.stream_options as Record<string, unknown> ?? {}), include_usage: true }
     }
     const headers: Record<string, string> = { 'content-type': 'application/json' }
     if (cfg.apiType === 'anthropic') {
@@ -632,6 +643,7 @@ async function doLlmRequest(cfg: LlmBatchCfg, task: BatchTask): Promise<BatchRes
       const reader = res.body.getReader()
       const decoder = new TextDecoder()
       let buf = ''
+      let hadParseError = false
       for (;;) {
         const { done, value } = await reader.read()
         if (tFirst === null) tFirst = Date.now() - start
@@ -643,7 +655,7 @@ async function doLlmRequest(cfg: LlmBatchCfg, task: BatchTask): Promise<BatchRes
           if (!line.startsWith('data:')) continue
           const payload = line.slice(5).trim()
           if (!payload || payload === '[DONE]') continue
-          try { ex.onData(JSON.parse(payload)) } catch { /* ignore malformed chunk */ }
+          try { ex.onData(JSON.parse(payload)) } catch { hadParseError = true }
         }
       }
       const r = ex.result()
@@ -654,6 +666,12 @@ async function doLlmRequest(cfg: LlmBatchCfg, task: BatchTask): Promise<BatchRes
       rec.inputTokens = r.inTok
       rec.outputTokens = r.outTok
       rec.returnedModel = r.model
+      // 请求本身成功但 token 没识别到时给出非阻断提示，避免用户对着空 "—" 无从排查
+      if (r.inTok == null && r.outTok == null) {
+        rec.tokenNote = hadParseError
+          ? '流式响应中出现无法解析的数据块，usage 提取失败（响应可能是非标准 SSE / JSON 格式）'
+          : '流式响应未包含 usage 数据（网关可能不支持 stream_options.include_usage，或返回了非标准格式）'
+      }
       llmApplyResponseCapture(rec, cfg, res, r.text)
     } else {
       tFirst = Date.now() - start
@@ -750,7 +768,7 @@ function reportToCsv(report: BatchReport): string {
     r.seq, r.model, r.status === 'ok' ? '成功' : '失败',
     r.inputTokens ?? '-', r.outputTokens ?? '-',
     (r.inputTokens != null && r.outputTokens != null) ? r.inputTokens + r.outputTokens : '-',
-    r.tFirst ?? '-', r.elapsed ?? '-', r.error ?? '',
+    r.tFirst ?? '-', r.elapsed ?? '-', r.error || (r.tokenNote ? '⚠ ' + r.tokenNote : ''),
     r.responseBody ?? '',
   ]))
   return '﻿' + rows.map(r => r.map(v => '"' + String(v).replace(/"/g, '""') + '"').join(',')).join('\r\n')
@@ -1341,7 +1359,9 @@ function LlmBatchReportView({ report, apiKey, hideCharts }: { report: BatchRepor
                     <td className="px-4 py-2 tabular-nums">{(r.inputTokens != null && r.outputTokens != null) ? r.inputTokens + r.outputTokens : '—'}</td>
                     <td className="px-4 py-2 tabular-nums">{r.tFirst ?? '—'}</td>
                     <td className="px-4 py-2 tabular-nums">{r.elapsed != null ? (r.elapsed / 1000).toFixed(2) + 's' : '—'}</td>
-                    <td className="px-4 py-2 text-xs" style={{ color: 'var(--err)', maxWidth: 280, wordBreak: 'break-all' }}>{r.error ?? ''}</td>
+                    <td className="px-4 py-2 text-xs" style={{ color: r.error ? 'var(--err)' : 'var(--warn)', maxWidth: 280, wordBreak: 'break-all' }}>
+                      {r.error ?? (r.tokenNote ? `⚠ ${r.tokenNote}` : '')}
+                    </td>
                     <td className="px-4 py-2 whitespace-nowrap">
                       {r.responseBody != null
                         ? <Btn small variant="ghost" onClick={() => setViewingResult(r)}>响应</Btn>
