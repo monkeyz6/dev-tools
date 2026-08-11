@@ -10,6 +10,7 @@ const IMG_PRICES_KEY = 'imgtest-prices'
 const IMG_RATE_KEY = 'imgtest-rate'
 const IMG_HIST_KEY = 'imgtest-history'
 const IMG_UI_KEY = 'imgtest-ui'
+const IMG_HIDEPRICES_KEY = 'imgtest-hideprices'
 const IMG_HIST_MAX = 30
 const IMG_DEFAULT_RATE = 7
 const IMG_VALIDATION_VERSION = 2
@@ -112,6 +113,11 @@ function imgLoadRate(): string {
   return String(IMG_DEFAULT_RATE)
 }
 function imgSaveRate(r: string) { try { localStorage.setItem(IMG_RATE_KEY, r) } catch { /* ignore */ } }
+function imgLoadHidePrices(): boolean {
+  if (typeof window === 'undefined') return false
+  try { return localStorage.getItem(IMG_HIDEPRICES_KEY) === '1' } catch { /* ignore */ }
+  return false
+}
 
 type ImgApiType = 'openai' | 'grok' | 'gemini' | 'seedream'
 const IMG_API_LABEL: Record<ImgApiType, string> = { openai: 'OpenAI', grok: 'Grok', gemini: 'Gemini', seedream: 'Seedream' }
@@ -812,6 +818,7 @@ function ImgApiTestTool() {
   const [refImages, setRefImages] = useState<ImgRef[]>([])
   const [prices, setPrices] = useState<ImgPrice[]>(() => imgLoadPrices())
   const [rateStr, setRateStr] = useState(() => imgLoadRate())
+  const [hidePrices, setHidePrices] = useState(() => imgLoadHidePrices())
   const [history, setHistory] = useState<ImgRecord[]>([])
 
   const [chForm, setChForm] = useState({ name: '', baseUrl: '', apiKey: '' })
@@ -855,6 +862,7 @@ function ImgApiTestTool() {
   useEffect(() => { if (activeChId) { try { localStorage.setItem(IMG_ACTIVE_KEY, activeChId) } catch { /* ignore */ } } }, [activeChId])
   useEffect(() => { imgSavePrices(prices) }, [prices])
   useEffect(() => { imgSaveRate(rateStr) }, [rateStr])
+  useEffect(() => { try { localStorage.setItem(IMG_HIDEPRICES_KEY, hidePrices ? '1' : '0') } catch { /* ignore */ } }, [hidePrices])
   useEffect(() => {
     let cancelled = false
     ;(async () => {
@@ -1313,7 +1321,7 @@ function ImgApiTestTool() {
             <div className="flex items-center gap-2 text-sm font-semibold flex-wrap" style={{ color: 'var(--text)' }}>
               <span>{c.name}</span>
               {c.needRef && <Badge>参考图</Badge>}
-              {price && priceTag(price, nMult)}
+              {!hidePrices && price && priceTag(price, nMult)}
             </div>
             <div className="text-[11px] font-mono truncate" style={{ color: 'var(--t3)' }}>{imgEsc(paramSummary)}</div>
           </div>
@@ -1344,7 +1352,7 @@ function ImgApiTestTool() {
               <CustomTextarea value={preview} mono rows={Math.min(16, preview.split('\n').length + 1)}
                 onChange={v => { c.editedPreview = v; setCases([...cases]) }} />
             </div>
-            {c.result && renderResultBody(c.result)}
+            {c.result && renderResultBody(c.result, { hidePrice: hidePrices })}
           </div>
         )}
       </div>
@@ -1471,7 +1479,7 @@ function ImgApiTestTool() {
           </div>
           <span className="text-xs whitespace-nowrap" style={{ color: 'var(--t2)' }}>
             已选 <b style={{ color: 'var(--text)' }}>{selCases.length}</b> / 已完成 <b style={{ color: 'var(--text)' }}>{doneCount}</b> · 通过 <b style={{ color: 'var(--ok)' }}>{passCount}</b> · 未通过 <b style={{ color: failCount ? 'var(--err)' : 'var(--t2)' }}>{failCount}</b>
-            {costN > 0 && <span> · 预估 <b style={{ color: 'var(--warn)' }}>${costUsd.toFixed(3)} / ¥{(costUsd * rate).toFixed(2)}</b>{costN < selCases.length ? `（${costN}/${selCases.length} 项有价格）` : ''}</span>}
+            {!hidePrices && costN > 0 && <span> · 预估 <b style={{ color: 'var(--warn)' }}>${costUsd.toFixed(3)} / ¥{(costUsd * rate).toFixed(2)}</b>{costN < selCases.length ? `（${costN}/${selCases.length} 项有价格）` : ''}</span>}
           </span>
         </div>
         <div className="flex flex-col">
@@ -1680,7 +1688,7 @@ function ImgApiTestTool() {
                   <td className="px-3 py-2">{badge}</td>
                   <td className="px-3 py-2">{r.durationMs}ms</td>
                   <td className="px-3 py-2 font-mono whitespace-nowrap" style={{ color: 'var(--warn)' }}>
-                    {r.price ? `$${(r.price.usd * (r.price.count || 1)).toFixed(3)}\n¥${(r.price.cny * (r.price.count || 1)).toFixed(3)}` : '—'}
+                    {hidePrices || !r.price ? '—' : `$${(r.price.usd * (r.price.count || 1)).toFixed(3)}\n¥${(r.price.cny * (r.price.count || 1)).toFixed(3)}`}
                   </td>
                   <td className="px-3 py-2 whitespace-nowrap">
                     <Btn small variant="soft" onClick={() => setDetailRec(r)}>详情</Btn>
@@ -1707,6 +1715,9 @@ function ImgApiTestTool() {
             { value: 'prices', label: '价格配置' },
             { value: 'history', label: `历史记录 (${history.length})` },
           ]} />
+          <div className="ml-auto">
+            <Toggle value={hidePrices} onChange={setHidePrices} label="隐藏价格" />
+          </div>
         </div>
         <div className="flex-1 overflow-y-auto p-5">
           {pane === 'test' && testPane}
@@ -1736,7 +1747,7 @@ function ImgApiTestTool() {
                 <span>接口 <b style={{ color: 'var(--text)' }}>{IMG_API_LABEL[detailRec.apiType] || detailRec.apiType}</b></span>
                 <span>时间 <b style={{ color: 'var(--text)' }}>{imgFmtTime(detailRec.time)}</b></span>
               </div>
-              {renderResultBody(detailRec, { defaultOpenReq: true })}
+              {renderResultBody(detailRec, { hidePrice: hidePrices, defaultOpenReq: true })}
             </div>
           </div>
         </div>

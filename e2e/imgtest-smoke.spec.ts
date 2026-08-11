@@ -243,3 +243,60 @@ test('请求失败时记录错误并可查看', async ({ page }) => {
   await page.getByRole('button', { name: '详情' }).click()
   await expect(page.getByText('unsupported parameter: size').first()).toBeVisible()
 })
+
+test('隐藏价格开关生效，且导出的 HTML 报告不含任何价格信息', async ({ page }) => {
+  await page.goto('/')
+  const b64 = await page.evaluate(() => {
+    const c = document.createElement('canvas')
+    c.width = 1024; c.height = 1024
+    const ctx = c.getContext('2d')!
+    ctx.fillStyle = '#ff8800'
+    ctx.fillRect(0, 0, 1024, 1024)
+    return c.toDataURL('image/png').split(',')[1]
+  })
+  await page.route('**/v1/images/generations', route => route.fulfill({
+    status: 200, contentType: 'application/json', headers: { ...CORS, 'x-oneapi-request-id': 'req-hideprice' },
+    body: JSON.stringify({ data: [{ b64_json: b64 }] }),
+  }))
+  await page.getByText('图片接口测试').click()
+  await page.getByRole('button', { name: '渠道管理', exact: true }).click()
+  await page.getByPlaceholder('例如：主线-oinone').fill('隐藏价格渠道')
+  await page.getByPlaceholder('https://api.oinone.top').fill('https://mock.example')
+  await page.getByPlaceholder('sk-xxxxxxxx').fill('sk-test-1234567890')
+  await page.getByRole('button', { name: '保存渠道' }).click()
+  await page.getByRole('button', { name: '批量测试', exact: true }).click()
+  await page.getByText('方形 1024×1024').click()
+  await page.getByRole('button', { name: '▶ 运行此用例' }).click()
+  await expect(page.getByText('req-hideprice').first()).toBeVisible()
+
+  // 默认显示价格：用例行徽标 + 摘要预估 + 结果里的参考价格
+  await expect(page.getByText(/^\$0\.\d{3} \/ ¥/).first()).toBeVisible()
+  await expect(page.getByText(/预估/)).toBeVisible()
+  await expect(page.getByText(/参考价格/)).toBeVisible()
+
+  // 打开「隐藏价格」开关：以上全部消失
+  await page.getByRole('switch').click()
+  await expect(page.getByText(/^\$0\.\d{3} \/ ¥/)).toHaveCount(0)
+  await expect(page.getByText(/预估/)).toHaveCount(0)
+  await expect(page.getByText(/参考价格/)).toHaveCount(0)
+
+  // 导出的 HTML 报告也不得包含任何价格信息（与开关状态无关，恒不含）
+  const [download] = await Promise.all([
+    page.waitForEvent('download'),
+    page.getByRole('button', { name: '⬇ 导出 HTML' }).click(),
+  ])
+  const { readFileSync } = await import('node:fs')
+  const content = readFileSync(await download.path(), 'utf8')
+  expect(content).toContain('图片接口测试报告')
+  expect(content).toContain('req-hideprice')
+  expect(content).not.toContain('参考价格')
+  expect(content).not.toContain('¥')
+  expect(content).not.toContain('$0.')
+
+  // 历史记录的价格列同样被隐藏
+  await page.getByRole('button', { name: /^历史记录/ }).click()
+  const row = page.getByRole('row').filter({ hasText: '隐藏价格渠道' })
+  await expect(row.getByRole('cell').nth(11)).toHaveText('—')
+  await page.getByRole('switch').click()
+  await expect(row.getByRole('cell').nth(11)).toContainText('$')
+})
