@@ -41,6 +41,15 @@ test('导出图片和 HTML 报告：成功生成、离线可渲染，且不含�
   await expect(page.getByText('✓ 通过 3/3')).toBeVisible()
   await expect(page.getByText('参考价格', { exact: false })).toBeVisible() // 确认这条记录本身带价格
 
+  // 「历史记录」详情弹窗：已发送的请求体默认展开（不用点），响应头保持折叠
+  await page.getByRole('button', { name: /历史记录/ }).click()
+  await page.getByRole('button', { name: '详情' }).click()
+  await expect(page.getByText('已发送的请求体', { exact: false })).toBeVisible()
+  await expect(page.getByText('"model"', { exact: false }).first()).toBeVisible() // 请求体内容不用点开就可见
+  await expect(page.locator('pre[data-response-body]')).toBeHidden() // 响应体仍保持折叠
+  await page.getByRole('button', { name: '×' }).click()
+  await page.getByRole('button', { name: '批量测试', exact: true }).click()
+
   // 导出图片：能拿到下载即说明 html2canvas 截图成功（失败会走 catch 弹 alert，不会触发下载）
   const [pngDownload] = await Promise.all([
     page.waitForEvent('download'),
@@ -62,6 +71,8 @@ test('导出图片和 HTML 报告：成功生成、离线可渲染，且不含�
   await htmlDownload.saveAs(htmlPath)
   const htmlSource = fs.readFileSync(htmlPath, 'utf-8')
   expect(htmlSource).not.toContain('参考价格')
+  // 已发送的请求体那个 <details> 要带 open 属性，导出报告默认展开、不用点
+  expect(/<details open[^>]*>\s*<summary[^>]*>已发送的请求体/.test(htmlSource)).toBe(true)
 
   // file:// 真实打开导出的 HTML，证明离线渲染出来的不是空白页
   await page.goto('file://' + htmlPath)
@@ -69,6 +80,7 @@ test('导出图片和 HTML 报告：成功生成、离线可渲染，且不含�
   await expect(page.getByText('方形 1024×1024').first()).toBeVisible()
   await expect(page.getByText('req-export-test', { exact: false }).first()).toBeVisible()
   await expect(page.getByText('参考价格', { exact: false })).toHaveCount(0)
+  await expect(page.getByText('"model"', { exact: false }).first()).toBeVisible() // 请求体默认展开可见，不用点开
 
   expect(dialogs).toEqual([]) // 没有触发失败提示的 alert
 })

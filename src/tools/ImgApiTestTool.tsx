@@ -1228,7 +1228,7 @@ function ImgApiTestTool() {
     </div>
   )
 
-  const renderResultBody = (r: ImgRecord, opts: { hidePrice?: boolean } = {}) => (
+  const renderResultBody = (r: ImgRecord, opts: { hidePrice?: boolean; defaultOpenReq?: boolean } = {}) => (
     <div className="flex flex-col gap-4">
       {r.checks.length > 0 && (
         <div>
@@ -1277,15 +1277,17 @@ function ImgApiTestTool() {
       )}
       <div className="flex flex-col gap-2">
         {[
-          ['响应头', JSON.stringify(r.respHeaders || {}, null, 2)],
-          [r.responseBodyComplete === false ? '响应体（历史记录已省略 base64）' : '响应体', imgFormatResponseBody(r.rawSnippet || '')],
-          ['已发送的请求体（占位符已替换 · base64 已省略）', r.sentPreview || ''],
-        ].map(([label, body]) => (
-          <details key={label} className="rounded-xl overflow-hidden" style={{ border: '1px solid var(--border)' }}>
-            <summary className="px-3 py-2 text-xs font-semibold cursor-pointer select-none" style={{ background: 'var(--s1)', color: 'var(--t2)' }}>{label}</summary>
-            <pre data-response-body={label.startsWith('响应体') ? 'true' : undefined}
+          ['响应头', JSON.stringify(r.respHeaders || {}, null, 2), false],
+          [r.responseBodyComplete === false ? '响应体（历史记录已省略 base64）' : '响应体', imgFormatResponseBody(r.rawSnippet || ''), false],
+          ['已发送的请求体（占位符已替换 · base64 已省略）', r.sentPreview || '', true],
+        ].map(([label, body, isReq]) => (
+          <details key={label as string} open={isReq ? opts.defaultOpenReq : undefined} className="rounded-xl overflow-hidden" style={{ border: '1px solid var(--border)' }}>
+            <summary className="px-3 py-2 text-xs font-semibold cursor-pointer select-none" style={{ background: 'var(--s1)', color: 'var(--t2)' }}>{label as string}</summary>
+            {/* data-export-scroll：默认展开的请求体在导出截图时，配合 imgWithExpandedScrollAreas
+                临时去掉 max-height/overflow 限制，避免长 JSON 被裁掉只截到前 32rem */}
+            <pre data-response-body={(label as string).startsWith('响应体') ? 'true' : undefined} data-export-scroll
               className="p-3 text-[11px] font-mono overflow-auto max-h-[32rem] whitespace-pre-wrap break-all leading-relaxed"
-              style={{ color: 'var(--t2)' }}>{imgEsc(body)}</pre>
+              style={{ color: 'var(--t2)' }}>{imgEsc(body as string)}</pre>
           </details>
         ))}
       </div>
@@ -1734,7 +1736,7 @@ function ImgApiTestTool() {
                 <span>接口 <b style={{ color: 'var(--text)' }}>{IMG_API_LABEL[detailRec.apiType] || detailRec.apiType}</b></span>
                 <span>时间 <b style={{ color: 'var(--text)' }}>{imgFmtTime(detailRec.time)}</b></span>
               </div>
-              {renderResultBody(detailRec)}
+              {renderResultBody(detailRec, { defaultOpenReq: true })}
             </div>
           </div>
         </div>
@@ -1760,7 +1762,7 @@ function ImgApiTestTool() {
               {exportJob.records.map(r => (
                 <div key={r.id} className="rounded-2xl p-4" style={{ border: '1px solid var(--border)' }}>
                   {renderExportRecHeader(r)}
-                  {renderResultBody(r, { hidePrice: true })}
+                  {renderResultBody(r, { hidePrice: true, defaultOpenReq: true })}
                 </div>
               ))}
             </div>
