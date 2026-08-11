@@ -260,4 +260,59 @@ test.describe('模型探测', () => {
     await page.getByRole('button', { name: '查看' }).click()
     await expect(page.locator('main')).toContainText('e2e-历史报告')
   })
+
+  test('只勾选 Responses 格式：流式与补充场景测试不再请求 chat 端点', async ({ page }) => {
+    let chatCalls = 0
+    let responsesCalls = 0
+    await page.route('**/v1/chat/completions', async route => {
+      chatCalls++
+      await route.fulfill({ status: 500, contentType: 'application/json', body: JSON.stringify({ error: { message: 'chat format is not supported by this channel' } }) })
+    })
+    await page.route('**/v1/responses', async route => {
+      responsesCalls++
+      const body = route.request().postDataJSON()
+      if (body?.model === 'modelprobe-intentionally-invalid-model') {
+        await route.fulfill({ status: 400, contentType: 'application/json', body: JSON.stringify({ error: { message: 'invalid model' } }) })
+        return
+      }
+      if (body?.stream) {
+        const sse = [
+          'event: response.completed',
+          `data: ${JSON.stringify({ response: { usage: { input_tokens: 10, output_tokens: 4 } } })}`,
+          '',
+          '',
+        ].join('\n')
+        await route.fulfill({ status: 200, contentType: 'text/event-stream', body: sse })
+        return
+      }
+      await route.fulfill({ status: 200, contentType: 'application/json', body: RESPONSES_OK })
+    })
+
+    await goto(page, /模型探测/)
+    await page.getByRole('button', { name: '全不选' }).click()
+    for (const id of ['responses-basic', 'stream-false', 'stream-true', 'system-prompt', 'multi-turn', 'error-shape', 'concurrency']) await check(page, id)
+    await setupRun(page, 'e2e-仅Responses格式')
+
+    await expect(page.locator('main')).toContainText('通过 7', { timeout: 10000 })
+    expect(chatCalls).toBe(0)
+    expect(responsesCalls).toBe(9) // basic 1 + stream-false 1 + stream-true 1 + system 1 + multi-turn 1 + error-shape 1 + concurrency 3
+  })
+
+  test('取消勾选 Anthropic 基础测试后，缓存测试自动跳过、不再发请求', async ({ page }) => {
+    let anthropicCalls = 0
+    await page.route('**/v1/messages', async () => { anthropicCalls++ })
+
+    await goto(page, /模型探测/)
+    await page.getByRole('button', { name: '全不选' }).click()
+    // 先勾选 anthropic-basic 让 cache-anthropic 可勾选，勾上后再取消 anthropic-basic，
+    // 模拟“用户忘记同步取消缓存勾选框”的不一致状态。
+    await check(page, 'anthropic-basic')
+    await check(page, 'cache-anthropic')
+    await uncheck(page, 'anthropic-basic')
+    await expect(page.locator('input[data-id="cache-anthropic"]')).toBeDisabled()
+    await setupRun(page, 'e2e-Anthropic未启用跳过缓存')
+
+    await expect(page.locator('main')).toContainText('对应协议格式未启用（未勾选 Anthropic Messages 基础测试）', { timeout: 10000 })
+    expect(anthropicCalls).toBe(0)
+  })
 })

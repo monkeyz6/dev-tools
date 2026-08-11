@@ -228,6 +228,20 @@ const probeBaseBody = (cfg: ProbeCfg, format: ProbeFormat, prompt = 'Reply with 
   if (format === 'anthropic') return { model, max_tokens: 32, messages: [{ role: 'user', content: prompt }] }
   return { model, messages: [{ role: 'user', content: prompt }] }
 }
+const probeSystemBody = (cfg: ProbeCfg, format: ProbeFormat) => {
+  if (format === 'anthropic') return { ...probeBaseBody(cfg, 'anthropic'), system: 'Always reply exactly SYSTEM_OK', messages: [{ role: 'user', content: 'Respond now' }] }
+  if (format === 'responses') return { model: cfg.model, instructions: 'Always reply exactly SYSTEM_OK', input: 'Respond now' }
+  return { ...probeBaseBody(cfg, 'chat'), messages: [{ role: 'system', content: 'Always reply exactly SYSTEM_OK' }, { role: 'user', content: 'Respond now' }] }
+}
+const probeMultiTurnBody = (cfg: ProbeCfg, format: ProbeFormat) => {
+  const turns = [
+    { role: 'user', content: 'Remember codeword ORBIT.' },
+    { role: 'assistant', content: 'I will remember ORBIT.' },
+    { role: 'user', content: 'Reply with only the codeword.' },
+  ]
+  if (format === 'responses') return { model: cfg.model, input: turns }
+  return { ...probeBaseBody(cfg, format), messages: turns }
+}
 const probeParamSpec = (id: string, format: ProbeFormat): Record<string, any> => {
   switch (id) {
     case 'temperature': return { temperature: 0.2 }
@@ -258,8 +272,9 @@ const probeResult = (status: ProbeStatus, detail: string, extra: Partial<ProbeRe
 const probeReproOf = (log: ProbeLog): ProbeResult['repro'] => ({
   url: log.url, headers: log.requestHeaders, body: log.requestBody, status: log.status, requestId: log.requestId,
 })
+const probeMultiFormatKinds: ProbeTestDef['kind'][] = ['parameter', 'token', 'stream', 'extra']
 const probeResultKeysOf = (t: ProbeTestDef, results: Record<string, ProbeResult>): string[] => {
-  if (t.kind === 'parameter' || t.kind === 'token') {
+  if (probeMultiFormatKinds.includes(t.kind)) {
     const prefix = t.id + '@'
     return Object.keys(results).filter(k => k.startsWith(prefix)).sort((a, b) => a.localeCompare(b))
   }
@@ -382,7 +397,7 @@ function ProbeReportRow({ t, report }: { t: ProbeTestDef; report: ProbeReport })
         <span className="text-xs" style={{ color: 'var(--t3)' }}>{open ? '▾' : '▸'}</span>
         <div className="flex-1 min-w-0">
           <div className="text-sm font-semibold truncate" style={{ color: 'var(--text)' }}>{t.name}</div>
-          {t.kind === 'parameter' || t.kind === 'token' ? (
+          {probeMultiFormatKinds.includes(t.kind) ? (
             <div className="font-mono text-[11px] mt-0.5" style={{ color: 'var(--t3)', fontFamily: PROBE_MONO }}>
               {items.map(x => `${probeFormatOfKey(x.key) ?? ''}:${PROBE_STATUS_LABELS[x.r.status]}`).join(' · ')}
             </div>
@@ -658,20 +673,20 @@ function ModelProbeTool() {
     return outcomes
   }
 
-  const runProbeStream = async (t: ProbeTestDef, stream: boolean): Promise<ProbeResult> => {
-    const log = probeNewLog(t.id, t.name, 'chat')
-    const body = { ...probeBaseBody(cfgRef.current!, 'chat'), stream }
+  const runProbeStream = async (t: ProbeTestDef, stream: boolean, format: ProbeFormat): Promise<ProbeResult> => {
+    const log = probeNewLog(t.id, t.name, format)
+    const body = { ...probeBaseBody(cfgRef.current!, format), stream }
     try {
-      const r = await probeRequest(log, 'chat', body, { stream })
-      if (!r.ok) return probeResult('failed', probeExtractError(r.data), { format: 'chat', duration: r.log.duration, usage: r.log.usage, repro: probeReproOf(r.log) })
+      const r = await probeRequest(log, format, body, { stream })
+      if (!r.ok) return probeResult('failed', probeExtractError(r.data), { format, duration: r.log.duration, usage: r.log.usage, repro: probeReproOf(r.log) })
       if (stream) {
         const valid = r.log.sse.length > 0 && r.log.sse.some(e => e.data)
         const complete = /\[DONE\]|response\.completed|message_stop/.test(r.raw || '')
-        return probeResult(valid ? 'passed' : 'failed', valid ? `收到 ${r.log.sse.length} 个 SSE 事件${complete ? '，包含结束标记' : '，未识别结束标记'}` : '未解析到有效 SSE data 字段', { format: 'chat', duration: r.log.duration, usage: r.log.usage, repro: probeReproOf(r.log) })
+        return probeResult(valid ? 'passed' : 'failed', valid ? `收到 ${r.log.sse.length} 个 SSE 事件${complete ? '，包含结束标记' : '，未识别结束标记'}` : '未解析到有效 SSE data 字段', { format, duration: r.log.duration, usage: r.log.usage, repro: probeReproOf(r.log) })
       }
-      return probeResult('passed', '完整 JSON 响应正常', { format: 'chat', duration: r.log.duration, usage: r.log.usage, repro: probeReproOf(r.log) })
+      return probeResult('passed', '完整 JSON 响应正常', { format, duration: r.log.duration, usage: r.log.usage, repro: probeReproOf(r.log) })
     } catch (e: any) {
-      return probeResult('failed', e?.message || String(e), { format: 'chat', repro: probeReproOf(log) })
+      return probeResult('failed', e?.message || String(e), { format, repro: probeReproOf(log) })
     }
   }
 
@@ -731,42 +746,40 @@ function ModelProbeTool() {
     return probeResult('unsupported', '连续 3 次请求均未报告缓存命中，已停止重试', { format, duration: durations.length ? Math.round(durations.reduce((a, b) => a + b, 0) / durations.length) : null, usage: lastLog?.usage, cache: { hits: 0, total: 3, reads }, repro: lastLog ? probeReproOf(lastLog) : null })
   }
 
-  const runProbeExtra = async (subtype: string): Promise<ProbeResult> => {
+  const runProbeExtra = async (subtype: string, format: ProbeFormat): Promise<ProbeResult> => {
     if (subtype === 'error') {
-      const log = probeNewLog('error-shape', '错误码规范性', 'chat')
-      const body = { ...probeBaseBody(cfgRef.current!, 'chat'), model: 'modelprobe-intentionally-invalid-model' }
+      const log = probeNewLog('error-shape', '错误码规范性', format)
+      const body = { ...probeBaseBody(cfgRef.current!, format), model: 'modelprobe-intentionally-invalid-model' }
       try {
-        const r = await probeRequest(log, 'chat', body)
+        const r = await probeRequest(log, format, body)
         const structured = typeof r.data === 'object' && r.data !== null && (r.data.error || r.data.message)
         return probeResult(!r.ok && r.status >= 400 && structured ? 'passed' : 'failed',
           !r.ok ? `返回 HTTP ${r.status}${structured ? ' 且包含结构化错误' : '，但错误结构不明确'}` : '无效模型意外返回成功',
-          { format: 'chat', duration: r.log.duration, usage: r.log.usage, repro: probeReproOf(r.log) })
+          { format, duration: r.log.duration, usage: r.log.usage, repro: probeReproOf(r.log) })
       } catch (e: any) {
-        return probeResult('failed', e?.message || String(e), { format: 'chat', repro: probeReproOf(log) })
+        return probeResult('failed', e?.message || String(e), { format, repro: probeReproOf(log) })
       }
     }
     if (subtype === 'concurrency') {
       const logs: ProbeLog[] = []
       const rs = await Promise.allSettled([1, 2, 3].map(async i => {
-        const log = probeNewLog('concurrency', '并发请求稳定性', 'chat')
+        const log = probeNewLog('concurrency', '并发请求稳定性', format)
         logs.push(log)
-        return probeRequest(log, 'chat', probeBaseBody(cfgRef.current!, 'chat', `Reply only ${i}`))
+        return probeRequest(log, format, probeBaseBody(cfgRef.current!, format, `Reply only ${i}`))
       }))
       const ok = rs.filter(x => x.status === 'fulfilled' && (x.value as { ok: boolean }).ok).length
       const ds = rs.filter(x => x.status === 'fulfilled').map(x => (x.value as { log: ProbeLog }).log.duration)
-      return probeResult(ok === 3 ? 'passed' : 'failed', `${ok}/3 个并发请求成功`, { format: 'chat', duration: ds.length ? Math.max(...ds) : null, repro: logs.length ? probeReproOf(logs[0]) : null })
+      return probeResult(ok === 3 ? 'passed' : 'failed', `${ok}/3 个并发请求成功`, { format, duration: ds.length ? Math.max(...ds) : null, repro: logs.length ? probeReproOf(logs[0]) : null })
     }
     const isSystem = subtype === 'system'
     const key = isSystem ? 'system-prompt' : 'multi-turn'
-    const body: Record<string, any> = isSystem
-      ? { ...probeBaseBody(cfgRef.current!, 'chat'), messages: [{ role: 'system', content: 'Always reply exactly SYSTEM_OK' }, { role: 'user', content: 'Respond now' }] }
-      : { ...probeBaseBody(cfgRef.current!, 'chat'), messages: [{ role: 'user', content: 'Remember codeword ORBIT.' }, { role: 'assistant', content: 'I will remember ORBIT.' }, { role: 'user', content: 'Reply with only the codeword.' }] }
-    const log = probeNewLog(key, isSystem ? 'System 提示词' : '多轮对话', 'chat')
+    const body: Record<string, any> = isSystem ? probeSystemBody(cfgRef.current!, format) : probeMultiTurnBody(cfgRef.current!, format)
+    const log = probeNewLog(key, isSystem ? 'System 提示词' : '多轮对话', format)
     try {
-      const r = await probeRequest(log, 'chat', body)
-      return probeResult(r.ok ? 'passed' : 'failed', r.ok ? '请求成功并返回多角色上下文响应' : probeExtractError(r.data), { format: 'chat', duration: r.log.duration, usage: r.log.usage, repro: probeReproOf(r.log) })
+      const r = await probeRequest(log, format, body)
+      return probeResult(r.ok ? 'passed' : 'failed', r.ok ? '请求成功并返回多角色上下文响应' : probeExtractError(r.data), { format, duration: r.log.duration, usage: r.log.usage, repro: probeReproOf(r.log) })
     } catch (e: any) {
-      return probeResult('failed', e?.message || String(e), { format: 'chat', repro: probeReproOf(log) })
+      return probeResult('failed', e?.message || String(e), { format, repro: probeReproOf(log) })
     }
   }
 
@@ -844,9 +857,9 @@ function ModelProbeTool() {
     const selectedTests = PROBE_TESTS.filter(t => selectedRef.current[t.id])
     if (!selectedTests.length) errs.push('请至少勾选一个测试项。')
     const paramIds = selectedTests.filter(t => t.kind === 'parameter').map(t => t.id)
-    const needFormats = selectedTests.some(t => t.kind === 'parameter' || t.kind === 'token')
+    const needFormats = selectedTests.some(t => probeMultiFormatKinds.includes(t.kind))
     const activeFormats = (['chat', 'responses', 'anthropic'] as ProbeFormat[]).filter(f => selectedRef.current[`${f}-basic`])
-    if (needFormats && activeFormats.length === 0) errs.push('参数 / Token 稳定性测试需要至少勾选一个基础格式测试（Chat / Responses / Anthropic）。')
+    if (needFormats && activeFormats.length === 0) errs.push('参数 / 流式 / Token 稳定性 / 补充场景测试需要至少勾选一个基础格式测试（Chat / Responses / Anthropic）。')
     if (errs.length) { setStartErr(errs.join('\n')); return }
     setStartErr('')
 
@@ -863,7 +876,7 @@ function ModelProbeTool() {
     const resultsObj: Record<string, ProbeResult> = {}
     PROBE_TESTS.forEach(t => {
       if (!selectedRef.current[t.id]) {
-        const keys = (t.kind === 'parameter' || t.kind === 'token')
+        const keys = probeMultiFormatKinds.includes(t.kind)
           ? activeFormats.map(f => probeKey(t.id, f))
           : [t.id]
         keys.forEach(k => {
@@ -872,7 +885,7 @@ function ModelProbeTool() {
         })
       }
     })
-    const total = selectedTests.reduce((acc, t) => acc + (t.kind === 'parameter' || t.kind === 'token' ? Math.max(1, activeFormats.length) : 1), 0)
+    const total = selectedTests.reduce((acc, t) => acc + (probeMultiFormatKinds.includes(t.kind) ? Math.max(1, activeFormats.length) : 1), 0)
     let completed = 0
     let curLabel = '准备测试'
     const updateProgress = (label?: string) => {
@@ -920,14 +933,34 @@ function ModelProbeTool() {
           }
           continue
         }
+        if (t.kind === 'stream' || t.kind === 'extra') {
+          for (const f of activeFormats) {
+            if (stopRef.current) break
+            const key = probeKey(t.id, f)
+            setTestStatus(key, 'running')
+            updateProgress(`${t.name}（${PROBE_FORMAT_LABELS[f]}）`)
+            const out = t.kind === 'stream' ? await runProbeStream(t, t.id === 'stream-true', f) : await runProbeExtra(t.subtype!, f)
+            resultsObj[key] = out
+            setTestStatus(key, out.status, out.detail)
+            completed++
+            updateProgress()
+          }
+          continue
+        }
         const key = t.id
+        if (t.kind === 'cache' && !activeFormats.includes(t.format!)) {
+          const out = probeResult('skipped', `对应协议格式未启用（未勾选 ${PROBE_FORMAT_LABELS[t.format!]} 基础测试）`, { format: t.format })
+          resultsObj[key] = out
+          setTestStatus(key, out.status, out.detail)
+          completed++
+          updateProgress(`${t.name}：${PROBE_STATUS_LABELS[out.status]}`)
+          continue
+        }
         setTestStatus(key, 'running')
         updateProgress(`正在执行：${t.name}`)
         let out: ProbeResult
         if (t.kind === 'basic') out = await runProbeBasic(t)
-        else if (t.kind === 'stream') out = await runProbeStream(t, t.id === 'stream-true')
-        else if (t.kind === 'cache') out = await runProbeCache(t.format!)
-        else out = await runProbeExtra(t.subtype!)
+        else out = await runProbeCache(t.format!)
         resultsObj[key] = out
         setTestStatus(key, out.status, out.detail)
         completed++
@@ -935,7 +968,7 @@ function ModelProbeTool() {
       }
       PROBE_TESTS.forEach(t => {
         if (!selectedRef.current[t.id]) return
-        const expectedKeys = (t.kind === 'parameter' || t.kind === 'token')
+        const expectedKeys = probeMultiFormatKinds.includes(t.kind)
           ? activeFormats.map(f => probeKey(t.id, f))
           : [t.id]
         expectedKeys.forEach(k => {
@@ -1027,7 +1060,7 @@ function ModelProbeTool() {
   }
 
   const statusOf = (t: ProbeTestDef): { status: ProbeStatus | 'pending' | 'running'; detail: string } => {
-    if (t.kind === 'parameter' || t.kind === 'token') {
+    if (probeMultiFormatKinds.includes(t.kind)) {
       const keys = Object.keys(statuses).filter(k => k.startsWith(t.id + '@')).sort()
       if (!keys.length) return { status: 'pending', detail: '' }
       const sts = keys.map(k => statuses[k])
@@ -1109,6 +1142,7 @@ function ModelProbeTool() {
   const filteredLogs = logFilter === 'all' ? logs : logs.filter(l => l.resultKey === logFilter || l.resultKey.startsWith(logFilter + '@'))
 
   const groups = [...new Set(PROBE_TESTS.map(t => t.group))]
+  const uiActiveFormats = useMemo(() => (['chat', 'responses', 'anthropic'] as ProbeFormat[]).filter(f => selected[`${f}-basic`]), [selected])
 
   return (
     <div className="flex flex-col h-full">
@@ -1229,7 +1263,7 @@ function ModelProbeTool() {
                 <div className="flex items-center justify-between px-6 pt-4 pb-3 flex-shrink-0">
                   <div className="flex items-center gap-3">
                     <h3 className="text-sm font-bold" style={{ color: 'var(--text)' }}>测试用例</h3>
-                    <span className="text-xs" style={{ color: 'var(--t3)' }}>参数项会对每个已勾选的基础格式分别执行</span>
+                    <span className="text-xs" style={{ color: 'var(--t3)' }}>参数、流式、缓存与补充场景测试都只对已勾选的基础格式执行；取消勾选某协议格式将跳过该格式的全部请求</span>
                   </div>
                   <div className="flex items-center gap-3 text-xs flex-shrink-0">
                     <button onClick={() => { setSelected(Object.fromEntries(PROBE_TESTS.map(t => [t.id, true]))); }} disabled={running} className="cursor-pointer border-0 outline-none font-semibold" style={{ background: 'transparent', color: 'var(--accent)', fontFamily: 'inherit' }}>全选</button>
@@ -1256,13 +1290,15 @@ function ModelProbeTool() {
                     {PROBE_TESTS.filter(t => t.group === group).map(t => {
                       const st = statusOf(t)
                       const color = st.status === 'failed' ? 'var(--err)' : st.status === 'passed' ? 'var(--ok)' : st.status === 'unsupported' ? 'var(--warn)' : st.status === 'running' ? 'var(--accent)' : 'var(--t3)'
+                      const formatDisabled = t.kind === 'cache' && t.format ? !uiActiveFormats.includes(t.format) : false
+                      const desc = formatDisabled ? `已随「${PROBE_FORMAT_LABELS[t.format!]}」基础测试禁用` : (st.detail || t.desc)
                       return (
-                        <div key={t.id} className="flex items-center gap-3 px-6 py-3" style={{ borderBottom: '1px solid var(--border)' }}>
-                          <input type="checkbox" data-id={t.id} checked={!!selected[t.id]} disabled={running} onChange={() => setSelected(prev => ({ ...prev, [t.id]: !prev[t.id] }))}
+                        <div key={t.id} className="flex items-center gap-3 px-6 py-3" style={{ borderBottom: '1px solid var(--border)', opacity: formatDisabled ? 0.5 : 1 }}>
+                          <input type="checkbox" data-id={t.id} checked={!!selected[t.id]} disabled={running || formatDisabled} onChange={() => setSelected(prev => ({ ...prev, [t.id]: !prev[t.id] }))}
                             className="h-4 w-4 flex-shrink-0 cursor-pointer accent-[var(--accent)]" aria-label={`选择 ${t.name}`} />
                           <div className="min-w-0 flex-1">
                             <div className="text-sm font-semibold truncate" style={{ color: 'var(--text)' }}>{t.name}</div>
-                            <div className="text-xs truncate mt-0.5" style={{ color: 'var(--t3)' }}>{st.detail || t.desc}</div>
+                            <div className="text-xs truncate mt-0.5" style={{ color: 'var(--t3)' }}>{desc}</div>
                           </div>
                           <span className="text-xs font-semibold whitespace-nowrap flex-shrink-0" style={{ color }}>{PROBE_ROW_STATUS_LABELS[st.status] ?? st.status}</span>
                         </div>
