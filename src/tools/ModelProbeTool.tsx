@@ -537,6 +537,48 @@ function ProbeReportRow({ t, report }: { t: ProbeTestDef; report: ProbeReport })
   )
 }
 
+function ProbeFormatCard({ t, checked, disabled, status, onChange }: {
+  t: ProbeTestDef
+  checked: boolean
+  disabled: boolean
+  status: { status: ProbeStatus | 'pending' | 'running'; detail: string }
+  onChange: () => void
+}) {
+  const fmt = t.format!
+  const statusColor = status.status === 'failed' ? 'var(--err)' : status.status === 'passed' ? 'var(--ok)'
+    : status.status === 'unsupported' ? 'var(--warn)' : status.status === 'running' ? 'var(--accent)' : 'var(--t3)'
+  return (
+    <label
+      className={`probe-format-card${checked ? ' is-checked' : ''}${disabled ? ' is-disabled' : ''}`}
+      style={{ background: checked ? undefined : 'var(--s1)', opacity: disabled ? 0.55 : 1 }}
+      title={`${PROBE_FORMAT_LABELS[fmt]} · ${t.desc}`}
+    >
+      <input
+        type="checkbox"
+        data-id={t.id}
+        checked={checked}
+        disabled={disabled}
+        onChange={onChange}
+        aria-label={`选择 ${t.name}`}
+        className="probe-format-input"
+      />
+      <div className="flex items-center justify-between gap-2">
+        <span className="probe-format-chip" style={{ fontFamily: PROBE_MONO }}>{PROBE_FORMAT_SHORT[fmt]}</span>
+        <span className={`probe-format-check${checked ? ' is-on' : ''}`} aria-hidden="true">
+          <svg width="10" height="10" viewBox="0 0 10 10" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+            <path d="M1.5 5.2 4 7.7 8.5 2.5" />
+          </svg>
+        </span>
+      </div>
+      <div className="mt-2.5 text-sm font-semibold leading-snug" style={{ color: 'var(--text)' }}>{t.name}</div>
+      <div className="mt-1 text-[11px] leading-4" style={{ color: 'var(--t3)' }}>{t.desc}</div>
+      <div className="mt-2 text-[11px] font-semibold whitespace-nowrap overflow-hidden text-ellipsis" style={{ color: statusColor }}>
+        {PROBE_ROW_STATUS_LABELS[status.status] ?? status.status}
+      </div>
+    </label>
+  )
+}
+
 function ModelProbeTool() {
   const cfg0 = loadProbeCfg()
   const [model, setModel] = useState(cfg0.model ?? '')
@@ -921,10 +963,15 @@ function ModelProbeTool() {
       setStartErr('渠道 API Key 解密失败，请重新编辑渠道并保存。')
       return
     }
+    const formats = (['chat', 'responses', 'anthropic'] as ProbeFormat[]).filter(f => selectedRef.current[`${f}-basic`])
+    if (formats.length === 0) {
+      setStartErr('测试连接需要先勾选至少一个协议基础测试（Chat Completions / Responses / Anthropic Messages）。')
+      return
+    }
     setStartErr('')
     setConnRunning(true)
     setConnResults({ chat: null, responses: null, anthropic: null })
-    await Promise.all((['chat', 'responses', 'anthropic'] as ProbeFormat[]).map(async f => {
+    await Promise.all(formats.map(async f => {
       const started = performance.now()
       const controller = new AbortController()
       const timer = setTimeout(() => controller.abort(new DOMException('请求超时', 'TimeoutError')), cfg.timeoutMs)
@@ -1388,7 +1435,26 @@ function ModelProbeTool() {
                 {groups.map(group => (
                   <div key={group}>
                     <div className="px-6 py-2 text-[11px] font-bold uppercase tracking-wide" style={{ background: 'var(--s1)', color: 'var(--t3)', letterSpacing: '0.08em' }}>{group}</div>
-                    {PROBE_TESTS.filter(t => t.group === group).map(t => {
+                    {group === '协议基础' ? (
+                      <div>
+                        <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 px-6 py-3">
+                          {PROBE_TESTS.filter(t => t.group === group).map(t => (
+                            <ProbeFormatCard
+                              key={t.id}
+                              t={t}
+                              checked={!!selected[t.id]}
+                              disabled={running}
+                              status={statusOf(t)}
+                              onChange={() => setSelected(prev => ({ ...prev, [t.id]: !prev[t.id] }))}
+                            />
+                          ))}
+                        </div>
+                        {!running && uiActiveFormats.length === 0 && (
+                          <p className="px-6 pb-3 text-xs" style={{ color: 'var(--warn)' }}>至少勾选一个协议基础测试，才能运行测试或测试连接。</p>
+                        )}
+                      </div>
+                    ) : (
+                      PROBE_TESTS.filter(t => t.group === group).map(t => {
                       const st = statusOf(t)
                       const color = st.status === 'failed' ? 'var(--err)' : st.status === 'passed' ? 'var(--ok)' : st.status === 'unsupported' ? 'var(--warn)' : st.status === 'running' ? 'var(--accent)' : 'var(--t3)'
                       const formatDisabled = t.kind === 'cache' && t.format ? !uiActiveFormats.includes(t.format) : false
@@ -1404,7 +1470,8 @@ function ModelProbeTool() {
                           <span className="text-xs font-semibold whitespace-nowrap flex-shrink-0" style={{ color }}>{PROBE_ROW_STATUS_LABELS[st.status] ?? st.status}</span>
                         </div>
                       )
-                    })}
+                      })
+                    )}
                   </div>
                 ))}
               </div>

@@ -253,6 +253,56 @@ test.describe('模型探测', () => {
     await expect(page.locator('[data-conn="anthropic"]')).toContainText('Invalid API key')
   })
 
+  test('测试连接只测已勾选协议：取消勾选 responses 后不再请求该端点', async ({ page }) => {
+    let chatCalls = 0
+    let responsesCalls = 0
+    await page.route('**/v1/chat/completions', async route => {
+      chatCalls++
+      await route.fulfill({ status: 200, contentType: 'application/json', body: CHAT_OK(5) })
+    })
+    await page.route('**/v1/responses', async route => {
+      responsesCalls++
+      await route.fulfill({ status: 200, contentType: 'application/json', body: RESPONSES_OK })
+    })
+    await page.route('**/v1/messages', route =>
+      route.fulfill({ status: 401, contentType: 'application/json', body: JSON.stringify({ error: { message: 'Invalid API key' } }) }))
+
+    await goto(page, /模型探测/)
+    await page.getByRole('button', { name: '全不选' }).click()
+    await check(page, 'chat-basic')
+    await check(page, 'anthropic-basic')
+    await addChannel(page, { apiKey: 'sk-test-probe' })
+    await inputByLabel(page, '模型名称').fill('probe-model')
+    await page.getByRole('button', { name: '测试连接' }).click()
+
+    await expect(page.locator('[data-conn="chat"]')).toContainText('✓')
+    await expect(page.locator('[data-conn="anthropic"]')).toContainText('✗ 401')
+    await expect(page.locator('[data-conn="responses"]')).toHaveCount(0)
+    expect(chatCalls).toBe(1)
+    expect(responsesCalls).toBe(0)
+  })
+
+  test('测试连接：未勾选任何协议基础时提示报错且不发请求', async ({ page }) => {
+    let chatCalls = 0
+    let responsesCalls = 0
+    let anthropicCalls = 0
+    await page.route('**/v1/chat/completions', async () => { chatCalls++ })
+    await page.route('**/v1/responses', async () => { responsesCalls++ })
+    await page.route('**/v1/messages', async () => { anthropicCalls++ })
+
+    await goto(page, /模型探测/)
+    await page.getByRole('button', { name: '全不选' }).click()
+    await addChannel(page, { apiKey: 'sk-test-probe' })
+    await inputByLabel(page, '模型名称').fill('probe-model')
+    await page.getByRole('button', { name: '测试连接' }).click()
+
+    await expect(page.locator('main')).toContainText('测试连接需要先勾选至少一个协议基础测试')
+    await expect(page.locator('[data-conn]')).toHaveCount(0)
+    expect(chatCalls).toBe(0)
+    expect(responsesCalls).toBe(0)
+    expect(anthropicCalls).toBe(0)
+  })
+
   test('历史报告：跑完自动入库，可回看', async ({ page }) => {
     await page.route('**/v1/chat/completions', route =>
       route.fulfill({ status: 200, contentType: 'application/json', body: CHAT_OK(10) }))

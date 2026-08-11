@@ -514,6 +514,99 @@ textarea:focus-visible { outline: none; }
   transition: transform 100ms ease-out;
 }
 
+/* ─── Model Probe ────────────────────────────────────────────────────────── */
+
+.probe-format-card {
+  position: relative;
+  display: block;
+  padding: 13px 14px 11px;
+  border-radius: 16px;
+  border: 1px solid var(--border);
+  cursor: pointer;
+  user-select: none;
+  transition:
+    transform 0.4s var(--ease-spring),
+    border-color 0.3s var(--ease-fluid),
+    background 0.3s var(--ease-fluid),
+    box-shadow 0.3s var(--ease-fluid),
+    opacity 0.25s var(--ease-fluid);
+}
+.probe-format-card:hover {
+  border-color: color-mix(in srgb, var(--accent) 55%, var(--border));
+}
+.probe-format-card:active {
+  transform: scale(0.96);
+  transition-duration: 0.12s;
+  transition-timing-function: var(--ease-press);
+}
+.probe-format-card.is-checked {
+  border-color: var(--accent);
+  background: var(--accentSub);
+  box-shadow: 0 0 0 1px color-mix(in srgb, var(--accent) 20%, transparent), var(--shadowSm);
+}
+.probe-format-card.is-disabled {
+  cursor: default;
+}
+.probe-format-card.is-disabled:active {
+  transform: none;
+}
+
+.probe-format-input {
+  position: absolute;
+  top: 12px;
+  right: 12px;
+  width: 20px;
+  height: 20px;
+  margin: 0;
+  opacity: 0;
+  z-index: 1;
+  cursor: pointer;
+}
+.probe-format-card.is-disabled .probe-format-input { cursor: default; }
+
+.probe-format-chip {
+  display: inline-flex;
+  align-items: center;
+  padding: 2px 8px;
+  border-radius: 999px;
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  background: var(--s2);
+  color: var(--t2);
+  transition: background 0.3s var(--ease-fluid), color 0.3s var(--ease-fluid);
+}
+.probe-format-card.is-checked .probe-format-chip {
+  background: color-mix(in srgb, var(--accent) 15%, transparent);
+  color: var(--accent);
+}
+
+.probe-format-check {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 20px;
+  height: 20px;
+  border-radius: 50%;
+  border: 1.5px solid var(--borderHard);
+  background: transparent;
+  color: var(--accentFg);
+  transform: scale(0.55);
+  opacity: 0;
+  transition:
+    transform 0.4s var(--ease-spring),
+    opacity 0.18s var(--ease-fluid),
+    background 0.3s var(--ease-fluid),
+    border-color 0.3s var(--ease-fluid);
+}
+.probe-format-check.is-on {
+  background: var(--accent);
+  border-color: var(--accent);
+  transform: scale(1);
+  opacity: 1;
+}
+
 /* ─── GraphQL Syntax Highlight ──────────────────────────────────────────── */
 
 .gql-keyword   { color: var(--jKey); font-weight: 500; }
