@@ -63,7 +63,7 @@ interface ProbeReport {
   startedAt: string
   completedAt: string
   durationMs: number
-  target: { baseUrl: string; model: string; overrides: Record<ProbeFormat, string | null> }
+  target: { baseUrl: string; model: string; channelName?: string; overrides: Record<ProbeFormat, string | null> }
   results: Record<string, ProbeResult>
   summary: Record<ProbeStatus, number>
   logs: ProbeLog[]
@@ -77,10 +77,26 @@ interface ProbeCfg {
   urlOf: Record<ProbeFormat, string>
 }
 
+// ── 渠道（探测目标）：baseUrl + apiKey + 超时 + 三种协议 URL 覆写，可保存多个、选一个当前使用；
+// 模型名称保持全局，不属于渠道 ──
+interface ProbeChannel {
+  id: string
+  name: string
+  baseUrl: string
+  timeoutSec: string
+  chatUrl: string        // 可选覆写，空串表示回退到 baseUrl
+  responsesUrl: string
+  anthropicUrl: string
+  apiKeyEnc: string
+  keyMask: string
+}
+
 const PROBE_STORAGE_KEY = 'modelprobe-config'
-const PROBE_KEY_STORAGE_KEY = 'modelprobe-key'
+const PROBE_KEY_STORAGE_KEY = 'modelprobe-key'     // 旧字段：单一配置的加密 apiKey，已迁移到渠道，仅保留供一次性迁移读取
 const PROBE_HISTORY_KEY = 'modelprobe-history'
 const PROBE_HISTORY_MAX = 20
+const PROBE_CHANNELS_KEY = 'modelprobe-channels'
+const PROBE_ACTIVE_CH_KEY = 'modelprobe-active-channel'
 
 const PROBE_MONO = '"JetBrains Mono", "JetBrainsMono Nerd Font", "SF Mono", "Fira Code", "Fira Mono", "Roboto Mono", "Droid Sans Mono", "Cascadia Code", Consolas, "Courier New", monospace'
 const PROBE_FORMAT_LABELS: Record<ProbeFormat, string> = {
@@ -296,6 +312,68 @@ function loadProbeCfg(): Record<string, any> {
 function saveProbeCfg(cfg: Record<string, any>) {
   try { localStorage.setItem(PROBE_STORAGE_KEY, JSON.stringify(cfg)) } catch { /* ignore */ }
 }
+
+// ── 持久化：渠道（探测目标）列表 + 当前激活渠道 ──
+function loadProbeChannelsRaw(): ProbeChannel[] {
+  if (typeof window === 'undefined') return []
+  try {
+    const raw = localStorage.getItem(PROBE_CHANNELS_KEY)
+    if (!raw) return []
+    const list = JSON.parse(raw)
+    if (!Array.isArray(list)) return []
+    return list.filter((c): c is ProbeChannel =>
+      c && typeof c === 'object' && typeof c.id === 'string' && typeof c.name === 'string' && typeof c.baseUrl === 'string')
+  } catch { return [] }
+}
+function saveProbeChannels(list: ProbeChannel[]) {
+  if (typeof window === 'undefined') return
+  try { localStorage.setItem(PROBE_CHANNELS_KEY, JSON.stringify(list)) } catch { /* ignore */ }
+}
+function loadProbeActiveChId(): string | null {
+  if (typeof window === 'undefined') return null
+  try { return localStorage.getItem(PROBE_ACTIVE_CH_KEY) } catch { return null }
+}
+// 首次加载时的迁移/兜底：老版本的单一配置（modelprobe-config.baseUrl/chatUrl/responsesUrl/anthropicUrl/timeout
+// + modelprobe-key 加密密文）迁移成一条「默认渠道」；密文直接搬运，无需解密重加密（同一套 AES-GCM passphrase）。
+// 必须是同步函数（用作 useState 懒初始化器）。
+function loadOrMigrateProbeChannels(): { channels: ProbeChannel[]; activeId: string | null } {
+  const existing = loadProbeChannelsRaw()
+  if (existing.length > 0) return { channels: existing, activeId: loadProbeActiveChId() }
+  const legacy = loadProbeCfg()
+  if (!legacy.baseUrl || !String(legacy.baseUrl).trim()) return { channels: [], activeId: null }
+  const legacyKeyEnc = (typeof window !== 'undefined' && localStorage.getItem(PROBE_KEY_STORAGE_KEY)) || ''
+  const ch: ProbeChannel = {
+    id: 'ch' + Date.now().toString(36) + Math.random().toString(36).slice(2, 7),
+    name: '默认渠道',
+    baseUrl: String(legacy.baseUrl).trim(),
+    timeoutSec: legacy.timeout ?? '60',
+    chatUrl: legacy.chatUrl ?? '',
+    responsesUrl: legacy.responsesUrl ?? '',
+    anthropicUrl: legacy.anthropicUrl ?? '',
+    apiKeyEnc: legacyKeyEnc,
+    keyMask: legacyKeyEnc ? '（已加密，未展示）' : '',
+  }
+  saveProbeChannels([ch])
+  try { localStorage.setItem(PROBE_ACTIVE_CH_KEY, ch.id) } catch { /* ignore */ }
+  return { channels: [ch], activeId: ch.id }
+}
+
+// 把一个渠道（+ 全局的 model）组装成执行器实际使用的 ProbeCfg：解密 apiKey、按渠道各自的三种协议 URL
+// 覆写（留空回退到 baseUrl）拼出完整请求地址。testConnection/runProbe 共用，避免重复现场拼装。
+async function probeBuildCfgFromChannel(ch: ProbeChannel, model: string, timeoutCapMs?: number): Promise<ProbeCfg> {
+  const apiKey = await decryptLlmApiKey(ch.apiKeyEnc)
+  const rawMs = (Number(ch.timeoutSec) || 60) * 1000
+  return {
+    baseUrl: ch.baseUrl, apiKey, model,
+    timeoutMs: timeoutCapMs != null ? Math.min(rawMs, timeoutCapMs) : rawMs,
+    urlOf: {
+      chat: probeJoinUrl(ch.chatUrl.trim() || ch.baseUrl, PROBE_ENDPOINTS.chat),
+      responses: probeJoinUrl(ch.responsesUrl.trim() || ch.baseUrl, PROBE_ENDPOINTS.responses),
+      anthropic: probeJoinUrl(ch.anthropicUrl.trim() || ch.baseUrl, PROBE_ENDPOINTS.anthropic),
+    },
+  }
+}
+
 function loadProbeHistory(): ProbeReport[] {
   if (typeof window === 'undefined') return []
   try {
@@ -462,16 +540,17 @@ function ProbeReportRow({ t, report }: { t: ProbeTestDef; report: ProbeReport })
 
 function ModelProbeTool() {
   const cfg0 = loadProbeCfg()
-  const [baseUrl, setBaseUrl] = useState(cfg0.baseUrl ?? 'https://api.openai.com')
   const [model, setModel] = useState(cfg0.model ?? '')
-  const [timeoutSec, setTimeoutSec] = useState(cfg0.timeout ?? '60')
-  const [chatUrl, setChatUrl] = useState(cfg0.chatUrl ?? '')
-  const [responsesUrl, setResponsesUrl] = useState(cfg0.responsesUrl ?? '')
-  const [anthropicUrl, setAnthropicUrl] = useState(cfg0.anthropicUrl ?? '')
   const [randomString, setRandomString] = useState(cfg0.randomString ?? probeMakeRandom())
   const [tokenRuns, setTokenRuns] = useState(cfg0.tokenRuns ?? '3')
-  const [apiKey, setApiKey] = useState('')
-  const [apiKeyLoaded, setApiKeyLoaded] = useState(false)
+
+  // 渠道（探测目标）：baseUrl/apiKey/超时/三种协议 URL 覆写都收在渠道对象里，可保存多个、选一个当前使用
+  const [channels, setChannels] = useState<ProbeChannel[]>(() => loadOrMigrateProbeChannels().channels)
+  const [activeChId, setActiveChId] = useState<string | null>(() => loadOrMigrateProbeChannels().activeId)
+  const [chForm, setChForm] = useState({ name: '', baseUrl: '', timeoutSec: '60', chatUrl: '', responsesUrl: '', anthropicUrl: '', apiKey: '' })
+  const [editingChId, setEditingChId] = useState<string | null>(null)
+  const [chNotice, setChNotice] = useState('')
+  const activeChannel = channels.find(c => c.id === activeChId) ?? null
 
   const [selected, setSelected] = useState<Record<string, boolean>>(() => {
     const all: Record<string, boolean> = {}
@@ -482,26 +561,66 @@ function ModelProbeTool() {
   useEffect(() => { selectedRef.current = selected }, [selected])
 
   useEffect(() => {
-    saveProbeCfg({ baseUrl, model, timeout: timeoutSec, chatUrl, responsesUrl, anthropicUrl, randomString, tokenRuns, selected })
-  }, [baseUrl, model, timeoutSec, chatUrl, responsesUrl, anthropicUrl, randomString, tokenRuns, selected])
+    saveProbeCfg({ model, randomString, tokenRuns, selected })
+  }, [model, randomString, tokenRuns, selected])
 
+  useEffect(() => { saveProbeChannels(channels) }, [channels])
   useEffect(() => {
-    let cancelled = false
-    const raw = typeof window !== 'undefined' ? localStorage.getItem(PROBE_KEY_STORAGE_KEY) : null
-    if (!raw) { setApiKeyLoaded(true); return }
-    decryptLlmApiKey(raw).then(v => { if (!cancelled) { if (v) setApiKey(v); setApiKeyLoaded(true) } })
-    return () => { cancelled = true }
-  }, [])
-  useEffect(() => {
-    if (!apiKeyLoaded) return
-    if (!apiKey) { try { localStorage.removeItem(PROBE_KEY_STORAGE_KEY) } catch { /* ignore */ }; return }
-    encryptLlmApiKey(apiKey).then(enc => {
-      if (!enc) return
-      try { localStorage.setItem(PROBE_KEY_STORAGE_KEY, enc) } catch { /* ignore */ }
-    })
-  }, [apiKey, apiKeyLoaded])
+    if (typeof window === 'undefined') return
+    try {
+      if (activeChId) localStorage.setItem(PROBE_ACTIVE_CH_KEY, activeChId)
+      else localStorage.removeItem(PROBE_ACTIVE_CH_KEY)
+    } catch { /* ignore */ }
+  }, [activeChId])
 
-  const [pane, setPane] = useState<'live' | 'logs' | 'report' | 'history'>('live')
+  const chToast = (m: string) => { setChNotice(m); setTimeout(() => setChNotice(''), 2200) }
+
+  const saveChannel = async () => {
+    const name = chForm.name.trim()
+    const base = chForm.baseUrl.trim().replace(/\/+$/, '')
+    const timeoutSecVal = chForm.timeoutSec.trim() || '60'
+    const key = chForm.apiKey.trim()
+    if (!name || !base) { chToast('请填写渠道名称与 baseUrl'); return }
+    let apiKeyEnc = ''
+    let keyMask = ''
+    if (key) {
+      const enc = await encryptLlmApiKey(key)
+      if (!enc) { chToast('加密失败，请重试'); return }
+      apiKeyEnc = enc
+      keyMask = key.slice(0, 8) + '••••' + key.slice(-4)
+    }
+    if (editingChId) {
+      const target = channels.find(c => c.id === editingChId)
+      if (!target) return
+      const nc: ProbeChannel = { ...target, name, baseUrl: base, timeoutSec: timeoutSecVal, chatUrl: chForm.chatUrl.trim(), responsesUrl: chForm.responsesUrl.trim(), anthropicUrl: chForm.anthropicUrl.trim() }
+      if (apiKeyEnc) { nc.apiKeyEnc = apiKeyEnc; nc.keyMask = keyMask }
+      setChannels(channels.map(c => c.id === editingChId ? nc : c))
+    } else {
+      if (!apiKeyEnc) { chToast('请填写 apiKey'); return }
+      const nc: ProbeChannel = {
+        id: 'ch' + Date.now().toString(36) + Math.random().toString(36).slice(2, 7), name, baseUrl: base, timeoutSec: timeoutSecVal,
+        chatUrl: chForm.chatUrl.trim(), responsesUrl: chForm.responsesUrl.trim(), anthropicUrl: chForm.anthropicUrl.trim(), apiKeyEnc, keyMask,
+      }
+      setChannels([...channels, nc])
+      if (!activeChId) setActiveChId(nc.id)
+    }
+    setChForm({ name: '', baseUrl: '', timeoutSec: '60', chatUrl: '', responsesUrl: '', anthropicUrl: '', apiKey: '' })
+    setEditingChId(null)
+    chToast('已保存')
+  }
+
+  const editChannel = (c: ProbeChannel) => {
+    setChForm({ name: c.name, baseUrl: c.baseUrl, timeoutSec: c.timeoutSec, chatUrl: c.chatUrl, responsesUrl: c.responsesUrl, anthropicUrl: c.anthropicUrl, apiKey: '' })
+    setEditingChId(c.id)
+  }
+
+  const delChannel = (id: string) => {
+    if (!window.confirm('删除该渠道？')) return
+    setChannels(channels.filter(c => c.id !== id))
+    if (activeChId === id) setActiveChId(null)
+  }
+
+  const [pane, setPane] = useState<'live' | 'logs' | 'report' | 'history' | 'channels'>('live')
   const [running, setRunning] = useState(false)
   const [nameModal, setNameModal] = useState(false)
   const [testName, setTestName] = useState('')
@@ -512,7 +631,6 @@ function ModelProbeTool() {
   const [openLogs, setOpenLogs] = useState<Record<string, boolean>>({})
   const [statuses, setStatuses] = useState<Record<string, { status: ProbeStatus | 'pending' | 'running'; detail: string }>>({})
   const [progress, setProgress] = useState<{ done: number; total: number; label: string }>({ done: 0, total: 0, label: '' })
-  const [advOpen, setAdvOpen] = useState(false)
   const [startErr, setStartErr] = useState('')
   const [connRunning, setConnRunning] = useState(false)
   const [connResults, setConnResults] = useState<Record<ProbeFormat, { ok: boolean; status: number | null; ms: number; err: string } | null>>({ chat: null, responses: null, anthropic: null })
@@ -784,17 +902,14 @@ function ModelProbeTool() {
   }
 
   const testConnection = async () => {
-    const cfg: ProbeCfg = {
-      baseUrl: baseUrl.trim(), apiKey, model: model.trim(),
-      timeoutMs: Math.min((Number(timeoutSec) || 60) * 1000, 15000),
-      urlOf: {
-        chat: probeJoinUrl(chatUrl.trim() || baseUrl.trim(), PROBE_ENDPOINTS.chat),
-        responses: probeJoinUrl(responsesUrl.trim() || baseUrl.trim(), PROBE_ENDPOINTS.responses),
-        anthropic: probeJoinUrl(anthropicUrl.trim() || baseUrl.trim(), PROBE_ENDPOINTS.anthropic),
-      },
+    const ch = activeChannel
+    if (!ch || !model.trim()) {
+      setStartErr('测试连接需要先在「渠道管理」选择一个渠道，并填写模型名称。')
+      return
     }
-    if (!cfg.baseUrl || !cfg.apiKey.trim() || !cfg.model) {
-      setStartErr('测试连接需要先填写默认 Base URL、API Key 与模型名称。')
+    const cfg = await probeBuildCfgFromChannel(ch, model.trim(), 15000)
+    if (!cfg.apiKey.trim()) {
+      setStartErr('渠道 API Key 解密失败，请重新编辑渠道并保存。')
       return
     }
     setStartErr('')
@@ -841,19 +956,14 @@ function ModelProbeTool() {
   }
 
   const runProbe = async (name: string) => {
-    const cfg: ProbeCfg = {
-      baseUrl: baseUrl.trim(), apiKey, model: model.trim(),
-      timeoutMs: (Number(timeoutSec) || 60) * 1000,
-      urlOf: {
-        chat: probeJoinUrl(chatUrl.trim() || baseUrl.trim(), PROBE_ENDPOINTS.chat),
-        responses: probeJoinUrl(responsesUrl.trim() || baseUrl.trim(), PROBE_ENDPOINTS.responses),
-        anthropic: probeJoinUrl(anthropicUrl.trim() || baseUrl.trim(), PROBE_ENDPOINTS.anthropic),
-      },
-    }
+    const ch = activeChannel
     const errs: string[] = []
-    if (!cfg.baseUrl) errs.push('默认 Base URL 不能为空。')
-    if (!cfg.apiKey.trim()) errs.push('API Key 不能为空。')
-    if (!cfg.model) errs.push('模型名称不能为空。')
+    if (!ch) errs.push('请先在「渠道管理」添加并选择一个渠道。')
+    if (!model.trim()) errs.push('模型名称不能为空。')
+    const cfg: ProbeCfg = ch
+      ? await probeBuildCfgFromChannel(ch, model.trim())
+      : { baseUrl: '', apiKey: '', model: model.trim(), timeoutMs: 60000, urlOf: { chat: '', responses: '', anthropic: '' } }
+    if (ch && !cfg.apiKey.trim()) errs.push('渠道 API Key 解密失败，请重新编辑渠道并保存。')
     const selectedTests = PROBE_TESTS.filter(t => selectedRef.current[t.id])
     if (!selectedTests.length) errs.push('请至少勾选一个测试项。')
     const paramIds = selectedTests.filter(t => t.kind === 'parameter').map(t => t.id)
@@ -985,8 +1095,8 @@ function ModelProbeTool() {
         id: 'p' + Date.now() + '_' + Math.random().toString(36).slice(2, 7),
         name, startedAt, completedAt: new Date().toISOString(), durationMs: Date.now() - startMs,
         target: {
-          baseUrl: cfg.baseUrl, model: cfg.model,
-          overrides: { chat: chatUrl.trim() || null, responses: responsesUrl.trim() || null, anthropic: anthropicUrl.trim() || null },
+          baseUrl: cfg.baseUrl, model: cfg.model, channelName: ch?.name,
+          overrides: { chat: ch?.chatUrl.trim() || null, responses: ch?.responsesUrl.trim() || null, anthropic: ch?.anthropicUrl.trim() || null },
         },
         results: resultsObj, summary, logs: logsRef.current,
       }
@@ -1002,13 +1112,26 @@ function ModelProbeTool() {
     setReport(rep)
     setPane('report')
   }
+  // baseUrl/超时/协议 URL 覆写已归入渠道，不再是可直接写回的扁平字段：优先匹配一个 baseUrl 相同的
+  // 已存渠道并切过去；匹配不到就把历史配置带入「渠道管理」的新增表单，跳转过去待用户补充 apiKey 后保存。
   const reuseHistoryConfig = (rep: ProbeReport) => {
-    setBaseUrl(rep.target.baseUrl)
     setModel(rep.target.model)
-    setChatUrl(rep.target.overrides.chat ?? '')
-    setResponsesUrl(rep.target.overrides.responses ?? '')
-    setAnthropicUrl(rep.target.overrides.anthropic ?? '')
-    setPane('live')
+    const matched = channels.find(c => c.baseUrl === rep.target.baseUrl)
+    if (matched) {
+      setActiveChId(matched.id)
+      setPane('live')
+      setChNotice(`已回填模型「${rep.target.model}」，并切换到渠道「${matched.name}」。`)
+    } else {
+      setChForm({
+        name: '', baseUrl: rep.target.baseUrl, timeoutSec: '60',
+        chatUrl: rep.target.overrides.chat ?? '', responsesUrl: rep.target.overrides.responses ?? '', anthropicUrl: rep.target.overrides.anthropic ?? '',
+        apiKey: '',
+      })
+      setEditingChId(null)
+      setPane('channels')
+      setChNotice(`已从历史报告带入 Base URL 到「渠道管理」新增表单，请补充 API Key 后保存。`)
+    }
+    setTimeout(() => setChNotice(''), 4000)
   }
 
   useEffect(() => {
@@ -1153,7 +1276,7 @@ function ModelProbeTool() {
           {running ? (
             <Btn variant="danger" onClick={() => { stopRef.current = true; activeAbortRef.current?.abort() }}>⏹ 停止</Btn>
           ) : (
-            <Btn variant="primary" onClick={() => { setTestName(probeNowName()); setNameModal(true) }} disabled={!apiKey.trim() || !baseUrl.trim() || !model.trim()}>▶ 开始测试</Btn>
+            <Btn variant="primary" onClick={() => { setTestName(probeNowName()); setNameModal(true) }} disabled={!activeChannel || !model.trim()}>▶ 开始测试</Btn>
           )}
         </div>
       </div>
@@ -1162,26 +1285,20 @@ function ModelProbeTool() {
         {/* 左侧配置栏 */}
         <div className="w-72 flex-shrink-0 flex flex-col p-4 gap-3.5 overflow-y-auto" style={{ borderRight: '1px solid var(--border)', background: 'var(--s1)' }}>
           <div>
-            <Label className="block mb-1.5">默认 Base URL</Label>
-            <CustomInput value={baseUrl} onChange={setBaseUrl} placeholder="https://api.openai.com" />
-          </div>
-          <div>
-            <Label className="block mb-1.5">API Key</Label>
-            <CustomInput value={apiKey} onChange={setApiKey} placeholder="sk-...（本地加密存储）" type="password" />
+            <Label className="block mb-1.5">使用渠道</Label>
+            <CustomSelect value={activeChId ?? ''} onChange={v => setActiveChId(v)}
+              options={channels.map(c => ({ value: c.id, label: `${c.name} — ${c.baseUrl}` }))} />
+            {channels.length === 0 && <p className="text-xs mt-1.5" style={{ color: 'var(--warn)' }}>⚠ 请先到「渠道管理」添加渠道。</p>}
           </div>
           <div>
             <Label className="block mb-1.5">模型名称</Label>
             <CustomInput value={model} onChange={setModel} placeholder="gpt-4o-mini / deepseek-chat" />
           </div>
-          <div>
-            <Label className="block mb-1.5">请求超时（秒）</Label>
-            <CustomInput value={timeoutSec} onChange={setTimeoutSec} type="number" placeholder="60" />
-          </div>
 
           <div style={{ borderTop: '1px solid var(--border)', paddingTop: 14 }}>
             <div className="flex items-center justify-between mb-2">
               <Label className="block">连接测试</Label>
-              <Btn small variant="soft" onClick={testConnection} disabled={running || connRunning || !apiKey.trim() || !baseUrl.trim() || !model.trim()}>
+              <Btn small variant="soft" onClick={testConnection} disabled={running || connRunning || !activeChannel || !model.trim()}>
                 {connRunning ? '测试中…' : '测试连接'}
               </Btn>
             </div>
@@ -1205,32 +1322,6 @@ function ModelProbeTool() {
           </div>
 
           <div style={{ borderTop: '1px solid var(--border)', paddingTop: 14 }}>
-            <button onClick={() => setAdvOpen(o => !o)} className="w-full flex items-center justify-between cursor-pointer border-0 outline-none text-sm font-semibold"
-              style={{ background: 'transparent', color: 'var(--text)', fontFamily: 'inherit', padding: 0 }}>
-              <span>高级设置</span>
-              <span style={{ color: 'var(--t3)' }}>{advOpen ? '−' : '+'}</span>
-            </button>
-            {advOpen && (
-              <div className="mt-3 space-y-3">
-                {(['chat', 'responses', 'anthropic'] as ProbeFormat[]).map(f => {
-                  const val = f === 'chat' ? chatUrl : f === 'responses' ? responsesUrl : anthropicUrl
-                  const setVal = f === 'chat' ? setChatUrl : f === 'responses' ? setResponsesUrl : setAnthropicUrl
-                  const fallback = !val.trim()
-                  return (
-                    <div key={f}>
-                      <div className="flex items-center justify-between mb-1.5">
-                        <span className="text-xs font-semibold" style={{ color: 'var(--t2)' }}>{PROBE_FORMAT_LABELS[f]}</span>
-                        <span className="text-[10px] px-1.5 py-0.5 rounded" style={{ background: fallback ? 'var(--s2)' : 'var(--accentSub)', color: fallback ? 'var(--t3)' : 'var(--accent)' }}>{fallback ? '回退默认' : '独立配置'}</span>
-                      </div>
-                      <CustomInput value={val} onChange={setVal} placeholder={baseUrl || 'https://api.example.com'} />
-                    </div>
-                  )
-                })}
-              </div>
-            )}
-          </div>
-
-          <div style={{ borderTop: '1px solid var(--border)', paddingTop: 14 }}>
             <Label className="block mb-1.5">Token 稳定性配置</Label>
             <div className="flex gap-2">
               <CustomInput value={randomString} onChange={setRandomString} mono placeholder="FIXED-XXXX" />
@@ -1249,11 +1340,12 @@ function ModelProbeTool() {
         {/* 右侧结果区 */}
         <div className="flex-1 flex flex-col overflow-hidden">
           <div className="glass flex items-center px-6 py-3 flex-shrink-0" style={{ borderBottom: '1px solid var(--border)' }}>
-            <SegmentedControl value={pane} onChange={v => setPane(v as 'live' | 'logs' | 'report' | 'history')} options={[
+            <SegmentedControl value={pane} onChange={v => setPane(v as 'live' | 'logs' | 'report' | 'history' | 'channels')} options={[
               { value: 'live', label: '实时进度' },
               { value: 'logs', label: `请求日志 (${logs.length})` },
               { value: 'report', label: '测试报告' },
               { value: 'history', label: `历史 (${history.length})` },
+              { value: 'channels', label: `渠道管理 (${channels.length})` },
             ]} />
           </div>
 
@@ -1393,6 +1485,73 @@ function ModelProbeTool() {
                     ))}
                   </div>
                 )}
+              </div>
+            )}
+
+            {pane === 'channels' && (
+              <div className="p-5 flex flex-col gap-4">
+                {chNotice && <p className="text-xs" style={{ color: 'var(--accent)' }}>{chNotice}</p>}
+                <Card>
+                  <p className="text-sm font-bold mb-3" style={{ color: 'var(--text)' }}>
+                    已保存的渠道 <span className="inline-flex items-center justify-center rounded-full px-2 py-0.5 text-xs font-bold ml-1" style={{ background: 'var(--accentSub)', color: 'var(--accent)' }}>{channels.length}</span>
+                  </p>
+                  {channels.length === 0 && <p className="text-xs mb-3" style={{ color: 'var(--t3)' }}>还没有渠道，请在下方添加。</p>}
+                  <div className="grid grid-cols-1 xl:grid-cols-2 gap-3">
+                    {channels.map(c => (
+                      <div key={c.id} className="rounded-2xl p-4 relative" style={{ border: `1px solid ${c.id === activeChId ? 'var(--accent)' : 'var(--border)'}`, background: c.id === activeChId ? 'var(--accentSub)' : 'var(--s1)' }}>
+                        {c.id === activeChId && <span className="absolute top-3 right-4 text-[11px] font-bold" style={{ color: 'var(--accent)' }}>✓ 当前使用</span>}
+                        <div className="text-sm font-bold pr-16 truncate" style={{ color: 'var(--text)' }}>{c.name}</div>
+                        <div className="text-xs break-all mt-1" style={{ color: 'var(--t3)' }}>{c.baseUrl}</div>
+                        <div className="text-[11px] mt-0.5" style={{ color: 'var(--t3)' }}>超时 {c.timeoutSec}s</div>
+                        {(c.chatUrl || c.responsesUrl || c.anthropicUrl) && (
+                          <div className="text-[11px] mt-0.5" style={{ color: 'var(--t3)' }}>
+                            已独立配置：{[c.chatUrl && 'Chat', c.responsesUrl && 'Responses', c.anthropicUrl && 'Anthropic'].filter(Boolean).join(' / ')}
+                          </div>
+                        )}
+                        <div className="text-[11px] font-mono mt-1" style={{ color: 'var(--t3)' }}>{c.keyMask || '（未设置）'}</div>
+                        <div className="flex gap-2 mt-3">
+                          <Btn small variant="soft" onClick={() => setActiveChId(c.id)}>设为当前</Btn>
+                          <Btn small variant="soft" onClick={() => editChannel(c)}>编辑</Btn>
+                          <Btn small variant="danger" onClick={() => delChannel(c.id)}>删除</Btn>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                </Card>
+                <Card>
+                  <p className="text-sm font-bold mb-3" style={{ color: 'var(--text)' }}>{editingChId ? '编辑渠道' : '添加新渠道'}</p>
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                    <div>
+                      <Label className="block mb-1.5">渠道名称</Label>
+                      <CustomInput value={chForm.name} onChange={v => setChForm(f => ({ ...f, name: v }))} placeholder="例如：主线-OpenAI 兼容网关" />
+                    </div>
+                    <div>
+                      <Label className="block mb-1.5">Base URL</Label>
+                      <CustomInput value={chForm.baseUrl} onChange={v => setChForm(f => ({ ...f, baseUrl: v }))} placeholder="https://api.openai.com" mono />
+                    </div>
+                    <div>
+                      <Label className="block mb-1.5">请求超时（秒）</Label>
+                      <CustomInput value={chForm.timeoutSec} onChange={v => setChForm(f => ({ ...f, timeoutSec: v }))} type="number" placeholder="60" />
+                    </div>
+                    <div>
+                      <Label className="block mb-1.5">apiKey {editingChId ? '（留空保持不变，本地加密存储）' : ''}</Label>
+                      <CustomInput value={chForm.apiKey} onChange={v => setChForm(f => ({ ...f, apiKey: v }))} type="password" placeholder="sk-xxxxxxxx" mono />
+                    </div>
+                  </div>
+                  <div className="mt-3">
+                    <Label className="block mb-1.5">三种协议独立接入地址（可选，留空则回退默认）</Label>
+                    <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+                      <CustomInput value={chForm.chatUrl} onChange={v => setChForm(f => ({ ...f, chatUrl: v }))} placeholder={`${PROBE_FORMAT_LABELS.chat} Base URL`} mono />
+                      <CustomInput value={chForm.responsesUrl} onChange={v => setChForm(f => ({ ...f, responsesUrl: v }))} placeholder={`${PROBE_FORMAT_LABELS.responses} Base URL`} mono />
+                      <CustomInput value={chForm.anthropicUrl} onChange={v => setChForm(f => ({ ...f, anthropicUrl: v }))} placeholder={`${PROBE_FORMAT_LABELS.anthropic} Base URL`} mono />
+                    </div>
+                  </div>
+                  <div className="flex items-center gap-3 mt-4 flex-wrap">
+                    <Btn variant="primary" onClick={saveChannel}>保存渠道</Btn>
+                    <Btn variant="soft" onClick={() => { setChForm({ name: '', baseUrl: '', timeoutSec: '60', chatUrl: '', responsesUrl: '', anthropicUrl: '', apiKey: '' }); setEditingChId(null) }}>清空表单</Btn>
+                    <span className="text-[11px]" style={{ color: 'var(--t3)' }}>渠道信息保存在本浏览器 localStorage 中（apiKey 经 AES-GCM 加密）。</span>
+                  </div>
+                </Card>
               </div>
             )}
           </div>

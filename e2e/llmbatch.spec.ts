@@ -20,13 +20,24 @@ const ANTHROPIC_OK_BODY = (model: string, inputTokens: number, outputTokens: num
   content: [{ type: 'text', text: '这是一段测试回复。' }],
 })
 
+// 渠道管理已取代左侧栏直填 baseUrl/apiKey（见「渠道管理」Tab）：新增一个渠道并保存，
+// 首个渠道会自动设为当前使用。点「开始批量请求」时会自动把右侧面板切回「实时」，
+// 所以这里不需要手动切回去。
+async function addChannel(page: import('@playwright/test').Page, opts: { apiKey: string; baseUrl?: string; name?: string }) {
+  await page.getByRole('button', { name: /渠道管理/ }).click()
+  await inputByLabel(page, '渠道名称').fill(opts.name ?? '测试渠道')
+  await inputByLabel(page, 'Base URL').fill(opts.baseUrl ?? 'https://api.anthropic.com')
+  await inputByLabel(page, 'apiKey').fill(opts.apiKey)
+  await page.getByRole('button', { name: '保存渠道' }).click()
+}
+
 test.describe('LLM 批量测试', () => {
   test('mock 200：报告统计成功数、一致性校验与输出 Token 均值', async ({ page }) => {
     await page.route('**/v1/messages', route =>
       route.fulfill({ status: 200, contentType: 'application/json', body: ANTHROPIC_OK_BODY('claude-3-5-sonnet-20241022', 10, 5) }))
 
     await goto(page, /LLM 批量测试/)
-    await inputByLabel(page, 'API Key').fill('sk-test')
+    await addChannel(page, { apiKey: 'sk-test' })
     await fieldOf(page, '每模型次数 N').locator('input').fill('3')
     const run = page.getByRole('button', { name: /开始批量请求/ })
     await expect(run).toBeEnabled()
@@ -47,7 +58,7 @@ test.describe('LLM 批量测试', () => {
       route.fulfill({ status: 500, contentType: 'application/json', body: JSON.stringify({ error: { message: 'boom' } }) }))
 
     await goto(page, /LLM 批量测试/)
-    await inputByLabel(page, 'API Key').fill('sk-test')
+    await addChannel(page, { apiKey: 'sk-test' })
     await fieldOf(page, '每模型次数 N').locator('input').fill('2')
     await page.getByRole('button', { name: /开始批量请求/ }).click()
 
@@ -65,7 +76,7 @@ test.describe('LLM 批量测试', () => {
     })
 
     await goto(page, /LLM 批量测试/)
-    await inputByLabel(page, 'API Key').fill('sk-test')
+    await addChannel(page, { apiKey: 'sk-test' })
     await fieldOf(page, '模型列表').locator('textarea').fill('claude-3-5-sonnet-20241022\nclaude-3-haiku-20240307')
     await fieldOf(page, '每模型次数 N').locator('input').fill('2')
     await fieldOf(page, '全局并发数 C').locator('input').fill('2')
@@ -87,7 +98,7 @@ test.describe('LLM 批量测试', () => {
     })
 
     await goto(page, /LLM 批量测试/)
-    await inputByLabel(page, 'API Key').fill('sk-test')
+    await addChannel(page, { apiKey: 'sk-test' })
     await fieldOf(page, '模型列表').locator('textarea').fill('model-a\nmodel-b')
     await fieldOf(page, '每模型次数 N').locator('input').fill('1')
     await fieldOf(page, '全局并发数 C').locator('input').fill('2')
@@ -106,7 +117,7 @@ test.describe('LLM 批量测试', () => {
     })
 
     await goto(page, /LLM 批量测试/)
-    await inputByLabel(page, 'API Key').fill('sk-test')
+    await addChannel(page, { apiKey: 'sk-test' })
     await fieldOf(page, '每模型次数 N').locator('input').fill('2')
     await fieldOf(page, '全局并发数 C').locator('input').fill('1') // 串行保证 call 顺序稳定
     await page.getByRole('button', { name: /开始批量请求/ }).click()
@@ -124,7 +135,7 @@ test.describe('LLM 批量测试', () => {
       route.fulfill({ status: 200, contentType: 'application/json', body: ANTHROPIC_OK_BODY(longModel, 12, 6) }))
 
     await goto(page, /LLM 批量测试/)
-    await inputByLabel(page, 'API Key').fill('sk-test')
+    await addChannel(page, { apiKey: 'sk-test' })
     await fieldOf(page, '模型列表').locator('textarea').fill(longModel)
     await fieldOf(page, '每模型次数 N').locator('input').fill('1')
     await page.getByRole('button', { name: /开始批量请求/ }).click()
@@ -142,7 +153,7 @@ test.describe('LLM 批量测试', () => {
       route.fulfill({ status: 200, contentType: 'application/json', body: ANTHROPIC_OK_BODY('some-other-model', 10, 5) }))
 
     await goto(page, /LLM 批量测试/)
-    await inputByLabel(page, 'API Key').fill('sk-test')
+    await addChannel(page, { apiKey: 'sk-test' })
     await fieldOf(page, '每模型次数 N').locator('input').fill('1')
     await page.getByRole('button', { name: /开始批量请求/ }).click()
 
@@ -159,7 +170,7 @@ test.describe('LLM 批量测试', () => {
     })
 
     await goto(page, /LLM 批量测试/)
-    await inputByLabel(page, 'API Key').fill('sk-test')
+    await addChannel(page, { apiKey: 'sk-test' })
     await fieldOf(page, '每模型次数 N').locator('input').fill('2')
     await fieldOf(page, '全局并发数 C').locator('input').fill('1')
     await page.getByRole('button', { name: /开始批量请求/ }).click()
@@ -177,7 +188,7 @@ test.describe('LLM 批量测试', () => {
       route.fulfill({ status: 200, contentType: 'application/json', body: ANTHROPIC_OK_BODY('claude-3-5-sonnet-20241022', 7, 3) }))
 
     await goto(page, /LLM 批量测试/)
-    await inputByLabel(page, 'API Key').fill('sk-test')
+    await addChannel(page, { apiKey: 'sk-test' })
     await fieldOf(page, '每模型次数 N').locator('input').fill('1')
     await page.getByRole('button', { name: /开始批量请求/ }).click()
     await expect(page.locator('main')).toContainText('总请求')
@@ -197,7 +208,7 @@ test.describe('LLM 批量测试', () => {
       route.fulfill({ status: 200, contentType: 'application/json', body: ANTHROPIC_OK_BODY('claude-3-5-sonnet-20241022', 9, 4) }))
 
     await goto(page, /LLM 批量测试/)
-    await inputByLabel(page, 'API Key').fill('sk-test')
+    await addChannel(page, { apiKey: 'sk-test' })
     await fieldOf(page, '每模型次数 N').locator('input').fill('1')
     await page.getByRole('button', { name: /开始批量请求/ }).click()
     await expect(page.locator('main')).toContainText('总请求')
@@ -210,29 +221,37 @@ test.describe('LLM 批量测试', () => {
     expect(download.suggestedFilename()).toMatch(/^report_\d{8}_\d{6}\.csv$/)
   })
 
-  test('API Key 加密后持久化：reload 后自动回填，localStorage 中不含明文', async ({ page }) => {
+  test('渠道 API Key 加密后持久化：reload 后仍在，localStorage 中不含明文', async ({ page }) => {
     await goto(page, /LLM 批量测试/)
-    await inputByLabel(page, 'API Key').fill('sk-test-secret-abc123')
-    // 等待加密写入完成（异步 Web Crypto），轮询直到 llmbatch-key 出现
-    await expect.poll(() => page.evaluate(() => localStorage.getItem('llmbatch-key'))).toBeTruthy()
+    await addChannel(page, { name: '测试渠道', apiKey: 'sk-test-secret-abc123' })
+    await expect(page.getByText('测试渠道', { exact: true })).toBeVisible()
+    await expect(page.getByText('✓ 当前使用')).toBeVisible()
 
-    const stored = await page.evaluate(() => localStorage.getItem('llmbatch-key'))
+    const stored = await page.evaluate(() => localStorage.getItem('llmbatch-channels'))
+    expect(stored).toBeTruthy()
     expect(stored).not.toContain('sk-test-secret-abc123') // 落盘的是密文，不是明文
 
     await page.reload()
     await page.getByRole('link', { name: /LLM 批量测试/ }).first().click()
-    // 解密回填后，开始按钮应因 apiKey/baseUrl 均非空而可用
+    await page.getByRole('button', { name: /渠道管理/ }).click()
+    // reload 后渠道列表与「当前使用」状态仍从 localStorage 正确恢复
+    await expect(page.getByText('测试渠道', { exact: true })).toBeVisible()
+    await expect(page.getByText('✓ 当前使用')).toBeVisible()
     await expect(page.getByRole('button', { name: /开始批量请求/ })).toBeEnabled()
-    await expect(inputByLabel(page, 'API Key')).toHaveValue('sk-test-secret-abc123')
   })
 
-  test('清空 API Key 会清除本地加密存储', async ({ page }) => {
+  test('删除渠道后本地加密存储一并清除', async ({ page }) => {
     await goto(page, /LLM 批量测试/)
-    await inputByLabel(page, 'API Key').fill('sk-test-to-clear')
-    await expect.poll(() => page.evaluate(() => localStorage.getItem('llmbatch-key'))).toBeTruthy()
+    await addChannel(page, { name: '待删除渠道', apiKey: 'sk-test-to-clear' })
+    await expect.poll(() => page.evaluate(() => localStorage.getItem('llmbatch-channels'))).toContain('待删除渠道')
 
-    await inputByLabel(page, 'API Key').fill('')
-    await expect.poll(() => page.evaluate(() => localStorage.getItem('llmbatch-key'))).toBeNull()
+    page.once('dialog', d => d.accept())
+    await page.getByRole('button', { name: '删除', exact: true }).click()
+
+    await expect(page.getByText('还没有渠道，请在下方添加。')).toBeVisible()
+    const stored = await page.evaluate(() => localStorage.getItem('llmbatch-channels'))
+    expect(stored).not.toContain('待删除渠道')
+    await expect(page.getByRole('button', { name: /开始批量请求/ })).toBeDisabled()
   })
 
   test('报告支持查看请求体与复制 cURL', async ({ page }) => {
@@ -240,7 +259,7 @@ test.describe('LLM 批量测试', () => {
       route.fulfill({ status: 200, contentType: 'application/json', body: ANTHROPIC_OK_BODY('claude-3-5-sonnet-20241022', 8, 4) }))
 
     await goto(page, /LLM 批量测试/)
-    await inputByLabel(page, 'API Key').fill('sk-test-curl')
+    await addChannel(page, { apiKey: 'sk-test-curl' })
     await fieldOf(page, '每模型次数 N').locator('input').fill('1')
     await page.getByRole('button', { name: /开始批量请求/ }).click()
     await expect(page.locator('main')).toContainText('总请求 1')
@@ -259,12 +278,14 @@ test.describe('LLM 批量测试', () => {
 
   // 通过 localStorage 直接种一条 OpenAI Chat 协议的流式提示词，绕开提示词编辑弹窗操作，
   // 专注验证 doLlmRequest 里 stream_options 注入与 SSE usage 提取的行为。
+  // baseUrl 已归入渠道，不再通过 llmbatch-config 预置，而是各用例里用 addChannel 显式创建，
+  // 避免与「旧配置自动迁移为默认渠道」的逻辑产生冲突。
   function seedOpenaiChatStreamPrompt(page: import('@playwright/test').Page, bodyObj: Record<string, unknown>) {
     return page.addInitScript(([cfg, prompt]) => {
       localStorage.setItem('llmbatch-config', cfg as string)
       localStorage.setItem('llmbatch-prompts', prompt as string)
     }, [
-      JSON.stringify({ apiType: 'openai_chat', baseUrl: 'https://api.example.com' }),
+      JSON.stringify({ apiType: 'openai_chat' }),
       JSON.stringify([{ id: 'p1', title: 'stream-test', body: JSON.stringify(bodyObj), createdAt: 1, updatedAt: 1 }]),
     ])
   }
@@ -286,7 +307,7 @@ test.describe('LLM 批量测试', () => {
     })
 
     await goto(page, /LLM 批量测试/)
-    await inputByLabel(page, 'API Key').fill('sk-test')
+    await addChannel(page, { apiKey: 'sk-test', baseUrl: 'https://api.example.com' })
     await fieldOf(page, '每模型次数 N').locator('input').fill('1')
     await page.getByRole('button', { name: /开始批量请求/ }).click()
     await expect(page.locator('main')).toContainText('总请求 1')
@@ -322,7 +343,7 @@ test.describe('LLM 批量测试', () => {
     })
 
     await goto(page, /LLM 批量测试/)
-    await inputByLabel(page, 'API Key').fill('sk-test')
+    await addChannel(page, { apiKey: 'sk-test', baseUrl: 'https://api.example.com' })
     await fieldOf(page, '每模型次数 N').locator('input').fill('1')
     await page.getByRole('button', { name: /开始批量请求/ }).click()
     await expect(page.locator('main')).toContainText('总请求 1')
@@ -349,7 +370,7 @@ test.describe('LLM 批量测试', () => {
       route.fulfill({ status: 200, contentType: 'text/event-stream', body: sse }))
 
     await goto(page, /LLM 批量测试/)
-    await inputByLabel(page, 'API Key').fill('sk-test')
+    await addChannel(page, { apiKey: 'sk-test', baseUrl: 'https://api.example.com' })
     await fieldOf(page, '每模型次数 N').locator('input').fill('1')
     await page.getByRole('button', { name: /开始批量请求/ }).click()
     await expect(page.locator('main')).toContainText('总请求 1')

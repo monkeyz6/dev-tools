@@ -231,6 +231,7 @@ export interface BatchReport {
   endpoint: string
   baseUrl?: string
   timeout?: number
+  channelName?: string
   bodyText: string
   promptId?: string | null
   models: string[]
@@ -250,6 +251,17 @@ interface LlmBatchCfg {
   timeout: number
   bodyText: string
   storeResponseBody: boolean
+}
+
+// ── 渠道（连接目标）：baseUrl + apiKey + 超时，可保存多个、选一个当前使用；
+// apiType（协议）/模型列表保持全局，不属于渠道 ──
+interface LlmChannel {
+  id: string
+  name: string
+  baseUrl: string
+  timeoutSec: string
+  apiKeyEnc: string
+  keyMask: string
 }
 
 // ── 提示词库：可管理、可搜索、可拖拽排序的请求体来源 ──
@@ -905,17 +917,19 @@ async function exportReportAsHtml(rootEl: HTMLElement, filename: string) {
   }
 }
 
-// ── 持久化：配置、加密后的 API Key、历史报告（最多 20 条）、提示词库 ──
+// ── 持久化：配置、加密后的 API Key、历史报告（最多 20 条）、提示词库、渠道列表 ──
 const LLM_CFG_KEY = 'llmbatch-config'
-const LLM_KEY_STORAGE_KEY = 'llmbatch-key'
+const LLM_KEY_STORAGE_KEY = 'llmbatch-key'   // 旧字段：单一配置的加密 apiKey，已迁移到渠道，仅保留供一次性迁移读取
 const LLM_HIST_KEY = 'llmbatch-history'
 const LLM_HIST_MAX = 20
 const LLM_PROMPTS_KEY = 'llmbatch-prompts'
+const LLM_CHANNELS_KEY = 'llmbatch-channels'
+const LLM_ACTIVE_CH_KEY = 'llmbatch-active-channel'
 
 interface LlmBatchCfgStored {
   apiType?: ApiType
-  baseUrl?: string
-  timeout?: string
+  baseUrl?: string               // 旧字段：单一配置的 baseUrl，已迁移到渠道，仅保留供一次性迁移读取，不再写入
+  timeout?: string                // 旧字段：单一配置的超时，已迁移到渠道，仅保留供一次性迁移读取，不再写入
   models?: string
   n?: string
   c?: string
@@ -1012,6 +1026,48 @@ function loadOrMigrateLlmPrompts(): LlmPrompt[] {
     : makeLlmPrompt('示例提示词', DEFAULT_LLM_BODY)
   saveLlmPrompts([seed])
   return [seed]
+}
+
+// ── 持久化：渠道（连接目标）列表 + 当前激活渠道 ──
+function loadLlmChannelsRaw(): LlmChannel[] {
+  if (typeof window === 'undefined') return []
+  try {
+    const raw = localStorage.getItem(LLM_CHANNELS_KEY)
+    if (!raw) return []
+    const list = JSON.parse(raw)
+    if (!Array.isArray(list)) return []
+    return list.filter((c): c is LlmChannel =>
+      c && typeof c === 'object' && typeof c.id === 'string' && typeof c.name === 'string' && typeof c.baseUrl === 'string')
+  } catch { return [] }
+}
+function saveLlmChannels(list: LlmChannel[]) {
+  if (typeof window === 'undefined') return
+  try { localStorage.setItem(LLM_CHANNELS_KEY, JSON.stringify(list)) } catch { /* ignore */ }
+}
+function loadLlmActiveChId(): string | null {
+  if (typeof window === 'undefined') return null
+  try { return localStorage.getItem(LLM_ACTIVE_CH_KEY) } catch { return null }
+}
+// 首次加载时的迁移/兜底：老版本的单一配置（llmbatch-config.baseUrl/timeout + llmbatch-key 加密密文）
+// 迁移成一条「默认渠道」；密文直接搬运，无需解密重加密（同一套 AES-GCM passphrase，见 shared/api-key-crypto.ts）。
+// 必须是同步函数（用作 useState 懒初始化器），保证首帧渲染前渠道已就绪。
+function loadOrMigrateLlmChannels(): { channels: LlmChannel[]; activeId: string | null } {
+  const existing = loadLlmChannelsRaw()
+  if (existing.length > 0) return { channels: existing, activeId: loadLlmActiveChId() }
+  const legacyBaseUrl = loadLlmCfg().baseUrl
+  if (!legacyBaseUrl || !legacyBaseUrl.trim()) return { channels: [], activeId: null }
+  const legacyKeyEnc = (typeof window !== 'undefined' && localStorage.getItem(LLM_KEY_STORAGE_KEY)) || ''
+  const ch: LlmChannel = {
+    id: 'ch' + Date.now().toString(36) + Math.random().toString(36).slice(2, 7),
+    name: '默认渠道',
+    baseUrl: legacyBaseUrl.trim(),
+    timeoutSec: loadLlmCfg().timeout ?? '120',
+    apiKeyEnc: legacyKeyEnc,
+    keyMask: legacyKeyEnc ? '（已加密，未展示）' : '',
+  }
+  saveLlmChannels([ch])
+  try { localStorage.setItem(LLM_ACTIVE_CH_KEY, ch.id) } catch { /* ignore */ }
+  return { channels: [ch], activeId: ch.id }
 }
 
 // 表格里的长文本单元格（模型名等）：单行截断 + 原生 title 提示，鼠标悬浮可见完整内容
@@ -1621,10 +1677,12 @@ function LlmPromptsPane({ prompts, onChange }: {
 function LlmBatchTool() {
   // ── 配置（持久化）──
   const [apiType, setApiType] = useState<ApiType>(() => loadLlmCfg().apiType ?? 'anthropic')
-  const [baseUrl, setBaseUrl] = useState(() => loadLlmCfg().baseUrl ?? 'https://api.anthropic.com')
-  const [apiKey, setApiKey] = useState('')
-  const [apiKeyLoaded, setApiKeyLoaded] = useState(false) // 解密完成前不落盘，避免用初始空值把已保存的 key 冲掉
-  const [timeoutSec, setTimeoutSec] = useState(() => loadLlmCfg().timeout ?? '120')
+  // 渠道（连接目标）：baseUrl/apiKey/超时都收在渠道对象里，可保存多个、选一个当前使用
+  const [channels, setChannels] = useState<LlmChannel[]>(() => loadOrMigrateLlmChannels().channels)
+  const [activeChId, setActiveChId] = useState<string | null>(() => loadOrMigrateLlmChannels().activeId)
+  const [chForm, setChForm] = useState({ name: '', baseUrl: '', timeoutSec: '120', apiKey: '' })
+  const [editingChId, setEditingChId] = useState<string | null>(null)
+  const [chNotice, setChNotice] = useState('')
   const [modelListText, setModelListText] = useState(() => loadLlmCfg().models ?? 'claude-3-5-sonnet-20241022')
   const [nReq, setNReq] = useState(() => loadLlmCfg().n ?? '5')
   const [concurrency, setConcurrency] = useState(() => loadLlmCfg().c ?? '3')
@@ -1643,6 +1701,7 @@ function LlmBatchTool() {
 
   const selectedPrompt = prompts.find(p => p.id === selectedPromptId) ?? null
   const promptBodyErr = selectedPrompt ? validateLlmBodyJson(selectedPrompt.body) : ''
+  const activeChannel = channels.find(c => c.id === activeChId) ?? null
 
   // 根据当前 API 类型自动识别提示词请求体协议并按需转换：级联在 promptBodyErr 之后
   // （语法都不对就不跑识别，交给 promptBodyErr 展示），只在运行时生效，绝不写回提示词库。
@@ -1653,30 +1712,75 @@ function LlmBatchTool() {
   }, [selectedPrompt?.body, apiType, promptBodyErr])
 
   useEffect(() => {
-    saveLlmCfg({ apiType, baseUrl, timeout: timeoutSec, models: modelListText, n: nReq, c: concurrency, promptId: selectedPromptId ?? undefined, storeResponseBody, testTitle })
-  }, [apiType, baseUrl, timeoutSec, modelListText, nReq, concurrency, selectedPromptId, storeResponseBody])
+    saveLlmCfg({ apiType, models: modelListText, n: nReq, c: concurrency, promptId: selectedPromptId ?? undefined, storeResponseBody, testTitle })
+  }, [apiType, modelListText, nReq, concurrency, selectedPromptId, storeResponseBody])
 
   useEffect(() => { saveLlmPrompts(prompts) }, [prompts])
 
-  // API Key 加密存储：挂载时异步解密回填一次；此后每次变化都异步加密后写回
+  useEffect(() => { saveLlmChannels(channels) }, [channels])
+  useEffect(() => {
+    if (typeof window === 'undefined') return
+    try {
+      if (activeChId) localStorage.setItem(LLM_ACTIVE_CH_KEY, activeChId)
+      else localStorage.removeItem(LLM_ACTIVE_CH_KEY)
+    } catch { /* ignore */ }
+  }, [activeChId])
+
+  // 当前激活渠道的明文 apiKey：只用于「测试报告」里生成可复制的 curl 命令展示，实际发请求时在 runBatch 里现场解密
+  const [activeApiKey, setActiveApiKey] = useState('')
   useEffect(() => {
     let cancelled = false
-    const raw = typeof window !== 'undefined' ? localStorage.getItem(LLM_KEY_STORAGE_KEY) : null
-    if (!raw) { setApiKeyLoaded(true); return }
-    decryptLlmApiKey(raw).then(v => { if (!cancelled) { if (v) setApiKey(v); setApiKeyLoaded(true) } })
+    if (!activeChannel || !activeChannel.apiKeyEnc) { setActiveApiKey(''); return }
+    decryptLlmApiKey(activeChannel.apiKeyEnc).then(v => { if (!cancelled) setActiveApiKey(v) })
     return () => { cancelled = true }
-  }, [])
-  useEffect(() => {
-    if (!apiKeyLoaded) return
-    if (!apiKey) { try { localStorage.removeItem(LLM_KEY_STORAGE_KEY) } catch { /* ignore */ }; return }
-    encryptLlmApiKey(apiKey).then(enc => {
-      if (!enc) return
-      try { localStorage.setItem(LLM_KEY_STORAGE_KEY, enc) } catch { /* ignore */ }
-    })
-  }, [apiKey, apiKeyLoaded])
+  }, [activeChannel?.id, activeChannel?.apiKeyEnc])
+
+  const chToast = (m: string) => { setChNotice(m); setTimeout(() => setChNotice(''), 2200) }
+
+  const saveChannel = async () => {
+    const name = chForm.name.trim()
+    const base = chForm.baseUrl.trim().replace(/\/+$/, '')
+    const timeoutSecVal = chForm.timeoutSec.trim() || '120'
+    const key = chForm.apiKey.trim()
+    if (!name || !base) { chToast('请填写渠道名称与 baseUrl'); return }
+    let apiKeyEnc = ''
+    let keyMask = ''
+    if (key) {
+      const enc = await encryptLlmApiKey(key)
+      if (!enc) { chToast('加密失败，请重试'); return }
+      apiKeyEnc = enc
+      keyMask = key.slice(0, 8) + '••••' + key.slice(-4)
+    }
+    if (editingChId) {
+      const target = channels.find(c => c.id === editingChId)
+      if (!target) return
+      const nc: LlmChannel = { ...target, name, baseUrl: base, timeoutSec: timeoutSecVal }
+      if (apiKeyEnc) { nc.apiKeyEnc = apiKeyEnc; nc.keyMask = keyMask }
+      setChannels(channels.map(c => c.id === editingChId ? nc : c))
+    } else {
+      if (!apiKeyEnc) { chToast('请填写 apiKey'); return }
+      const nc: LlmChannel = { id: 'ch' + Date.now().toString(36) + Math.random().toString(36).slice(2, 7), name, baseUrl: base, timeoutSec: timeoutSecVal, apiKeyEnc, keyMask }
+      setChannels([...channels, nc])
+      if (!activeChId) setActiveChId(nc.id)
+    }
+    setChForm({ name: '', baseUrl: '', timeoutSec: '120', apiKey: '' })
+    setEditingChId(null)
+    chToast('已保存')
+  }
+
+  const editChannel = (c: LlmChannel) => {
+    setChForm({ name: c.name, baseUrl: c.baseUrl, timeoutSec: c.timeoutSec, apiKey: '' })
+    setEditingChId(c.id)
+  }
+
+  const delChannel = (id: string) => {
+    if (!window.confirm('删除该渠道？')) return
+    setChannels(channels.filter(c => c.id !== id))
+    if (activeChId === id) setActiveChId(null)
+  }
 
   // ── 运行状态 ──
-  const [pane, setPane] = useState<'live' | 'report' | 'history' | 'prompts' | 'compare'>('live')
+  const [pane, setPane] = useState<'live' | 'report' | 'history' | 'prompts' | 'compare' | 'channels'>('live')
   const [running, setRunning] = useState(false)
   const [stopping, setStopping] = useState(false)
   const [startErr, setStartErr] = useState('')
@@ -1718,14 +1822,17 @@ function LlmBatchTool() {
     }
     const models = parseModelList(modelListText)
     if (models.length === 0) errs.push('模型列表不能为空。')
-    if (!apiKey.trim()) errs.push('API Key 不能为空。')
-    if (!baseUrl.trim()) errs.push('Base URL 不能为空。')
+    const ch = activeChannel
+    if (!ch) errs.push('请先在「渠道管理」添加并选择一个渠道。')
     const N = Math.max(1, parseInt(nReq, 10) || 1)
     const C = Math.max(1, parseInt(concurrency, 10) || 1)
-    const timeoutNum = Math.max(1, parseFloat(timeoutSec) || 120)
+    const timeoutNum = ch ? Math.max(1, parseFloat(ch.timeoutSec) || 120) : 120
     if (errs.length) { setStartErr(errs.join('\n')); return }
 
-    const cfg: LlmBatchCfg = { apiType, endpoint: llmEndpointOf(apiType, baseUrl), apiKey: apiKey.trim(), timeout: timeoutNum, bodyText: finalBodyText!, storeResponseBody }
+    const apiKeyPlain = await decryptLlmApiKey(ch!.apiKeyEnc)
+    if (!apiKeyPlain) { setStartErr('渠道 API Key 解密失败，请重新编辑渠道并保存。'); return }
+
+    const cfg: LlmBatchCfg = { apiType, endpoint: llmEndpointOf(apiType, ch!.baseUrl), apiKey: apiKeyPlain, timeout: timeoutNum, bodyText: finalBodyText!, storeResponseBody }
 
     const queue: BatchTask[] = []
     let seqCounter = 0
@@ -1781,7 +1888,7 @@ function LlmBatchTool() {
       id: 'r' + endTime + '_' + Math.random().toString(36).slice(2, 7),
       title: testTitle.trim() || undefined,
       startTime, endTime, durationMs: endTime - startTime,
-      apiType, endpoint: cfg.endpoint, baseUrl: baseUrl.trim(), timeout: timeoutNum,
+      apiType, endpoint: cfg.endpoint, baseUrl: ch!.baseUrl, timeout: timeoutNum, channelName: ch!.name,
       bodyText: cfg.bodyText, promptId: selectedPromptId ?? null, models, n: N, c: C, stopped: wasStopped,
       total: finalResults.length,
       success: finalResults.filter(r => r.status === 'ok').length,
@@ -1801,12 +1908,13 @@ function LlmBatchTool() {
     setStopping(true)
   }
 
-  // 历史「复用」：把某条历史报告的配置回填到左侧面板。API Key 从不回填（历史本来就不存）。
+  // 历史「复用」：把某条历史报告的配置回填。API Key 从不回填（历史本来就不存）。
+  // baseUrl/超时已归入渠道，不再是可直接写回的扁平字段：优先匹配一个 baseUrl 相同的已存渠道并切过去；
+  // 匹配不到就把 baseUrl/超时带入「渠道管理」的新增表单，跳转过去待用户补充 apiKey 后保存。
   const reuseHistoryReport = (rep: BatchReport) => {
     setApiType(rep.apiType)
     const derivedBase = rep.baseUrl ?? llmBaseUrlFromEndpoint(rep.apiType, rep.endpoint)
-    if (derivedBase) setBaseUrl(derivedBase)
-    if (rep.timeout != null) setTimeoutSec(String(rep.timeout))
+    const matched = derivedBase ? channels.find(c => c.baseUrl === derivedBase) : null
     setModelListText(rep.models.join('\n'))
     setNReq(String(rep.n))
     setConcurrency(String(rep.c))
@@ -1824,9 +1932,20 @@ function LlmBatchTool() {
     setResults([])
     setLiveLog([])
     setReport(null)
-    setPane('live')
 
-    setReuseNotice(`已从「${llmFmtTime(rep.startTime)}」的历史报告回填配置到左侧面板。`)
+    if (matched) {
+      setActiveChId(matched.id)
+      setPane('live')
+      setReuseNotice(`已从「${llmFmtTime(rep.startTime)}」的历史报告回填配置，并切换到渠道「${matched.name}」。`)
+    } else if (derivedBase) {
+      setChForm({ name: '', baseUrl: derivedBase, timeoutSec: rep.timeout != null ? String(rep.timeout) : '120', apiKey: '' })
+      setEditingChId(null)
+      setPane('channels')
+      setReuseNotice(`已从「${llmFmtTime(rep.startTime)}」的历史报告带入 Base URL 到「渠道管理」新增表单，请补充 API Key 后保存。`)
+    } else {
+      setPane('live')
+      setReuseNotice(`已从「${llmFmtTime(rep.startTime)}」的历史报告回填配置到左侧面板。`)
+    }
     setTimeout(() => setReuseNotice(''), 4000)
   }
 
@@ -1844,7 +1963,7 @@ function LlmBatchTool() {
         <div className="ml-auto flex gap-2">
           {running
             ? <Btn variant="danger" onClick={stopBatch} disabled={stopping}>{stopping ? '正在停止…' : '⏹ 停止'}</Btn>
-            : <Btn variant="primary" onClick={runBatch} disabled={!apiKey.trim() || !baseUrl.trim() || prompts.length === 0 || (convertedBody !== null && !convertedBody.ok)}>▶ 开始批量请求</Btn>}
+            : <Btn variant="primary" onClick={runBatch} disabled={!activeChannel || prompts.length === 0 || (convertedBody !== null && !convertedBody.ok)}>▶ 开始批量请求</Btn>}
         </div>
       </div>
 
@@ -1864,16 +1983,10 @@ function LlmBatchTool() {
             ]} />
           </div>
           <div>
-            <Label className="block mb-1.5">Base URL</Label>
-            <CustomInput value={baseUrl} onChange={setBaseUrl} placeholder="https://api.anthropic.com" />
-          </div>
-          <div>
-            <Label className="block mb-1.5">API Key</Label>
-            <CustomInput value={apiKey} onChange={setApiKey} placeholder="sk-...（本地加密存储）" type="password" />
-          </div>
-          <div>
-            <Label className="block mb-1.5">请求超时（秒）</Label>
-            <CustomInput value={timeoutSec} onChange={setTimeoutSec} type="number" placeholder="120" />
+            <Label className="block mb-1.5">使用渠道</Label>
+            <CustomSelect value={activeChId ?? ''} onChange={v => setActiveChId(v)}
+              options={channels.map(c => ({ value: c.id, label: `${c.name} — ${c.baseUrl}` }))} />
+            {channels.length === 0 && <p className="text-xs mt-1.5" style={{ color: 'var(--warn)' }}>⚠ 请先到「渠道管理」添加渠道。</p>}
           </div>
 
           <div style={{ borderTop: '1px solid var(--border)', paddingTop: 14 }}>
@@ -1927,11 +2040,12 @@ function LlmBatchTool() {
         {/* 右侧结果区 */}
         <div className="flex-1 flex flex-col overflow-hidden">
           <div className="glass flex items-center px-6 py-3 flex-shrink-0" style={{ borderBottom: '1px solid var(--border)' }}>
-            <SegmentedControl value={pane === 'compare' ? 'history' : pane} onChange={v => setPane(v as 'live' | 'report' | 'history' | 'prompts')} options={[
+            <SegmentedControl value={pane === 'compare' ? 'history' : pane} onChange={v => setPane(v as 'live' | 'report' | 'history' | 'prompts' | 'channels')} options={[
               { value: 'live', label: '实时' },
               { value: 'report', label: '报告' },
               { value: 'history', label: `历史 (${history.length})` },
               { value: 'prompts', label: `提示词 (${prompts.length})` },
+              { value: 'channels', label: `渠道管理 (${channels.length})` },
             ]} />
           </div>
 
@@ -2018,7 +2132,7 @@ function LlmBatchTool() {
                         {lastRunReportId && <button className="underline cursor-pointer border-0 bg-transparent" style={{ color: 'var(--accent)' }} onClick={() => setReport(history.find(h => h.id === lastRunReportId) ?? null)}>返回最近一次运行结果</button>}
                       </div>
                     )}
-                    <LlmBatchReportView report={report} apiKey={apiKey} />
+                    <LlmBatchReportView report={report} apiKey={activeApiKey} />
                   </>
                 ) : (
                   <div className="flex flex-col items-center justify-center py-16" style={{ color: 'var(--t3)' }}>
@@ -2098,8 +2212,8 @@ function LlmBatchTool() {
 
                       {/* 个体报告摘要（不含图表） */}
                       <div className="grid grid-cols-1 lg:grid-cols-2 gap-5">
-                        <div className="min-w-0"><LlmBatchReportView report={a} apiKey={apiKey} hideCharts /></div>
-                        <div className="min-w-0"><LlmBatchReportView report={b} apiKey={apiKey} hideCharts /></div>
+                        <div className="min-w-0"><LlmBatchReportView report={a} apiKey={activeApiKey} hideCharts /></div>
+                        <div className="min-w-0"><LlmBatchReportView report={b} apiKey={activeApiKey} hideCharts /></div>
                       </div>
                     </>
                   )
@@ -2172,6 +2286,61 @@ function LlmBatchTool() {
             {pane === 'prompts' && (
               <div className="h-full">
                 <LlmPromptsPane prompts={prompts} onChange={setPrompts} />
+              </div>
+            )}
+
+            {pane === 'channels' && (
+              <div className="p-5 flex flex-col gap-4">
+                {reuseNotice && <p className="text-xs" style={{ color: 'var(--accent)' }}>{reuseNotice}</p>}
+                {chNotice && <p className="text-xs" style={{ color: 'var(--accent)' }}>{chNotice}</p>}
+                <Card>
+                  <p className="text-sm font-bold mb-3" style={{ color: 'var(--text)' }}>
+                    已保存的渠道 <span className="inline-flex items-center justify-center rounded-full px-2 py-0.5 text-xs font-bold ml-1" style={{ background: 'var(--accentSub)', color: 'var(--accent)' }}>{channels.length}</span>
+                  </p>
+                  {channels.length === 0 && <p className="text-xs mb-3" style={{ color: 'var(--t3)' }}>还没有渠道，请在下方添加。</p>}
+                  <div className="grid grid-cols-1 xl:grid-cols-2 gap-3">
+                    {channels.map(c => (
+                      <div key={c.id} className="rounded-2xl p-4 relative" style={{ border: `1px solid ${c.id === activeChId ? 'var(--accent)' : 'var(--border)'}`, background: c.id === activeChId ? 'var(--accentSub)' : 'var(--s1)' }}>
+                        {c.id === activeChId && <span className="absolute top-3 right-4 text-[11px] font-bold" style={{ color: 'var(--accent)' }}>✓ 当前使用</span>}
+                        <div className="text-sm font-bold pr-16 truncate" style={{ color: 'var(--text)' }}>{c.name}</div>
+                        <div className="text-xs break-all mt-1" style={{ color: 'var(--t3)' }}>{c.baseUrl}</div>
+                        <div className="text-[11px] mt-0.5" style={{ color: 'var(--t3)' }}>超时 {c.timeoutSec}s</div>
+                        <div className="text-[11px] font-mono mt-1" style={{ color: 'var(--t3)' }}>{c.keyMask || '（未设置）'}</div>
+                        <div className="flex gap-2 mt-3">
+                          <Btn small variant="soft" onClick={() => setActiveChId(c.id)}>设为当前</Btn>
+                          <Btn small variant="soft" onClick={() => editChannel(c)}>编辑</Btn>
+                          <Btn small variant="danger" onClick={() => delChannel(c.id)}>删除</Btn>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                </Card>
+                <Card>
+                  <p className="text-sm font-bold mb-3" style={{ color: 'var(--text)' }}>{editingChId ? '编辑渠道' : '添加新渠道'}</p>
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                    <div>
+                      <Label className="block mb-1.5">渠道名称</Label>
+                      <CustomInput value={chForm.name} onChange={v => setChForm(f => ({ ...f, name: v }))} placeholder="例如：主线-Anthropic" />
+                    </div>
+                    <div>
+                      <Label className="block mb-1.5">Base URL</Label>
+                      <CustomInput value={chForm.baseUrl} onChange={v => setChForm(f => ({ ...f, baseUrl: v }))} placeholder="https://api.anthropic.com" mono />
+                    </div>
+                    <div>
+                      <Label className="block mb-1.5">请求超时（秒）</Label>
+                      <CustomInput value={chForm.timeoutSec} onChange={v => setChForm(f => ({ ...f, timeoutSec: v }))} type="number" placeholder="120" />
+                    </div>
+                    <div>
+                      <Label className="block mb-1.5">apiKey {editingChId ? '（留空保持不变，本地加密存储）' : ''}</Label>
+                      <CustomInput value={chForm.apiKey} onChange={v => setChForm(f => ({ ...f, apiKey: v }))} type="password" placeholder="sk-xxxxxxxx" mono />
+                    </div>
+                  </div>
+                  <div className="flex items-center gap-3 mt-4 flex-wrap">
+                    <Btn variant="primary" onClick={saveChannel}>保存渠道</Btn>
+                    <Btn variant="soft" onClick={() => { setChForm({ name: '', baseUrl: '', timeoutSec: '120', apiKey: '' }); setEditingChId(null) }}>清空表单</Btn>
+                    <span className="text-[11px]" style={{ color: 'var(--t3)' }}>渠道信息保存在本浏览器 localStorage 中（apiKey 经 AES-GCM 加密）。</span>
+                  </div>
+                </Card>
               </div>
             )}
           </div>

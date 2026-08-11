@@ -30,9 +30,20 @@ const ANTHROPIC_OK = JSON.stringify({
 const check = (page: import('@playwright/test').Page, id: string) => page.locator(`input[data-id="${id}"]`).check()
 const uncheck = (page: import('@playwright/test').Page, id: string) => page.locator(`input[data-id="${id}"]`).uncheck()
 
-/** 勾选配置 + 填 Key/模型 + 开始测试（弹窗确认） */
-async function setupRun(page: import('@playwright/test').Page, name: string, opts: { skipKey?: boolean } = {}) {
-  if (!opts.skipKey) await inputByLabel(page, 'API Key').fill('sk-test-probe')
+// 渠道管理已取代左侧栏直填 Base URL/API Key（见「渠道管理」Tab）：新增一个渠道并保存，
+// 首个渠道会自动设为当前使用。「模型名称」与「测试连接」都仍在左侧栏（不随右侧 Tab 切换），
+// 所以新增渠道后不需要手动切回「实时进度」再继续操作。
+async function addChannel(page: import('@playwright/test').Page, opts: { apiKey: string; baseUrl?: string; name?: string }) {
+  await page.getByRole('button', { name: /渠道管理/ }).click()
+  await inputByLabel(page, '渠道名称').fill(opts.name ?? '测试渠道')
+  await inputByLabel(page, 'Base URL').fill(opts.baseUrl ?? 'https://api.openai.com')
+  await inputByLabel(page, 'apiKey').fill(opts.apiKey)
+  await page.getByRole('button', { name: '保存渠道' }).click()
+}
+
+/** 新增渠道 + 填模型 + 开始测试（弹窗确认）。调用前应先完成测试项勾选（勾选控件在「实时进度」面板里）。 */
+async function setupRun(page: import('@playwright/test').Page, name: string, opts: { apiKey?: string } = {}) {
+  await addChannel(page, { apiKey: opts.apiKey ?? 'sk-test-probe' })
   await inputByLabel(page, '模型名称').fill('probe-model')
   await page.getByRole('button', { name: '▶ 开始测试' }).click()
   await page.getByRole('dialog').locator('input').fill(name)
@@ -49,13 +60,10 @@ test.describe('模型探测', () => {
       route.fulfill({ status: 200, contentType: 'application/json', headers: { 'x-oneapi-request-id': 'req-anth-0003', 'access-control-expose-headers': '*' }, body: ANTHROPIC_OK }))
 
     await goto(page, /模型探测/)
-    await inputByLabel(page, 'API Key').fill('sk-test-probe')
-    await inputByLabel(page, '模型名称').fill('probe-model')
+    // 勾选控件在「实时进度」面板（默认面板），需在切去「渠道管理」之前完成
     await page.getByRole('button', { name: '全不选' }).click()
     for (const id of ['chat-basic', 'responses-basic', 'anthropic-basic']) await check(page, id)
-    await page.getByRole('button', { name: '▶ 开始测试' }).click()
-    await page.getByRole('dialog').locator('input').fill('e2e-基础三格式')
-    await page.getByRole('button', { name: '确认并开始' }).click()
+    await setupRun(page, 'e2e-基础三格式')
 
     const main = page.locator('main')
     await expect(main).toContainText('OpenAI Chat Completions', { timeout: 10000 })
@@ -167,13 +175,9 @@ test.describe('模型探测', () => {
       route.fulfill({ status: 200, contentType: 'application/json', headers: { 'x-oneapi-request-id': 'req-chat-0001', 'access-control-expose-headers': '*' }, body: CHAT_OK(12) }))
 
     await goto(page, /模型探测/)
-    await inputByLabel(page, 'API Key').fill('sk-secret-key-12345678')
-    await inputByLabel(page, '模型名称').fill('probe-model')
     await page.getByRole('button', { name: '全不选' }).click()
     await check(page, 'chat-basic')
-    await page.getByRole('button', { name: '▶ 开始测试' }).click()
-    await page.getByRole('dialog').locator('input').fill('e2e探针报告')
-    await page.getByRole('button', { name: '确认并开始' }).click()
+    await setupRun(page, 'e2e探针报告', { apiKey: 'sk-secret-key-12345678' })
     await expect(page.locator('main')).toContainText('通过 1', { timeout: 10000 })
 
     await page.getByRole('button', { name: /请求日志/ }).click()
@@ -211,18 +215,22 @@ test.describe('模型探测', () => {
     await expect(page.locator('input[data-id="chat-basic"]')).toBeChecked()
   })
 
-  test('API Key 加密持久化：reload 后回填，localStorage 无明文', async ({ page }) => {
+  test('渠道 API Key 加密持久化：reload 后仍在，localStorage 无明文', async ({ page }) => {
     await goto(page, /模型探测/)
-    await inputByLabel(page, 'API Key').fill('sk-enc-secret-abc123')
-    await inputByLabel(page, '模型名称').fill('probe-model')
-    await expect.poll(() => page.evaluate(() => localStorage.getItem('modelprobe-key'))).toBeTruthy()
+    await addChannel(page, { name: '测试渠道', apiKey: 'sk-enc-secret-abc123' })
+    await expect(page.getByText('测试渠道', { exact: true })).toBeVisible()
+    await expect(page.getByText('✓ 当前使用')).toBeVisible()
 
-    const stored = await page.evaluate(() => localStorage.getItem('modelprobe-key'))
+    const stored = await page.evaluate(() => localStorage.getItem('modelprobe-channels'))
+    expect(stored).toBeTruthy()
     expect(stored).not.toContain('sk-enc-secret-abc123')
 
     await page.reload()
     await goto(page, /模型探测/)
-    await expect(inputByLabel(page, 'API Key')).toHaveValue('sk-enc-secret-abc123')
+    await page.getByRole('button', { name: /渠道管理/ }).click()
+    await expect(page.getByText('测试渠道', { exact: true })).toBeVisible()
+    await expect(page.getByText('✓ 当前使用')).toBeVisible()
+    await inputByLabel(page, '模型名称').fill('probe-model')
     await expect(page.getByRole('button', { name: /开始测试/ })).toBeEnabled()
   })
 
@@ -235,7 +243,7 @@ test.describe('模型探测', () => {
       route.fulfill({ status: 401, contentType: 'application/json', body: JSON.stringify({ error: { message: 'Invalid API key' } }) }))
 
     await goto(page, /模型探测/)
-    await inputByLabel(page, 'API Key').fill('sk-test-probe')
+    await addChannel(page, { apiKey: 'sk-test-probe' })
     await inputByLabel(page, '模型名称').fill('probe-model')
     await page.getByRole('button', { name: '测试连接' }).click()
 
