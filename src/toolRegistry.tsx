@@ -2,10 +2,10 @@ import React, { lazy } from 'react'
 import SeedanceTool from './tools/SeedanceTool'
 import {
   IconSeedance, IconJson, IconClock, IconConvert, IconBatch, IconImgTest, IconProbe,
-  IconImage, IconVideo, IconId, IconCode, IconType, IconGraphql, IconPromptOpt, IconReport, IconMultiCost,
+  IconImage, IconVideo, IconId, IconCode, IconType, IconGraphql, IconPromptOpt, IconReport, IconMultiCost, IconCacheHit,
 } from './shared/icons'
 
-export type ToolKey = 'seedance' | 'multicost' | 'json' | 'timestamp' | 'aiconvert' | 'llmbatch' | 'imgtest' | 'modelprobe' | 'promptopt'
+export type ToolKey = 'seedance' | 'multicost' | 'json' | 'timestamp' | 'aiconvert' | 'llmbatch' | 'imgtest' | 'modelprobe' | 'cachehit' | 'promptopt'
   | 'imganalyze' | 'videoanalyze' | 'idgen' | 'base64' | 'unicode' | 'graphql' | 'llmreport'
 export type ToolIntent = 'hover' | 'focus' | 'activate'
 export type ToolPath = `/tools/${ToolKey}`
@@ -46,6 +46,7 @@ const loaders: Record<AsyncToolKey, ToolLoader> = {
   llmreport: () => import('./tools/LlmReportTool'),
   imgtest: () => import('./tools/ImgApiTestTool'),
   modelprobe: () => import('./tools/ModelProbeTool'),
+  cachehit: () => import('./tools/CacheHitTool'),
   promptopt: () => import('./tools/PromptOptTool'),
   imganalyze: () => import('./tools/ImageAnalyzerTool'),
   videoanalyze: () => import('./tools/VideoAnalyzerTool'),
@@ -77,6 +78,7 @@ const lazyComponents: Record<AsyncToolKey, React.LazyExoticComponent<React.Compo
   llmreport: lazy(() => loadToolModule('llmreport')),
   imgtest: lazy(() => loadToolModule('imgtest')),
   modelprobe: lazy(() => loadToolModule('modelprobe')),
+  cachehit: lazy(() => loadToolModule('cachehit')),
   promptopt: lazy(() => loadToolModule('promptopt')),
   imganalyze: lazy(() => loadToolModule('imganalyze')),
   videoanalyze: lazy(() => loadToolModule('videoanalyze')),
@@ -97,6 +99,7 @@ export const TOOL_DEFINITIONS: ToolDefinition[] = [
   { key: 'seedance', path: toolPath('seedance'), label: 'Seedance 计费', desc: '视频生成模型计费计算器，人民币/美元自动换算', icon: <IconSeedance />, fullHeight: false, component: SeedanceTool, group: 'ai' },
   { key: 'multicost', path: toolPath('multicost'), label: '图片视频计费', desc: '多模型图片/视频生成计费，双币种与 JSON 自动识别', icon: <IconMultiCost />, fullHeight: false, component: lazyComponents.multicost, group: 'ai', beta: true },
   { key: 'modelprobe', path: toolPath('modelprobe'), label: '模型探测', desc: 'API 渠道兼容性、参数降级与缓存实验台', icon: <IconProbe />, fullHeight: true, component: lazyComponents.modelprobe, group: 'ai' },
+  { key: 'cachehit', path: toolPath('cachehit'), label: '缓存命中率', desc: '三协议 Prompt Caching 命中率、覆盖率与延迟测试', icon: <IconCacheHit />, fullHeight: true, component: lazyComponents.cachehit, group: 'ai' },
   { key: 'llmbatch', path: toolPath('llmbatch'), label: 'LLM 批量测试', desc: 'Token 计费口径、一致性、波动与模型验真', icon: <IconBatch />, fullHeight: true, component: lazyComponents.llmbatch, group: 'ai' },
   { key: 'llmreport', path: toolPath('llmreport'), label: 'LLM 报告生成', desc: '日志导入生成性能/稳定性分析报告，可导出 HTML', icon: <IconReport />, fullHeight: false, component: lazyComponents.llmreport, group: 'ai' },
   { key: 'imgtest', path: toolPath('imgtest'), label: '图片接口测试', desc: '多渠道图片生成接口批测、价格与响应校验', icon: <IconImgTest />, fullHeight: true, component: lazyComponents.imgtest, group: 'ai' },

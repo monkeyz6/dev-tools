@@ -178,6 +178,17 @@ export function IconReport() {
   )
 }
 
+export function IconCacheHit() {
+  return (
+    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round">
+      <ellipse cx="10.5" cy="5" rx="7.5" ry="2.8"/>
+      <path d="M3 5v7c0 1.5 3.4 2.8 7.5 2.8.6 0 1.3 0 1.9-.1"/>
+      <path d="M3 12v6.2c0 1.5 3.4 2.8 7.5 2.8.8 0 1.6-.1 2.4-.2"/>
+      <path d="M18 5v4.5"/>
+      <path d="m19.5 11.5-3 4.5h2.5l-1.5 5 4.5-6h-2.5l1.5-3.5z"/>
+    </svg>
+  )
+}
 export function IconMultiCost() {
   return (
     <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round">

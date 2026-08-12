@@ -310,6 +310,18 @@ input[type='number'] { -moz-appearance: textfield; appearance: textfield; }
   to { transform: translate3d(450%, 0, 0); }
 }
 
+/* 导出报告：底色实色 + 关掉毛玻璃/投影，避免 html2canvas 半透明合成发灰发黄。
+   卡片底色不在这里覆盖——导出管线已把各元素的计算色压平成不透明色内联上去 */
+.cache-export-solid {
+  background: var(--bg) !important;
+}
+.cache-export-solid,
+.cache-export-solid * {
+  -webkit-backdrop-filter: none !important;
+  backdrop-filter: none !important;
+  box-shadow: none !important;
+}
+
 /* 不支持 backdrop-filter 时回退实色 */
 @supports not (backdrop-filter: blur(1px)) {
   .glass, .surface-card { background: var(--bg) !important; }
@@ -354,6 +366,13 @@ input[type='number'] { -moz-appearance: textfield; appearance: textfield; }
 @keyframes item-enter { from { opacity: 0; transform: translateY(10px) scale(0.992); } to { opacity: 1; transform: none; } }
 
 /* ─── Sidebar Nav Items ──────────────────────────────────────────── */
+
+/* 侧栏导航：展开/收起都隐藏滚动条，但保留滚轮/触控板滚动（overflow 仍为 auto） */
+.sb-nav {
+  scrollbar-width: none;      /* Firefox */
+  -ms-overflow-style: none;   /* 旧 Edge/IE */
+}
+.sb-nav::-webkit-scrollbar { display: none; }  /* Chrome/Safari/Edge */
 
 .sb-nav-item {
   background: transparent;
