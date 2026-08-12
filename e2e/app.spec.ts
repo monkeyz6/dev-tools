@@ -54,7 +54,7 @@ test.describe('全局导航与主题', () => {
     }
   })
 
-  test('减少动态效果时停用环境漂移并保留淡入反馈', async ({ page }) => {
+  test('减少动态效果时停用环境漂移且舞台首帧不透明', async ({ page }) => {
     await page.emulateMedia({ reducedMotion: 'reduce' })
     await goto(page, /Seedance 计费/)
 
@@ -62,10 +62,11 @@ test.describe('全局导航与主题', () => {
     const motion = await page.evaluate(() => {
       const orb = getComputedStyle(document.querySelector('.ambient-orb')!)
       const stage = getComputedStyle(document.querySelector('.tool-stage')!)
-      return { orbAnimation: orb.animationName, stageAnimation: stage.animationName, stageTransform: stage.transform }
+      return { orbAnimation: orb.animationName, stageOpacity: stage.opacity, stageTransform: stage.transform }
     })
     expect(motion.orbAnimation).toBe('none')
-    expect(motion.stageAnimation).toBe('reduced-fade')
+    // 舞台入场不再做透明度动画（消白屏），任何时刻都完全不透明
+    expect(parseFloat(motion.stageOpacity)).toBe(1)
     expect(motion.stageTransform).toBe('none')
   })
 })

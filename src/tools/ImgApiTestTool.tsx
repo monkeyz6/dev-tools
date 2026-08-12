@@ -1,6 +1,8 @@
+import { kvGet, kvSet, kvRemove } from '../shared/app-kv'
 import React, { useState, useCallback, useRef, useEffect, useLayoutEffect, useMemo, useDeferredValue } from 'react'
 import { Btn, Label, Card, Badge, CustomInput, CustomSelect, SearchableSelect, CustomTextarea, Toggle, SegmentedControl, SectionTitle, CopyBtn } from '../shared/ui'
 import { historyDbGetAll, historyDbPutOne, historyDbDeleteOne, historyDbDeleteMany, historyDbClear, historyDbMigrateFromLocalStorage } from '../shared/history-db'
+import { useDebouncedPersist } from '../shared/use-debounced-persist'
 
 // ─── Tool: 图片接口测试 ─────────────────────────────────────────────────────────
 
@@ -99,23 +101,23 @@ const IMG_DEFAULT_PRICES: ImgPrice[] = [
 function imgLoadPrices(): ImgPrice[] {
   if (typeof window === 'undefined') return []
   try {
-    const raw = localStorage.getItem(IMG_PRICES_KEY)
+    const raw = kvGet(IMG_PRICES_KEY)
     if (raw) { const p = JSON.parse(raw); if (Array.isArray(p)) return p }
   } catch { /* ignore */ }
   return JSON.parse(JSON.stringify(IMG_DEFAULT_PRICES))
 }
-function imgSavePrices(p: ImgPrice[]) { try { localStorage.setItem(IMG_PRICES_KEY, JSON.stringify(p)) } catch { /* ignore */ } }
+function imgSavePrices(p: ImgPrice[]) { try { kvSet(IMG_PRICES_KEY, JSON.stringify(p)) } catch { /* ignore */ } }
 function imgLoadRate(): string {
   if (typeof window !== 'undefined') {
-    const v = parseFloat(localStorage.getItem(IMG_RATE_KEY) || '')
+    const v = parseFloat(kvGet(IMG_RATE_KEY) || '')
     if (!isNaN(v) && v > 0) return String(v)
   }
   return String(IMG_DEFAULT_RATE)
 }
-function imgSaveRate(r: string) { try { localStorage.setItem(IMG_RATE_KEY, r) } catch { /* ignore */ } }
+function imgSaveRate(r: string) { try { kvSet(IMG_RATE_KEY, r) } catch { /* ignore */ } }
 function imgLoadHidePrices(): boolean {
   if (typeof window === 'undefined') return false
-  try { return localStorage.getItem(IMG_HIDEPRICES_KEY) === '1' } catch { /* ignore */ }
+  try { return kvGet(IMG_HIDEPRICES_KEY) === '1' } catch { /* ignore */ }
   return false
 }
 
@@ -337,7 +339,7 @@ function imgMakeThumb(dataUri: string | null, maxSide = 160): Promise<string | n
 function imgLoadChannels(): ImgChannel[] {
   if (typeof window === 'undefined') return []
   try {
-    const raw = localStorage.getItem(IMG_CH_KEY)
+    const raw = kvGet(IMG_CH_KEY)
     if (raw) { const l = JSON.parse(raw); if (Array.isArray(l)) return l }
   } catch { /* ignore */ }
   return []
@@ -359,7 +361,7 @@ async function imgHistTrim(maxCount: number): Promise<void> {
 function imgLoadUi(): { apiType?: ImgApiType; model?: string; prompt?: string } {
   if (typeof window === 'undefined') return {}
   try {
-    const raw = localStorage.getItem(IMG_UI_KEY)
+    const raw = kvGet(IMG_UI_KEY)
     if (raw) { const c = JSON.parse(raw); return c && typeof c === 'object' ? c : {} }
   } catch { /* ignore */ }
   return {}
@@ -804,13 +806,271 @@ function imgExportFilename(apiType: ImgApiType, ext: 'png' | 'html'): string {
   return `imgtest-report-${apiType}-${stamp}.${ext}`
 }
 
+function imgClassify(r: ImgRecord): 'pass' | 'fail' | 'error' {
+  return !r.ok ? 'error' : (imgVerdict(r.checks || []).level === 'ok' ? 'pass' : 'fail')
+}
+
+// ─── Panes：按区域拆分的 memo 子组件 ─────────────────────────────────────────
+// 批量运行期间 setCases 高频触发，拆分 + 按需渲染让未激活面板（渠道/价格/历史）
+// 既不参与 JSX 求值也不重渲染，历史表格的过滤/映射只在自身 props 变化时执行。
+
+type ImgChFormState = { name: string; baseUrl: string; apiKey: string }
+type ImgPriceFormState = { model: string; tier: string; usd: string; note: string }
+
+const ImgChannelsPane = React.memo(function ImgChannelsPane({
+  channels, activeChId, chForm, editingChId,
+  onSetActive, onEdit, onDelete, onSave, onChFormChange, onClearForm,
+}: {
+  channels: ImgChannel[]; activeChId: string | null; chForm: ImgChFormState; editingChId: string | null
+  onSetActive: (id: string) => void; onEdit: (c: ImgChannel) => void; onDelete: (id: string) => void
+  onSave: () => void; onChFormChange: React.Dispatch<React.SetStateAction<ImgChFormState>>; onClearForm: () => void
+}) {
+  return (
+    <div className="flex flex-col gap-4">
+      <Card>
+        <p className="text-sm font-bold mb-3" style={{ color: 'var(--text)' }}>已保存的渠道 <span className="inline-flex items-center justify-center rounded-full px-2 py-0.5 text-xs font-bold ml-1" style={{ background: 'var(--accentSub)', color: 'var(--accent)' }}>{channels.length}</span></p>
+        {channels.length === 0 && <p className="text-xs mb-3" style={{ color: 'var(--t3)' }}>还没有渠道，请在下方添加。</p>}
+        <div className="grid grid-cols-1 xl:grid-cols-2 gap-3">
+          {channels.map(c => (
+            <div key={c.id} className="rounded-2xl p-4 relative" style={{ border: `1px solid ${c.id === activeChId ? 'var(--accent)' : 'var(--border)'}`, background: c.id === activeChId ? 'var(--accentSub)' : 'var(--s1)' }}>
+              {c.id === activeChId && <span className="absolute top-3 right-4 text-[11px] font-bold" style={{ color: 'var(--accent)' }}>✓ 当前使用</span>}
+              <div className="text-sm font-bold pr-16 truncate" style={{ color: 'var(--text)' }}>{c.name}</div>
+              <div className="text-xs break-all mt-1" style={{ color: 'var(--t3)' }}>{c.baseUrl}</div>
+              <div className="text-[11px] font-mono mt-1" style={{ color: 'var(--t3)' }}>{c.keyMask || '（未设置）'}</div>
+              <div className="flex gap-2 mt-3">
+                <Btn small variant="soft" onClick={() => onSetActive(c.id)}>设为当前</Btn>
+                <Btn small variant="soft" onClick={() => onEdit(c)}>编辑</Btn>
+                <Btn small variant="danger" onClick={() => onDelete(c.id)}>删除</Btn>
+              </div>
+            </div>
+          ))}
+        </div>
+      </Card>
+      <Card>
+        <p className="text-sm font-bold mb-3" style={{ color: 'var(--text)' }}>{editingChId ? '编辑渠道' : '添加新渠道'}</p>
+        <div className="grid grid-cols-2 gap-3">
+          <div>
+            <Label className="block mb-1.5">渠道名称（自定义标识）</Label>
+            <CustomInput value={chForm.name} onChange={v => onChFormChange(f => ({ ...f, name: v }))} placeholder="例如：主线-oinone" />
+          </div>
+          <div>
+            <Label className="block mb-1.5">baseUrl</Label>
+            <CustomInput value={chForm.baseUrl} onChange={v => onChFormChange(f => ({ ...f, baseUrl: v }))} placeholder="https://api.oinone.top" />
+          </div>
+        </div>
+        <div className="mt-3">
+          <Label className="block mb-1.5">apiKey {editingChId ? '（留空表示保持不变，本地加密存储）' : ''}</Label>
+          <CustomInput value={chForm.apiKey} onChange={v => onChFormChange(f => ({ ...f, apiKey: v }))} type="password" placeholder="sk-xxxxxxxx" />
+        </div>
+        <div className="flex items-center gap-3 mt-4">
+          <Btn variant="primary" small={false} onClick={onSave}>保存渠道</Btn>
+          <Btn variant="soft" onClick={onClearForm}>清空表单</Btn>
+          <span className="text-[11px]" style={{ color: 'var(--t3)' }}>渠道信息保存在本浏览器 IndexedDB 中（apiKey 经 AES-GCM 加密）。</span>
+        </div>
+      </Card>
+    </div>
+  )
+})
+
+const ImgPricesPane = React.memo(function ImgPricesPane({
+  prices, rateStr, rate, priceForm,
+  onRateChange, onResetPrices, onUpdatePrice, onDelPrice, onPriceFormChange, onAddPrice,
+}: {
+  prices: ImgPrice[]; rateStr: string; rate: number; priceForm: ImgPriceFormState
+  onRateChange: (v: string) => void; onResetPrices: () => void
+  onUpdatePrice: (idx: number, v: number) => void; onDelPrice: (idx: number) => void
+  onPriceFormChange: React.Dispatch<React.SetStateAction<ImgPriceFormState>>; onAddPrice: () => void
+}) {
+  return (
+    <div className="flex flex-col gap-4">
+      <Card>
+        <div className="flex items-center justify-between flex-wrap gap-2 mb-3">
+          <p className="text-sm font-bold" style={{ color: 'var(--text)' }}>模型价格配置 <span className="text-xs font-normal" style={{ color: 'var(--t3)' }}>按模型编码精确匹配 · 档位自动选择</span></p>
+          <div className="flex items-center gap-2">
+            <span className="text-xs" style={{ color: 'var(--t2)' }}>汇率 1 USD =</span>
+            <div className="w-24"><CustomInput value={rateStr} onChange={onRateChange} type="text" mono /></div>
+            <span className="text-xs" style={{ color: 'var(--t2)' }}>CNY</span>
+            <Btn small variant="soft" onClick={onResetPrices}>↺ 恢复内置默认价格</Btn>
+          </div>
+        </div>
+        <p className="text-[11px] mb-3" style={{ color: 'var(--t3)' }}>
+          档位（tier）根据请求参数自动选择：OpenAI 按 quality，Grok 按 resolution，Gemini 按 imageSize（512→0.5K），Seedream 按 size 像素量（≤2.36MP 为 1K 档）。找不到对应档位时使用 default 档。
+        </p>
+        <div className="overflow-auto">
+          <table className="w-full text-xs">
+            <thead>
+              <tr className="text-left" style={{ background: 'var(--s1)', color: 'var(--t3)' }}>
+                <th className="px-3 py-2 font-semibold">模型编码（精确匹配）</th>
+                <th className="px-3 py-2 font-semibold">档位</th>
+                <th className="px-3 py-2 font-semibold">美元 / 张</th>
+                <th className="px-3 py-2 font-semibold">人民币 / 张</th>
+                <th className="px-3 py-2 font-semibold">备注</th>
+                <th className="px-3 py-2 font-semibold">操作</th>
+              </tr>
+            </thead>
+            <tbody>
+              {prices.length === 0 && (
+                <tr><td colSpan={6} className="px-3 py-6 text-center" style={{ color: 'var(--t3)' }}>暂无价格条目</td></tr>
+              )}
+              {prices.map((p, idx) => (
+                <tr key={idx} style={{ borderTop: '1px solid var(--border)' }}>
+                  <td className="px-3 py-2 font-mono font-semibold">{p.model}</td>
+                  <td className="px-3 py-2"><Badge>{p.tier}</Badge></td>
+                  <td className="px-3 py-2">
+                    <input type="number" step="0.001" value={p.usd} className="no-spinner w-24 rounded-lg px-2 py-1 text-xs font-mono outline-none"
+                      style={{ background: 'var(--inputBg)', border: '1px solid var(--inputBorder)', color: 'var(--text)' }}
+                      onChange={e => { const v = parseFloat(e.target.value); if (!isNaN(v) && v >= 0) onUpdatePrice(idx, v) }} />
+                  </td>
+                  <td className="px-3 py-2 font-mono" style={{ color: 'var(--warn)' }}>¥{(p.usd * rate).toFixed(3)}</td>
+                  <td className="px-3 py-2" style={{ color: 'var(--t3)' }}>{p.note || ''}</td>
+                  <td className="px-3 py-2"><Btn small variant="danger" onClick={() => onDelPrice(idx)}>删</Btn></td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      </Card>
+      <Card>
+        <p className="text-sm font-bold mb-3" style={{ color: 'var(--text)' }}>添加价格条目</p>
+        <div className="grid grid-cols-2 xl:grid-cols-4 gap-3">
+          <div>
+            <Label className="block mb-1.5">模型编码</Label>
+            <CustomInput value={priceForm.model} onChange={v => onPriceFormChange(f => ({ ...f, model: v }))} placeholder="gpt-image-2" />
+          </div>
+          <div>
+            <Label className="block mb-1.5">档位</Label>
+            <CustomInput value={priceForm.tier} onChange={v => onPriceFormChange(f => ({ ...f, tier: v }))} placeholder="default" />
+          </div>
+          <div>
+            <Label className="block mb-1.5">美元价格 / 张</Label>
+            <CustomInput value={priceForm.usd} onChange={v => onPriceFormChange(f => ({ ...f, usd: v }))} type="number" placeholder="0.05" />
+          </div>
+          <div>
+            <Label className="block mb-1.5">备注（可选）</Label>
+            <CustomInput value={priceForm.note} onChange={v => onPriceFormChange(f => ({ ...f, note: v }))} placeholder="官网价" />
+          </div>
+        </div>
+        <div className="mt-4"><Btn small={false} variant="primary" onClick={onAddPrice}>＋ 添加</Btn></div>
+      </Card>
+    </div>
+  )
+})
+
+const ImgHistoryPane = React.memo(function ImgHistoryPane({
+  history, channels, hidePrices, exportBusy, selHistIds,
+  fChannel, fApiType, fModel, fResult, onFChannel, onFApiType, onFModel, onFResult,
+  onStartExport, onToggleSel, onSetSelIds, onClearAll, onDetail, onDeleteOne,
+}: {
+  history: ImgRecord[]; channels: ImgChannel[]; hidePrices: boolean; exportBusy: boolean; selHistIds: Set<string>
+  fChannel: string; fApiType: string; fModel: string; fResult: string
+  onFChannel: (v: string) => void; onFApiType: (v: string) => void; onFModel: (v: string) => void; onFResult: (v: string) => void
+  onStartExport: (records: ImgRecord[], format: 'png' | 'html') => void
+  onToggleSel: (id: string, v: boolean) => void; onSetSelIds: (ids: Set<string>) => void
+  onClearAll: () => void; onDetail: (r: ImgRecord) => void; onDeleteOne: (id: string) => void
+}) {
+  const histModels = useMemo(() => [...new Set(history.map(r => r.model))], [history])
+  const filteredHistory = useMemo(() => history.filter(r =>
+    (!fChannel || r.channelName === fChannel) &&
+    (!fApiType || r.apiType === fApiType) &&
+    (!fModel || r.model === fModel) &&
+    (!fResult || imgClassify(r) === fResult)), [history, fChannel, fApiType, fModel, fResult])
+
+  return (
+    <Card>
+      <div className="flex items-center justify-between flex-wrap gap-2 mb-3">
+        <p className="text-sm font-bold" style={{ color: 'var(--text)' }}>历史测试记录 <span className="inline-flex items-center justify-center rounded-full px-2 py-0.5 text-xs font-bold ml-1" style={{ background: 'var(--accentSub)', color: 'var(--accent)' }}>{history.length}</span></p>
+        <div className="flex items-center gap-2">
+          <Btn small variant="soft" disabled={exportBusy || selHistIds.size === 0}
+            onClick={() => onStartExport(filteredHistory.filter(r => selHistIds.has(r.id)), 'png')}>⬇ 导出选中图片 ({selHistIds.size})</Btn>
+          <Btn small variant="soft" disabled={exportBusy || selHistIds.size === 0}
+            onClick={() => onStartExport(filteredHistory.filter(r => selHistIds.has(r.id)), 'html')}>⬇ 导出选中 HTML ({selHistIds.size})</Btn>
+          <Btn small variant="danger" onClick={onClearAll}>清空全部</Btn>
+        </div>
+      </div>
+      <div className="flex items-center gap-3 flex-wrap mb-3">
+        <div className="w-44"><CustomSelect value={fChannel} onChange={onFChannel} options={[{ value: '', label: '全部渠道' }, ...channels.map(c => ({ value: c.name, label: c.name }))]} /></div>
+        <div className="w-36"><CustomSelect value={fApiType} onChange={onFApiType} options={[{ value: '', label: '全部接口' }, { value: 'openai', label: 'OpenAI' }, { value: 'grok', label: 'Grok' }, { value: 'gemini', label: 'Gemini' }, { value: 'seedream', label: 'Seedream' }]} /></div>
+        <div className="w-48"><CustomSelect value={fModel} onChange={onFModel} options={[{ value: '', label: '全部模型' }, ...histModels.map(m => ({ value: m, label: m }))]} /></div>
+        <div className="w-36"><CustomSelect value={fResult} onChange={onFResult} options={[{ value: '', label: '全部结果' }, { value: 'pass', label: '✓ 通过' }, { value: 'fail', label: '✕ 未通过' }, { value: 'error', label: '! 请求失败' }]} /></div>
+      </div>
+      <div className="overflow-auto" style={{ maxHeight: 'calc(100vh - 260px)' }}>
+        <table className="w-full text-xs">
+          <thead>
+            <tr className="text-left sticky top-0" style={{ background: 'var(--s1)', color: 'var(--t3)' }}>
+              <th className="px-3 py-2 font-semibold">
+                <input type="checkbox" className="w-4 h-4 cursor-pointer" style={{ accentColor: 'var(--accent)' }}
+                  checked={filteredHistory.length > 0 && filteredHistory.every(r => selHistIds.has(r.id))}
+                  onChange={e => onSetSelIds(e.target.checked ? new Set(filteredHistory.map(r => r.id)) : new Set())} />
+              </th>
+              <th className="px-3 py-2 font-semibold">图</th>
+              <th className="px-3 py-2 font-semibold">时间</th>
+              <th className="px-3 py-2 font-semibold">渠道</th>
+              <th className="px-3 py-2 font-semibold">接口</th>
+              <th className="px-3 py-2 font-semibold">模型</th>
+              <th className="px-3 py-2 font-semibold">用例</th>
+              <th className="px-3 py-2 font-semibold">目标</th>
+              <th className="px-3 py-2 font-semibold">实际</th>
+              <th className="px-3 py-2 font-semibold">结果</th>
+              <th className="px-3 py-2 font-semibold">耗时</th>
+              <th className="px-3 py-2 font-semibold">价格</th>
+              <th className="px-3 py-2 font-semibold">操作</th>
+            </tr>
+          </thead>
+          <tbody>
+            {filteredHistory.length === 0 && (
+              <tr><td colSpan={13} className="px-3 py-8 text-center" style={{ color: 'var(--t3)' }}>暂无记录</td></tr>
+            )}
+            {filteredHistory.map(r => {
+              const cls = imgClassify(r)
+              const badge = cls === 'pass' ? <Badge color="ok">✓ {imgVerdict(r.checks || []).text}</Badge> : cls === 'fail' ? <Badge color="err">✕ {imgVerdict(r.checks || []).text}</Badge> : <Badge color="warn">! 失败</Badge>
+              const t = r.targets || {}
+              const tierLabel = t.resolutionTierBaseReq ? `${t.resolutionTierLabelReq || imgResolutionTierLabel(null, t.resolutionTierBaseReq)} 档` : ''
+              const tgt = (t.wReq ? `${t.wReq}×${t.hReq}` : (tierLabel || t.sizeReq || '—')) + (t.ratioReq ? ' ' + t.ratioReq : '') + (t.nReq > 1 ? ' ×' + t.nReq : '')
+              const act = r.ok && r.images && r.images[0] ? `${r.images[0].w}×${r.images[0].h}${r.returnedN > 1 ? ' ×' + r.returnedN : ''}` : '—'
+              const thumb = r.images?.[0]?.thumb || r.images?.[0]?.url || ''
+              return (
+                <tr key={r.id} style={{ borderTop: '1px solid var(--border)' }} className="transition-colors duration-100 row-hover">
+                  <td className="px-3 py-2">
+                    <input type="checkbox" className="w-4 h-4 cursor-pointer" style={{ accentColor: 'var(--accent)' }}
+                      checked={selHistIds.has(r.id)} onChange={e => onToggleSel(r.id, e.target.checked)} />
+                  </td>
+                  <td className="px-3 py-2">
+                    {thumb ? <img src={thumb} className="w-10 h-10 rounded-lg object-cover" style={{ border: '1px solid var(--border)' }} /> : <span style={{ color: 'var(--t3)' }}>—</span>}
+                  </td>
+                  <td className="px-3 py-2 whitespace-nowrap">{imgFmtTime(r.time)}</td>
+                  <td className="px-3 py-2">{r.channelName}</td>
+                  <td className="px-3 py-2">{IMG_API_LABEL[r.apiType] || r.apiType}{r.useRef ? ' 🖼️' : ''}</td>
+                  <td className="px-3 py-2 font-mono">{r.model}</td>
+                  <td className="px-3 py-2">{r.caseName}</td>
+                  <td className="px-3 py-2 font-mono">{imgEsc(tgt)}</td>
+                  <td className="px-3 py-2 font-mono">{imgEsc(act)}</td>
+                  <td className="px-3 py-2">{badge}</td>
+                  <td className="px-3 py-2">{r.durationMs}ms</td>
+                  <td className="px-3 py-2 font-mono whitespace-nowrap" style={{ color: 'var(--warn)' }}>
+                    {hidePrices || !r.price ? '—' : `$${(r.price.usd * (r.price.count || 1)).toFixed(3)}\n¥${(r.price.cny * (r.price.count || 1)).toFixed(3)}`}
+                  </td>
+                  <td className="px-3 py-2 whitespace-nowrap">
+                    <Btn small variant="soft" onClick={() => onDetail(r)}>详情</Btn>
+                    <span className="inline-block w-1" />
+                    <Btn small variant="danger" onClick={() => onDeleteOne(r.id)}>删</Btn>
+                  </td>
+                </tr>
+              )
+            })}
+          </tbody>
+        </table>
+      </div>
+    </Card>
+  )
+})
+
 function ImgApiTestTool() {
   const ui0 = imgLoadUi()
   const [pane, setPane] = useState<'test' | 'channels' | 'prices' | 'history'>('test')
   const [channels, setChannels] = useState<ImgChannel[]>(() => imgLoadChannels())
   const [activeChId, setActiveChId] = useState<string | null>(() => {
     if (typeof window === 'undefined') return null
-    return localStorage.getItem(IMG_ACTIVE_KEY)
+    return kvGet(IMG_ACTIVE_KEY)
   })
   const [apiType, setApiType] = useState<ImgApiType>(ui0.apiType ?? 'openai')
   const [model, setModel] = useState(ui0.model ?? '')
@@ -858,11 +1118,11 @@ function ImgApiTestTool() {
   useEffect(() => { casesRef.current = cases }, [cases])
   useEffect(() => { rateRef.current = parseFloat(rateStr) || IMG_DEFAULT_RATE }, [rateStr])
 
-  useEffect(() => { try { localStorage.setItem(IMG_CH_KEY, JSON.stringify(channels)) } catch { /* ignore */ } }, [channels])
-  useEffect(() => { if (activeChId) { try { localStorage.setItem(IMG_ACTIVE_KEY, activeChId) } catch { /* ignore */ } } }, [activeChId])
+  useEffect(() => { try { kvSet(IMG_CH_KEY, JSON.stringify(channels)) } catch { /* ignore */ } }, [channels])
+  useEffect(() => { if (activeChId) { try { kvSet(IMG_ACTIVE_KEY, activeChId) } catch { /* ignore */ } } }, [activeChId])
   useEffect(() => { imgSavePrices(prices) }, [prices])
   useEffect(() => { imgSaveRate(rateStr) }, [rateStr])
-  useEffect(() => { try { localStorage.setItem(IMG_HIDEPRICES_KEY, hidePrices ? '1' : '0') } catch { /* ignore */ } }, [hidePrices])
+  useEffect(() => { try { kvSet(IMG_HIDEPRICES_KEY, hidePrices ? '1' : '0') } catch { /* ignore */ } }, [hidePrices])
   useEffect(() => {
     let cancelled = false
     ;(async () => {
@@ -872,7 +1132,7 @@ function ImgApiTestTool() {
     })()
     return () => { cancelled = true }
   }, [])
-  useEffect(() => { try { localStorage.setItem(IMG_UI_KEY, JSON.stringify({ apiType, model, prompt })) } catch { /* ignore */ } }, [apiType, model, prompt])
+  useDebouncedPersist(() => { try { kvSet(IMG_UI_KEY, JSON.stringify({ apiType, model, prompt })) } catch { /* ignore */ } }, [apiType, model, prompt])
   useEffect(() => {
     setCases(cs => cs.map(c => c.editedPreview == null ? { ...c, plan: null } : c))
   }, [apiType, model, prompt])
@@ -917,7 +1177,7 @@ function ImgApiTestTool() {
   const planOf = (c: ImgCase): ImgPlan => c.plan ?? imgBuildPlan(apiType, model.trim() || IMG_PLACEHOLDER_MODEL[apiType], c.prompt ?? prompt, c.params, c.needRef ? refImages.length : 0)
   const bodyOf = (plan: ImgPlan) => plan.kind === 'json' ? plan.body : (plan.multipart?.fields) || {}
 
-  const saveChannel = async () => {
+  const saveChannel = useCallback(async () => {
     const name = chForm.name.trim()
     const base = chForm.baseUrl.trim().replace(/\/+$/, '')
     const key = chForm.apiKey.trim()
@@ -945,26 +1205,32 @@ function ImgApiTestTool() {
     setChForm({ name: '', baseUrl: '', apiKey: '' })
     setEditingChId(null)
     toastShow('已保存')
-  }
-  const editChannel = (c: ImgChannel) => {
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [chForm, editingChId, channels, activeChId])
+  const editChannel = useCallback((c: ImgChannel) => {
     setChForm({ name: c.name, baseUrl: c.baseUrl, apiKey: '' })
     setEditingChId(c.id)
     setPane('channels')
-  }
-  const delChannel = (id: string) => {
+  }, [])
+  const delChannel = useCallback((id: string) => {
     if (!window.confirm('删除该渠道？')) return
-    setChannels(channels.filter(x => x.id !== id))
-    if (activeChId === id) setActiveChId(null)
-  }
+    setChannels(prev => prev.filter(x => x.id !== id))
+    setActiveChId(prev => (prev === id ? null : prev))
+  }, [])
+  const clearChForm = useCallback(() => {
+    setChForm({ name: '', baseUrl: '', apiKey: '' })
+    setEditingChId(null)
+  }, [])
 
-  const updatePrice = (idx: number, v: number) => {
+  const updatePrice = useCallback((idx: number, v: number) => {
     setPrices(prev => prev.map((x, i) => i === idx ? { ...x, usd: v } : x))
-  }
-  const delPrice = (idx: number) => {
+  }, [])
+  const delPrice = useCallback((idx: number) => {
     if (!window.confirm(`删除 ${prices[idx].model} (${prices[idx].tier}) 的价格条目？`)) return
     setPrices(prev => prev.filter((_, i) => i !== idx))
-  }
-  const addPrice = () => {
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [prices])
+  const addPrice = useCallback(() => {
     const m = priceForm.model.trim()
     const tier = priceForm.tier.trim() || 'default'
     const usd = parseFloat(priceForm.usd)
@@ -977,12 +1243,15 @@ function ImgApiTestTool() {
     })
     setPriceForm({ model: '', tier: '', usd: '', note: '' })
     toastShow('已添加')
-  }
-  const resetPrices = () => {
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [priceForm])
+  const resetPrices = useCallback(() => {
     if (!window.confirm('恢复为内置默认价格？将覆盖你的自定义修改。')) return
     setPrices(JSON.parse(JSON.stringify(IMG_DEFAULT_PRICES)))
     toastShow('已恢复默认价格')
-  }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [])
+  const rateChange = useCallback((v: string) => setRateStr(v.replace(/[^\d.]/g, '')), [])
 
   const addRefFile = async (files: FileList | null) => {
     if (!files || !files.length) return
@@ -1359,22 +1628,27 @@ function ImgApiTestTool() {
     )
   }
 
-  const classify = (r: ImgRecord): 'pass' | 'fail' | 'error' => !r.ok ? 'error' : (imgVerdict(r.checks || []).level === 'ok' ? 'pass' : 'fail')
-  const histModels = [...new Set(history.map(r => r.model))]
-  const filteredHistory = history.filter(r =>
-    (!fChannel || r.channelName === fChannel) &&
-    (!fApiType || r.apiType === fApiType) &&
-    (!fModel || r.model === fModel) &&
-    (!fResult || classify(r) === fResult))
-
-  const startExport = (records: ImgRecord[], format: 'png' | 'html') => {
+  const startExport = useCallback((records: ImgRecord[], format: 'png' | 'html') => {
     if (!records.length) { toastShow('没有可导出的记录'); return }
     if (exportBusy) { toastShow('正在导出中，请稍候'); return }
     setExportJob({ records, format })
-  }
-  const toggleHistSel = (id: string, v: boolean) => {
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [exportBusy])
+  const toggleHistSel = useCallback((id: string, v: boolean) => {
     setSelHistIds(prev => { const next = new Set(prev); if (v) next.add(id); else next.delete(id); return next })
-  }
+  }, [])
+  const clearAllHistory = useCallback(() => {
+    if (window.confirm('清空所有历史记录？')) {
+      setHistory([]); setSelHistIds(new Set()); historyDbClear('imgtest').catch(() => {}); toastShow('已清空')
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [])
+  const deleteHistOne = useCallback((id: string) => {
+    if (window.confirm('删除该记录？')) {
+      setHistory(h => h.filter(x => x.id !== id))
+      historyDbDeleteOne('imgtest', id).catch(() => {})
+    }
+  }, [])
 
   const renderExportRecHeader = (r: ImgRecord) => (
     <div className="flex flex-wrap gap-x-5 gap-y-1 text-xs mb-3" style={{ color: 'var(--t2)' }}>
@@ -1447,7 +1721,8 @@ function ImgApiTestTool() {
     </div>
   )
 
-  const testPane = (
+  // 函数形式：只有激活的 pane 才会被求值（JSX 变量会在每次渲染时无条件构建整棵子树）
+  const renderTestPane = () => (
     <div className="flex flex-col gap-4">
       <Card>
         <div className="flex items-center gap-2 mb-3">
@@ -1494,216 +1769,6 @@ function ImgApiTestTool() {
     </div>
   )
 
-  const channelsPane = (
-    <div className="flex flex-col gap-4">
-      <Card>
-        <p className="text-sm font-bold mb-3" style={{ color: 'var(--text)' }}>已保存的渠道 <span className="inline-flex items-center justify-center rounded-full px-2 py-0.5 text-xs font-bold ml-1" style={{ background: 'var(--accentSub)', color: 'var(--accent)' }}>{channels.length}</span></p>
-        {channels.length === 0 && <p className="text-xs mb-3" style={{ color: 'var(--t3)' }}>还没有渠道，请在下方添加。</p>}
-        <div className="grid grid-cols-1 xl:grid-cols-2 gap-3">
-          {channels.map(c => (
-            <div key={c.id} className="rounded-2xl p-4 relative" style={{ border: `1px solid ${c.id === activeChId ? 'var(--accent)' : 'var(--border)'}`, background: c.id === activeChId ? 'var(--accentSub)' : 'var(--s1)' }}>
-              {c.id === activeChId && <span className="absolute top-3 right-4 text-[11px] font-bold" style={{ color: 'var(--accent)' }}>✓ 当前使用</span>}
-              <div className="text-sm font-bold pr-16 truncate" style={{ color: 'var(--text)' }}>{c.name}</div>
-              <div className="text-xs break-all mt-1" style={{ color: 'var(--t3)' }}>{c.baseUrl}</div>
-              <div className="text-[11px] font-mono mt-1" style={{ color: 'var(--t3)' }}>{c.keyMask || '（未设置）'}</div>
-              <div className="flex gap-2 mt-3">
-                <Btn small variant="soft" onClick={() => setActiveChId(c.id)}>设为当前</Btn>
-                <Btn small variant="soft" onClick={() => editChannel(c)}>编辑</Btn>
-                <Btn small variant="danger" onClick={() => delChannel(c.id)}>删除</Btn>
-              </div>
-            </div>
-          ))}
-        </div>
-      </Card>
-      <Card>
-        <p className="text-sm font-bold mb-3" style={{ color: 'var(--text)' }}>{editingChId ? '编辑渠道' : '添加新渠道'}</p>
-        <div className="grid grid-cols-2 gap-3">
-          <div>
-            <Label className="block mb-1.5">渠道名称（自定义标识）</Label>
-            <CustomInput value={chForm.name} onChange={v => setChForm(f => ({ ...f, name: v }))} placeholder="例如：主线-oinone" />
-          </div>
-          <div>
-            <Label className="block mb-1.5">baseUrl</Label>
-            <CustomInput value={chForm.baseUrl} onChange={v => setChForm(f => ({ ...f, baseUrl: v }))} placeholder="https://api.oinone.top" />
-          </div>
-        </div>
-        <div className="mt-3">
-          <Label className="block mb-1.5">apiKey {editingChId ? '（留空表示保持不变，本地加密存储）' : ''}</Label>
-          <CustomInput value={chForm.apiKey} onChange={v => setChForm(f => ({ ...f, apiKey: v }))} type="password" placeholder="sk-xxxxxxxx" />
-        </div>
-        <div className="flex items-center gap-3 mt-4">
-          <Btn variant="primary" small={false} onClick={saveChannel}>保存渠道</Btn>
-          <Btn variant="soft" onClick={() => { setChForm({ name: '', baseUrl: '', apiKey: '' }); setEditingChId(null) }}>清空表单</Btn>
-          <span className="text-[11px]" style={{ color: 'var(--t3)' }}>渠道信息保存在本浏览器 localStorage 中（apiKey 经 AES-GCM 加密）。</span>
-        </div>
-      </Card>
-    </div>
-  )
-
-  const pricesPane = (
-    <div className="flex flex-col gap-4">
-      <Card>
-        <div className="flex items-center justify-between flex-wrap gap-2 mb-3">
-          <p className="text-sm font-bold" style={{ color: 'var(--text)' }}>模型价格配置 <span className="text-xs font-normal" style={{ color: 'var(--t3)' }}>按模型编码精确匹配 · 档位自动选择</span></p>
-          <div className="flex items-center gap-2">
-            <span className="text-xs" style={{ color: 'var(--t2)' }}>汇率 1 USD =</span>
-            <div className="w-24"><CustomInput value={rateStr} onChange={v => setRateStr(v.replace(/[^\d.]/g, ''))} type="text" mono /></div>
-            <span className="text-xs" style={{ color: 'var(--t2)' }}>CNY</span>
-            <Btn small variant="soft" onClick={resetPrices}>↺ 恢复内置默认价格</Btn>
-          </div>
-        </div>
-        <p className="text-[11px] mb-3" style={{ color: 'var(--t3)' }}>
-          档位（tier）根据请求参数自动选择：OpenAI 按 quality，Grok 按 resolution，Gemini 按 imageSize（512→0.5K），Seedream 按 size 像素量（≤2.36MP 为 1K 档）。找不到对应档位时使用 default 档。
-        </p>
-        <div className="overflow-auto">
-          <table className="w-full text-xs">
-            <thead>
-              <tr className="text-left" style={{ background: 'var(--s1)', color: 'var(--t3)' }}>
-                <th className="px-3 py-2 font-semibold">模型编码（精确匹配）</th>
-                <th className="px-3 py-2 font-semibold">档位</th>
-                <th className="px-3 py-2 font-semibold">美元 / 张</th>
-                <th className="px-3 py-2 font-semibold">人民币 / 张</th>
-                <th className="px-3 py-2 font-semibold">备注</th>
-                <th className="px-3 py-2 font-semibold">操作</th>
-              </tr>
-            </thead>
-            <tbody>
-              {prices.length === 0 && (
-                <tr><td colSpan={6} className="px-3 py-6 text-center" style={{ color: 'var(--t3)' }}>暂无价格条目</td></tr>
-              )}
-              {prices.map((p, idx) => (
-                <tr key={idx} style={{ borderTop: '1px solid var(--border)' }}>
-                  <td className="px-3 py-2 font-mono font-semibold">{p.model}</td>
-                  <td className="px-3 py-2"><Badge>{p.tier}</Badge></td>
-                  <td className="px-3 py-2">
-                    <input type="number" step="0.001" value={p.usd} className="no-spinner w-24 rounded-lg px-2 py-1 text-xs font-mono outline-none"
-                      style={{ background: 'var(--inputBg)', border: '1px solid var(--inputBorder)', color: 'var(--text)' }}
-                      onChange={e => { const v = parseFloat(e.target.value); if (!isNaN(v) && v >= 0) updatePrice(idx, v) }} />
-                  </td>
-                  <td className="px-3 py-2 font-mono" style={{ color: 'var(--warn)' }}>¥{(p.usd * rate).toFixed(3)}</td>
-                  <td className="px-3 py-2" style={{ color: 'var(--t3)' }}>{p.note || ''}</td>
-                  <td className="px-3 py-2"><Btn small variant="danger" onClick={() => delPrice(idx)}>删</Btn></td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        </div>
-      </Card>
-      <Card>
-        <p className="text-sm font-bold mb-3" style={{ color: 'var(--text)' }}>添加价格条目</p>
-        <div className="grid grid-cols-2 xl:grid-cols-4 gap-3">
-          <div>
-            <Label className="block mb-1.5">模型编码</Label>
-            <CustomInput value={priceForm.model} onChange={v => setPriceForm(f => ({ ...f, model: v }))} placeholder="gpt-image-2" />
-          </div>
-          <div>
-            <Label className="block mb-1.5">档位</Label>
-            <CustomInput value={priceForm.tier} onChange={v => setPriceForm(f => ({ ...f, tier: v }))} placeholder="default" />
-          </div>
-          <div>
-            <Label className="block mb-1.5">美元价格 / 张</Label>
-            <CustomInput value={priceForm.usd} onChange={v => setPriceForm(f => ({ ...f, usd: v }))} type="number" placeholder="0.05" />
-          </div>
-          <div>
-            <Label className="block mb-1.5">备注（可选）</Label>
-            <CustomInput value={priceForm.note} onChange={v => setPriceForm(f => ({ ...f, note: v }))} placeholder="官网价" />
-          </div>
-        </div>
-        <div className="mt-4"><Btn small={false} variant="primary" onClick={addPrice}>＋ 添加</Btn></div>
-      </Card>
-    </div>
-  )
-
-  const historyPane = (
-    <Card>
-      <div className="flex items-center justify-between flex-wrap gap-2 mb-3">
-        <p className="text-sm font-bold" style={{ color: 'var(--text)' }}>历史测试记录 <span className="inline-flex items-center justify-center rounded-full px-2 py-0.5 text-xs font-bold ml-1" style={{ background: 'var(--accentSub)', color: 'var(--accent)' }}>{history.length}</span></p>
-        <div className="flex items-center gap-2">
-          <Btn small variant="soft" disabled={exportBusy || selHistIds.size === 0}
-            onClick={() => startExport(filteredHistory.filter(r => selHistIds.has(r.id)), 'png')}>⬇ 导出选中图片 ({selHistIds.size})</Btn>
-          <Btn small variant="soft" disabled={exportBusy || selHistIds.size === 0}
-            onClick={() => startExport(filteredHistory.filter(r => selHistIds.has(r.id)), 'html')}>⬇ 导出选中 HTML ({selHistIds.size})</Btn>
-          <Btn small variant="danger" onClick={() => { if (window.confirm('清空所有历史记录？')) { setHistory([]); setSelHistIds(new Set()); historyDbClear('imgtest').catch(() => {}); toastShow('已清空') } }}>清空全部</Btn>
-        </div>
-      </div>
-      <div className="flex items-center gap-3 flex-wrap mb-3">
-        <div className="w-44"><CustomSelect value={fChannel} onChange={setFChannel} options={[{ value: '', label: '全部渠道' }, ...channels.map(c => ({ value: c.name, label: c.name }))]} /></div>
-        <div className="w-36"><CustomSelect value={fApiType} onChange={setFApiType} options={[{ value: '', label: '全部接口' }, { value: 'openai', label: 'OpenAI' }, { value: 'grok', label: 'Grok' }, { value: 'gemini', label: 'Gemini' }, { value: 'seedream', label: 'Seedream' }]} /></div>
-        <div className="w-48"><CustomSelect value={fModel} onChange={setFModel} options={[{ value: '', label: '全部模型' }, ...histModels.map(m => ({ value: m, label: m }))]} /></div>
-        <div className="w-36"><CustomSelect value={fResult} onChange={setFResult} options={[{ value: '', label: '全部结果' }, { value: 'pass', label: '✓ 通过' }, { value: 'fail', label: '✕ 未通过' }, { value: 'error', label: '! 请求失败' }]} /></div>
-      </div>
-      <div className="overflow-auto" style={{ maxHeight: 'calc(100vh - 260px)' }}>
-        <table className="w-full text-xs">
-          <thead>
-            <tr className="text-left sticky top-0" style={{ background: 'var(--s1)', color: 'var(--t3)' }}>
-              <th className="px-3 py-2 font-semibold">
-                <input type="checkbox" className="w-4 h-4 cursor-pointer" style={{ accentColor: 'var(--accent)' }}
-                  checked={filteredHistory.length > 0 && filteredHistory.every(r => selHistIds.has(r.id))}
-                  onChange={e => setSelHistIds(e.target.checked ? new Set(filteredHistory.map(r => r.id)) : new Set())} />
-              </th>
-              <th className="px-3 py-2 font-semibold">图</th>
-              <th className="px-3 py-2 font-semibold">时间</th>
-              <th className="px-3 py-2 font-semibold">渠道</th>
-              <th className="px-3 py-2 font-semibold">接口</th>
-              <th className="px-3 py-2 font-semibold">模型</th>
-              <th className="px-3 py-2 font-semibold">用例</th>
-              <th className="px-3 py-2 font-semibold">目标</th>
-              <th className="px-3 py-2 font-semibold">实际</th>
-              <th className="px-3 py-2 font-semibold">结果</th>
-              <th className="px-3 py-2 font-semibold">耗时</th>
-              <th className="px-3 py-2 font-semibold">价格</th>
-              <th className="px-3 py-2 font-semibold">操作</th>
-            </tr>
-          </thead>
-          <tbody>
-            {filteredHistory.length === 0 && (
-              <tr><td colSpan={13} className="px-3 py-8 text-center" style={{ color: 'var(--t3)' }}>暂无记录</td></tr>
-            )}
-            {filteredHistory.map(r => {
-              const cls = classify(r)
-              const badge = cls === 'pass' ? <Badge color="ok">✓ {imgVerdict(r.checks || []).text}</Badge> : cls === 'fail' ? <Badge color="err">✕ {imgVerdict(r.checks || []).text}</Badge> : <Badge color="warn">! 失败</Badge>
-              const t = r.targets || {}
-              const tierLabel = t.resolutionTierBaseReq ? `${t.resolutionTierLabelReq || imgResolutionTierLabel(null, t.resolutionTierBaseReq)} 档` : ''
-              const tgt = (t.wReq ? `${t.wReq}×${t.hReq}` : (tierLabel || t.sizeReq || '—')) + (t.ratioReq ? ' ' + t.ratioReq : '') + (t.nReq > 1 ? ' ×' + t.nReq : '')
-              const act = r.ok && r.images && r.images[0] ? `${r.images[0].w}×${r.images[0].h}${r.returnedN > 1 ? ' ×' + r.returnedN : ''}` : '—'
-              const thumb = r.images?.[0]?.thumb || r.images?.[0]?.url || ''
-              return (
-                <tr key={r.id} style={{ borderTop: '1px solid var(--border)' }} className="transition-colors duration-100"
-                  onPointerEnter={e => { (e.currentTarget as HTMLTableRowElement).style.background = 'var(--s1)' }}
-                  onPointerLeave={e => { (e.currentTarget as HTMLTableRowElement).style.background = 'transparent' }}>
-                  <td className="px-3 py-2">
-                    <input type="checkbox" className="w-4 h-4 cursor-pointer" style={{ accentColor: 'var(--accent)' }}
-                      checked={selHistIds.has(r.id)} onChange={e => toggleHistSel(r.id, e.target.checked)} />
-                  </td>
-                  <td className="px-3 py-2">
-                    {thumb ? <img src={thumb} className="w-10 h-10 rounded-lg object-cover" style={{ border: '1px solid var(--border)' }} /> : <span style={{ color: 'var(--t3)' }}>—</span>}
-                  </td>
-                  <td className="px-3 py-2 whitespace-nowrap">{imgFmtTime(r.time)}</td>
-                  <td className="px-3 py-2">{r.channelName}</td>
-                  <td className="px-3 py-2">{IMG_API_LABEL[r.apiType] || r.apiType}{r.useRef ? ' 🖼️' : ''}</td>
-                  <td className="px-3 py-2 font-mono">{r.model}</td>
-                  <td className="px-3 py-2">{r.caseName}</td>
-                  <td className="px-3 py-2 font-mono">{imgEsc(tgt)}</td>
-                  <td className="px-3 py-2 font-mono">{imgEsc(act)}</td>
-                  <td className="px-3 py-2">{badge}</td>
-                  <td className="px-3 py-2">{r.durationMs}ms</td>
-                  <td className="px-3 py-2 font-mono whitespace-nowrap" style={{ color: 'var(--warn)' }}>
-                    {hidePrices || !r.price ? '—' : `$${(r.price.usd * (r.price.count || 1)).toFixed(3)}\n¥${(r.price.cny * (r.price.count || 1)).toFixed(3)}`}
-                  </td>
-                  <td className="px-3 py-2 whitespace-nowrap">
-                    <Btn small variant="soft" onClick={() => setDetailRec(r)}>详情</Btn>
-                    <span className="inline-block w-1" />
-                    <Btn small variant="danger" onClick={() => { if (window.confirm('删除该记录？')) { setHistory(h => h.filter(x => x.id !== r.id)); historyDbDeleteOne('imgtest', r.id).catch(() => {}) } }}>删</Btn>
-                  </td>
-                </tr>
-              )
-            })}
-          </tbody>
-        </table>
-      </div>
-    </Card>
-  )
-
   return (
     <div className="h-full flex" style={{ background: 'transparent' }}>
       {leftPanel}
@@ -1720,10 +1785,31 @@ function ImgApiTestTool() {
           </div>
         </div>
         <div className="flex-1 overflow-y-auto p-5">
-          {pane === 'test' && testPane}
-          {pane === 'channels' && channelsPane}
-          {pane === 'prices' && pricesPane}
-          {pane === 'history' && historyPane}
+          {pane === 'test' && renderTestPane()}
+          {pane === 'channels' && (
+            <ImgChannelsPane
+              channels={channels} activeChId={activeChId} chForm={chForm} editingChId={editingChId}
+              onSetActive={setActiveChId} onEdit={editChannel} onDelete={delChannel}
+              onSave={saveChannel} onChFormChange={setChForm} onClearForm={clearChForm}
+            />
+          )}
+          {pane === 'prices' && (
+            <ImgPricesPane
+              prices={prices} rateStr={rateStr} rate={rate} priceForm={priceForm}
+              onRateChange={rateChange} onResetPrices={resetPrices}
+              onUpdatePrice={updatePrice} onDelPrice={delPrice}
+              onPriceFormChange={setPriceForm} onAddPrice={addPrice}
+            />
+          )}
+          {pane === 'history' && (
+            <ImgHistoryPane
+              history={history} channels={channels} hidePrices={hidePrices} exportBusy={exportBusy} selHistIds={selHistIds}
+              fChannel={fChannel} fApiType={fApiType} fModel={fModel} fResult={fResult}
+              onFChannel={setFChannel} onFApiType={setFApiType} onFModel={setFModel} onFResult={setFResult}
+              onStartExport={startExport} onToggleSel={toggleHistSel} onSetSelIds={setSelHistIds}
+              onClearAll={clearAllHistory} onDetail={setDetailRec} onDeleteOne={deleteHistOne}
+            />
+          )}
         </div>
       </div>
 

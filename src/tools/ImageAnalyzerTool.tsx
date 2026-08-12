@@ -400,10 +400,12 @@ function ImageAnalyzerTool() {
         c.tier, c.standard ? c.name : '非标准尺寸', it.format, imgAspectRatio(it.width, it.height), ((it.width * it.height) / 1e6).toFixed(2)])
     })
     const csv = '\ufeff' + rows.map(r => r.map(v => `"${String(v).replace(/"/g, '""')}"`).join(',')).join('\n')
+    const url = URL.createObjectURL(new Blob([csv], { type: 'text/csv;charset=utf-8' }))
     const a = document.createElement('a')
-    a.href = URL.createObjectURL(new Blob([csv], { type: 'text/csv;charset=utf-8' }))
+    a.href = url
     a.download = `图片信息_${new Date().toISOString().slice(0, 10)}.csv`
     a.click(); addToast('CSV 已导出', 'ok')
+    setTimeout(() => URL.revokeObjectURL(url), 1000)
   }
 
   const [dragOver, setDragOver] = useState(false)

@@ -60,10 +60,13 @@ function GraphqlTool() {
   const leftHistory = useGqlHistory('')
   const rightHistory = useGqlHistory('')
 
+  const toastTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
   const showToast = useCallback((msg: string) => {
     setToast(msg)
-    setTimeout(() => setToast(null), 1800)
+    if (toastTimer.current) clearTimeout(toastTimer.current)
+    toastTimer.current = setTimeout(() => { toastTimer.current = null; setToast(null) }, 1800)
   }, [])
+  useEffect(() => () => { if (toastTimer.current) clearTimeout(toastTimer.current) }, [])
 
   // Shared operation: apply function to a panel
   const applyToPanel = useCallback((

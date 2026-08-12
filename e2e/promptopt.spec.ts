@@ -1,5 +1,5 @@
 import { test, expect } from '@playwright/test'
-import { goto, selectOption, inputByLabel } from './helpers'
+import { goto, selectOption, inputByLabel, readKv } from './helpers'
 
 test.beforeEach(async ({ page }) => {
   // 仅首次加载清空；reload 保留，便于测试持久化
@@ -50,7 +50,8 @@ test.describe('提示词优化', () => {
     await expect(page.locator('div.pr-16', { hasText: '测试渠道' })).toBeVisible()
     await expect(page.getByText('gpt-4o-mini', { exact: true })).toBeVisible()
 
-    const stored = await page.evaluate(() => localStorage.getItem('promptopt-channels'))
+    await expect.poll(() => readKv(page, 'promptopt-channels')).toBeTruthy()
+    const stored = await readKv(page, 'promptopt-channels')
     expect(stored).not.toContain('sk-test-key-123')
     expect(stored).toContain('.')
   })

@@ -9,8 +9,10 @@
 // ProbeReport.completedAt）不做成通用参数，由各工具自己实现，这里只提供最基础的 CRUD。
 
 const HISTORY_DB_NAME = 'dev-toolkit-history'
-const HISTORY_DB_VERSION = 1
+// v2：新增 kv store（工具配置/渠道/提示词库等键值数据，从 localStorage 迁入）
+const HISTORY_DB_VERSION = 2
 const HISTORY_STORES = ['imgtest', 'llmbatch', 'modelprobe'] as const
+const KV_STORE = 'kv'
 export type HistoryStore = typeof HISTORY_STORES[number]
 
 let dbPromise: Promise<IDBDatabase> | null = null
@@ -24,6 +26,7 @@ function openHistoryDb(): Promise<IDBDatabase> {
         for (const name of HISTORY_STORES) {
           if (!db.objectStoreNames.contains(name)) db.createObjectStore(name, { keyPath: 'id' })
         }
+        if (!db.objectStoreNames.contains(KV_STORE)) db.createObjectStore(KV_STORE)
       }
       req.onsuccess = () => resolve(req.result)
       req.onerror = () => reject(req.error)
@@ -32,6 +35,47 @@ function openHistoryDb(): Promise<IDBDatabase> {
     p.catch(() => { dbPromise = null })
   }
   return dbPromise
+}
+
+// ─── kv store 低层 CRUD（值统一为字符串，与 localStorage 语义一致；上层缓存见 app-kv.ts）───
+
+export async function kvDbGetAllEntries(): Promise<Map<string, string>> {
+  const db = await openHistoryDb()
+  return await new Promise<Map<string, string>>((resolve, reject) => {
+    const tx = db.transaction(KV_STORE, 'readonly')
+    const store = tx.objectStore(KV_STORE)
+    const keysReq = store.getAllKeys()
+    const valsReq = store.getAll()
+    tx.oncomplete = () => {
+      const map = new Map<string, string>()
+      keysReq.result.forEach((k, i) => {
+        const v = valsReq.result[i]
+        if (typeof k === 'string' && typeof v === 'string') map.set(k, v)
+      })
+      resolve(map)
+    }
+    tx.onerror = () => reject(tx.error)
+  })
+}
+
+export async function kvDbSet(key: string, value: string): Promise<void> {
+  const db = await openHistoryDb()
+  await new Promise<void>((resolve, reject) => {
+    const tx = db.transaction(KV_STORE, 'readwrite')
+    tx.objectStore(KV_STORE).put(value, key)
+    tx.oncomplete = () => resolve()
+    tx.onerror = () => reject(tx.error)
+  })
+}
+
+export async function kvDbRemove(key: string): Promise<void> {
+  const db = await openHistoryDb()
+  await new Promise<void>((resolve, reject) => {
+    const tx = db.transaction(KV_STORE, 'readwrite')
+    tx.objectStore(KV_STORE).delete(key)
+    tx.oncomplete = () => resolve()
+    tx.onerror = () => reject(tx.error)
+  })
 }
 
 export async function historyDbGetAll<T>(store: HistoryStore): Promise<T[]> {

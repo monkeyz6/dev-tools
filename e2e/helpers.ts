@@ -44,3 +44,23 @@ export function readHistoryStore(page: Page, store: string): Promise<any[]> {
     req.onerror = () => reject(req.error)
   }), store)
 }
+
+/**
+ * 读取 IndexedDB kv store 里某个键（字符串值）。
+ * 工具配置/渠道/提示词库等键值数据已从 localStorage 迁到这里（见 src/shared/app-kv.ts），
+ * 断言持久化内容时用这个而不是 localStorage.getItem。
+ */
+export function readKv(page: Page, key: string): Promise<string | null> {
+  return page.evaluate(key => new Promise<string | null>((resolve, reject) => {
+    const req = indexedDB.open('dev-toolkit-history')
+    req.onsuccess = () => {
+      const db = req.result
+      if (!db.objectStoreNames.contains('kv')) { resolve(null); return }
+      const tx = db.transaction('kv', 'readonly')
+      const getReq = tx.objectStore('kv').get(key)
+      getReq.onsuccess = () => resolve(typeof getReq.result === 'string' ? getReq.result : null)
+      getReq.onerror = () => reject(getReq.error)
+    }
+    req.onerror = () => reject(req.error)
+  }), key)
+}

@@ -1,3 +1,4 @@
+import { kvGet, kvSet, kvRemove } from '../shared/app-kv'
 import React, { useState, useCallback, useRef, useEffect, useLayoutEffect, useMemo, useDeferredValue } from 'react'
 import { Btn, Label, Card, Badge, CustomInput, CustomSelect, SearchableSelect, CustomTextarea, Toggle, SegmentedControl, SectionTitle, CopyBtn } from '../shared/ui'
 import { formatUuids, genRandomStrings, randActiveClasses, uuidBytes, type RandOpts, type UuidFmt } from '../shared/id'
@@ -32,13 +33,13 @@ const DEFAULT_IDGEN_OPTS: IdGenOpts = {
 function loadIdGenOpts(): IdGenOpts {
   if (typeof window === 'undefined') return DEFAULT_IDGEN_OPTS
   try {
-    const raw = localStorage.getItem('idgen-opts')
+    const raw = kvGet('idgen-opts')
     if (!raw) return DEFAULT_IDGEN_OPTS
     const p = JSON.parse(raw)
     return { ...DEFAULT_IDGEN_OPTS, ...p, rand: { ...DEFAULT_IDGEN_OPTS.rand, ...(p.rand ?? {}) } }
   } catch { return DEFAULT_IDGEN_OPTS }
 }
-function saveIdGenOpts(o: IdGenOpts) { try { localStorage.setItem('idgen-opts', JSON.stringify(o)) } catch { /* ignore */ } }
+function saveIdGenOpts(o: IdGenOpts) { try { kvSet('idgen-opts', JSON.stringify(o)) } catch { /* ignore */ } }
 
 function IdGenTool() {
   const [opts, setOpts] = useState<IdGenOpts>(loadIdGenOpts)

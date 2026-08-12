@@ -1,4 +1,4 @@
-import * as XLSX from 'xlsx'
+import type { WorkBook } from 'xlsx'
 
 // ─── LLM 日志报告：数据解析 + 报告计算（纯函数，无 React 依赖） ──────────────
 
@@ -207,9 +207,16 @@ function rowsFromList(list: unknown[]): ParseResult {
   return { rows, skipped }
 }
 
-/** 解析 Excel（xlsx/xls/csv 均可，xlsx 库统一处理）：跳过 Query 等非数据 sheet，优先表头匹配的 sheet */
-export function parseExcelBuffer(buf: ArrayBuffer, fileName?: string): ParseResult {
-  let wb: XLSX.WorkBook
+/** 解析 Excel（xlsx/xls/csv 均可，xlsx 库统一处理）：跳过 Query 等非数据 sheet，优先表头匹配的 sheet。
+    xlsx 体积大（~400KB min），改为动态 import——只有走 Excel 路径才下载。 */
+export async function parseExcelBuffer(buf: ArrayBuffer, _fileName?: string): Promise<ParseResult> {
+  let XLSX: typeof import('xlsx')
+  try {
+    XLSX = await import('xlsx')
+  } catch {
+    return { rows: [], skipped: 0, error: '解析组件加载失败，请检查网络后重试' }
+  }
+  let wb: WorkBook
   try {
     wb = XLSX.read(buf, { type: 'array' })
   } catch {

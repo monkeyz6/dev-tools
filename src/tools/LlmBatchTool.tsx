@@ -1,3 +1,4 @@
+import { kvGet, kvSet, kvRemove } from '../shared/app-kv'
 import React, { Suspense, useState, useCallback, useRef, useEffect, useLayoutEffect, useMemo, useDeferredValue  } from 'react'
 import { DndContext, PointerSensor, useSensor, useSensors, closestCenter, type DragEndEvent } from '@dnd-kit/core'
 import { SortableContext, useSortable, verticalListSortingStrategy, arrayMove } from '@dnd-kit/sortable'
@@ -8,6 +9,7 @@ import { formatJson, formatJsonWithPlaceholders, highlightJson, computeDiff, fin
 import { convertFormat, type AiFmt } from '../shared/ai-format'
 import { decryptLlmApiKey, encryptLlmApiKey } from '../shared/api-key-crypto'
 import { historyDbGetAll, historyDbPutOne, historyDbDeleteOne, historyDbDeleteMany, historyDbClear, historyDbMigrateFromLocalStorage } from '../shared/history-db'
+import { useDebouncedPersist } from '../shared/use-debounced-persist'
 
 // ─── Shared: 只读 JSON 查看器（复用 JSON 可视化工具的高亮/折叠/虚拟滚动能力）───
 
@@ -945,7 +947,7 @@ interface LlmBatchCfgStored {
 function loadLlmCfg(): LlmBatchCfgStored {
   if (typeof window === 'undefined') return {}
   try {
-    const raw = localStorage.getItem(LLM_CFG_KEY)
+    const raw = kvGet(LLM_CFG_KEY)
     if (!raw) return {}
     const c = JSON.parse(raw)
     return c && typeof c === 'object' ? c : {}
@@ -953,7 +955,7 @@ function loadLlmCfg(): LlmBatchCfgStored {
 }
 function saveLlmCfg(cfg: LlmBatchCfgStored) {
   if (typeof window === 'undefined') return
-  try { localStorage.setItem(LLM_CFG_KEY, JSON.stringify(cfg)) } catch { /* ignore */ }
+  try { kvSet(LLM_CFG_KEY, JSON.stringify(cfg)) } catch { /* ignore */ }
 }
 
 // 历史记录存于共享 IndexedDB（dev-toolkit-history / llmbatch store），不再整份塞进
@@ -1002,7 +1004,7 @@ const DEFAULT_LLM_BODY = `{
 function loadLlmPromptsRaw(): LlmPrompt[] {
   if (typeof window === 'undefined') return []
   try {
-    const raw = localStorage.getItem(LLM_PROMPTS_KEY)
+    const raw = kvGet(LLM_PROMPTS_KEY)
     if (!raw) return []
     const list = JSON.parse(raw)
     if (!Array.isArray(list)) return []
@@ -1012,7 +1014,7 @@ function loadLlmPromptsRaw(): LlmPrompt[] {
 }
 function saveLlmPrompts(list: LlmPrompt[]) {
   if (typeof window === 'undefined') return
-  try { localStorage.setItem(LLM_PROMPTS_KEY, JSON.stringify(list)) } catch { /* ignore */ }
+  try { kvSet(LLM_PROMPTS_KEY, JSON.stringify(list)) } catch { /* ignore */ }
 }
 function makeLlmPrompt(title: string, body: string): LlmPrompt {
   const now = Date.now()
@@ -1036,7 +1038,7 @@ function loadOrMigrateLlmPrompts(): LlmPrompt[] {
 function loadLlmChannelsRaw(): LlmChannel[] {
   if (typeof window === 'undefined') return []
   try {
-    const raw = localStorage.getItem(LLM_CHANNELS_KEY)
+    const raw = kvGet(LLM_CHANNELS_KEY)
     if (!raw) return []
     const list = JSON.parse(raw)
     if (!Array.isArray(list)) return []
@@ -1046,11 +1048,11 @@ function loadLlmChannelsRaw(): LlmChannel[] {
 }
 function saveLlmChannels(list: LlmChannel[]) {
   if (typeof window === 'undefined') return
-  try { localStorage.setItem(LLM_CHANNELS_KEY, JSON.stringify(list)) } catch { /* ignore */ }
+  try { kvSet(LLM_CHANNELS_KEY, JSON.stringify(list)) } catch { /* ignore */ }
 }
 function loadLlmActiveChId(): string | null {
   if (typeof window === 'undefined') return null
-  try { return localStorage.getItem(LLM_ACTIVE_CH_KEY) } catch { return null }
+  try { return kvGet(LLM_ACTIVE_CH_KEY) } catch { return null }
 }
 // 首次加载时的迁移/兜底：老版本的单一配置（llmbatch-config.baseUrl/timeout + llmbatch-key 加密密文）
 // 迁移成一条「默认渠道」；密文直接搬运，无需解密重加密（同一套 AES-GCM passphrase，见 shared/api-key-crypto.ts）。
@@ -1060,7 +1062,7 @@ function loadOrMigrateLlmChannels(): { channels: LlmChannel[]; activeId: string 
   if (existing.length > 0) return { channels: existing, activeId: loadLlmActiveChId() }
   const legacyBaseUrl = loadLlmCfg().baseUrl
   if (!legacyBaseUrl || !legacyBaseUrl.trim()) return { channels: [], activeId: null }
-  const legacyKeyEnc = (typeof window !== 'undefined' && localStorage.getItem(LLM_KEY_STORAGE_KEY)) || ''
+  const legacyKeyEnc = (typeof window !== 'undefined' && kvGet(LLM_KEY_STORAGE_KEY)) || ''
   const ch: LlmChannel = {
     id: 'ch' + Date.now().toString(36) + Math.random().toString(36).slice(2, 7),
     name: '默认渠道',
@@ -1070,7 +1072,7 @@ function loadOrMigrateLlmChannels(): { channels: LlmChannel[]; activeId: string 
     keyMask: legacyKeyEnc ? '（已加密，未展示）' : '',
   }
   saveLlmChannels([ch])
-  try { localStorage.setItem(LLM_ACTIVE_CH_KEY, ch.id) } catch { /* ignore */ }
+  try { kvSet(LLM_ACTIVE_CH_KEY, ch.id) } catch { /* ignore */ }
   return { channels: [ch], activeId: ch.id }
 }
 
@@ -1678,6 +1680,314 @@ function LlmPromptsPane({ prompts, onChange }: {
   )
 }
 
+// ─── Panes：按区域拆分的 memo 子组件 ─────────────────────────────────────────
+// 批量运行期间 setResults/setLiveLog 高频触发，拆分后配置栏等 props 未变的面板
+// 直接跳过重渲染，把更新范围收窄到实时面板子树内。
+
+type LlmChForm = { name: string; baseUrl: string; timeoutSec: string; apiKey: string }
+type LlmConvertedBody = { ok: true; body: string } | { ok: false; error: string } | null
+
+const LlmConfigPane = React.memo(function LlmConfigPane({
+  testTitle, onTestTitle, apiType, onApiType, channels, activeChId, onActiveChId,
+  modelListText, onModelListText, nReq, onNReq, concurrency, onConcurrency,
+  storeResponseBody, onStoreResponseBody, prompts, selectedPromptId, onSelectedPromptId,
+  selectedPrompt, promptBodyErr, convertedBody, startErr, onPreviewBody,
+}: {
+  testTitle: string; onTestTitle: (v: string) => void
+  apiType: ApiType; onApiType: (v: ApiType) => void
+  channels: LlmChannel[]; activeChId: string | null; onActiveChId: (v: string) => void
+  modelListText: string; onModelListText: (v: string) => void
+  nReq: string; onNReq: (v: string) => void
+  concurrency: string; onConcurrency: (v: string) => void
+  storeResponseBody: boolean; onStoreResponseBody: (v: boolean) => void
+  prompts: LlmPrompt[]; selectedPromptId: string | null; onSelectedPromptId: (v: string | null) => void
+  selectedPrompt: LlmPrompt | null; promptBodyErr: string; convertedBody: LlmConvertedBody
+  startErr: string; onPreviewBody: (v: { body: string; model: string }) => void
+}) {
+  return (
+    <div className="w-72 flex-shrink-0 flex flex-col p-4 gap-3.5 overflow-y-auto" style={{ borderRight: '1px solid var(--border)', background: 'var(--s1)' }}>
+      <div>
+        <Label className="block mb-1.5">测试标题（可选）</Label>
+        <CustomInput value={testTitle} onChange={onTestTitle} placeholder="例如：claude-3.5 vs haiku 计费核查" />
+      </div>
+      <div>
+        <Label className="block mb-1.5">API 类型</Label>
+        <CustomSelect value={apiType} onChange={v => onApiType(v as ApiType)} options={[
+          { value: 'anthropic', label: 'Anthropic Messages API' },
+          { value: 'openai_chat', label: 'OpenAI Chat Completions API' },
+          { value: 'openai_responses', label: 'OpenAI Responses API' },
+        ]} />
+      </div>
+      <div>
+        <Label className="block mb-1.5">使用渠道</Label>
+        <CustomSelect value={activeChId ?? ''} onChange={onActiveChId}
+          options={channels.map(c => ({ value: c.id, label: c.name }))} />
+        {channels.length === 0 && <p className="text-xs mt-1.5" style={{ color: 'var(--warn)' }}>⚠ 请先到「渠道管理」添加渠道。</p>}
+      </div>
+
+      <div style={{ borderTop: '1px solid var(--border)', paddingTop: 14 }}>
+        <Label className="block mb-1.5">模型列表（每行一个，或逗号分隔）</Label>
+        <CustomTextarea value={modelListText} onChange={onModelListText} mono rows={3}
+          placeholder={'claude-3-5-sonnet-20241022\nclaude-3-haiku-20240307'} />
+      </div>
+      <div className="grid grid-cols-2 gap-3">
+        <div><Label className="block mb-1.5">每模型次数 N</Label><CustomInput value={nReq} onChange={onNReq} type="number" placeholder="5" /></div>
+        <div><Label className="block mb-1.5">全局并发数 C</Label><CustomInput value={concurrency} onChange={onConcurrency} type="number" placeholder="3" /></div>
+      </div>
+      <div>
+        <Toggle value={storeResponseBody} onChange={onStoreResponseBody} label="存储响应体" />
+      </div>
+      <div style={{ borderTop: '1px solid var(--border)', paddingTop: 14 }}>
+        <Label className="block mb-1.5">提示词（请求体来源）</Label>
+        {prompts.length === 0 ? (
+          <p className="text-xs" style={{ color: 'var(--err)' }}>⚠ 还没有任何提示词，请切换到右侧「提示词」标签页新建一条。</p>
+        ) : (
+          <>
+            <div className="flex items-center gap-2">
+              <div className="flex-1">
+                <SearchableSelect value={selectedPromptId} onChange={onSelectedPromptId}
+                  options={prompts.map(p => ({ value: p.id, label: p.title || '（未命名）' }))}
+                  placeholder="选择一个提示词…" />
+              </div>
+              {selectedPrompt && (
+                <button onClick={() => {
+                  const firstModel = parseModelList(modelListText)[0] || ''
+                  const body = firstModel && bodyHasModelPlaceholder(selectedPrompt.body)
+                    ? fillModelPlaceholder(selectedPrompt.body, JSON.stringify(firstModel))
+                    : selectedPrompt.body
+                  onPreviewBody({ body, model: firstModel })
+                }}
+                  className="rounded-lg p-1.5 border-0 outline-none cursor-pointer flex-shrink-0"
+                  style={{ background: 'transparent', color: 'var(--t2)' }}
+                  onPointerEnter={e => { (e.currentTarget as HTMLButtonElement).style.color = 'var(--accent)'; (e.currentTarget as HTMLButtonElement).style.background = 'var(--accentSub)' }}
+                  onPointerLeave={e => { (e.currentTarget as HTMLButtonElement).style.color = 'var(--t2)'; (e.currentTarget as HTMLButtonElement).style.background = 'transparent' }}
+                  title="查看完整请求体"><IconExpand /></button>
+              )}
+            </div>
+            {!selectedPromptId && <p className="text-xs mt-1.5" style={{ color: 'var(--warn)' }}>⚠ 请选择一个提示词作为请求体来源。</p>}
+            {promptBodyErr && <p className="text-xs mt-1.5" style={{ color: 'var(--err)' }}>{promptBodyErr}</p>}
+            {convertedBody && !convertedBody.ok && <p className="text-xs mt-1.5" style={{ color: 'var(--err)' }}>{convertedBody.error}</p>}
+          </>
+        )}
+      </div>
+      {startErr && <p className="text-xs whitespace-pre-wrap" style={{ color: 'var(--err)' }}>{startErr}</p>}
+    </div>
+  )
+})
+
+const LlmLivePane = React.memo(function LlmLivePane({ reuseNotice, results, liveLog, liveModels, liveN }: {
+  reuseNotice: string; results: BatchResult[]; liveLog: BatchResult[]; liveModels: string[]; liveN: number
+}) {
+  const total = results.length
+  const { completed, okCount, errCount, statusCodes } = useMemo(() => ({
+    completed: results.filter(r => r.status === 'ok' || r.status === 'error').length,
+    okCount: results.filter(r => r.status === 'ok').length,
+    errCount: results.filter(r => r.status === 'error').length,
+    statusCodes: Array.from(new Set(results.map(r => r.httpStatus).filter((v): v is number => v != null))).sort((a, b) => a - b),
+  }), [results])
+  const pct = total ? Math.round(completed / total * 100) : 0
+
+  return (
+    <div className="flex flex-col">
+      {reuseNotice && <p className="px-6 pt-3 text-xs" style={{ color: 'var(--accent)' }}>{reuseNotice}</p>}
+      {total > 0 && (
+        <div className="px-6 py-3 flex flex-col gap-2 flex-shrink-0" style={{ borderBottom: '1px solid var(--border)' }}>
+          <div className="flex items-center justify-between text-sm">
+            <span style={{ color: 'var(--t2)' }}>总进度</span>
+            <span className="tabular-nums" style={{ color: 'var(--t2)' }}>{completed} / {total}（{pct}%）</span>
+          </div>
+          <div className="h-1.5 rounded-full overflow-hidden" style={{ background: 'var(--s2)' }}>
+            <div className="h-full rounded-full transition-all duration-300" style={{ background: 'var(--accent)', width: pct + '%' }} />
+          </div>
+          <div className="flex flex-wrap gap-x-5 gap-y-1 text-xs pt-0.5">
+            <span style={{ color: 'var(--t2)' }}>成功 <strong className="tabular-nums" style={{ color: 'var(--ok)' }}>{okCount}</strong></span>
+            <span style={{ color: 'var(--t2)' }}>失败 <strong className="tabular-nums" style={{ color: errCount ? 'var(--err)' : 'var(--t2)' }}>{errCount}</strong></span>
+            {statusCodes.length > 0 && (
+              <span style={{ color: 'var(--t2)' }}>状态码 <strong className="tabular-nums" style={{ color: 'var(--text)' }}>{statusCodes.join(', ')}</strong></span>
+            )}
+          </div>
+          <div className="flex flex-col gap-2.5 pt-1">
+            {liveModels.map(m => {
+              const rs = results.filter(r => r.model === m)
+              const doneM = rs.filter(r => r.status === 'ok' || r.status === 'error').length
+              const okM = rs.filter(r => r.status === 'ok').length
+              const failM = rs.filter(r => r.status === 'error').length
+              const pctM = liveN ? Math.round(doneM / liveN * 100) : 0
+              return (
+                <div key={m}>
+                  <div className="flex items-center justify-between text-xs mb-1">
+                    <span className="font-mono" style={{ color: 'var(--text)' }}>{m}</span>
+                    <span style={{ color: 'var(--t3)' }}>
+                      <span style={{ color: 'var(--ok)' }}>成功 {okM}</span> / <span style={{ color: 'var(--err)' }}>失败 {failM}</span> · {doneM}/{liveN}
+                    </span>
+                  </div>
+                  <div className="h-1 rounded-full overflow-hidden" style={{ background: 'var(--s2)' }}>
+                    <div className="h-full rounded-full transition-all duration-300" style={{ background: 'var(--accent)', width: pctM + '%' }} />
+                  </div>
+                </div>
+              )
+            })}
+          </div>
+        </div>
+      )}
+      <div className="p-4 flex flex-col gap-2">
+        {liveLog.length === 0 ? (
+          <div className="flex flex-col items-center justify-center py-16" style={{ color: 'var(--t3)' }}>
+            <div className="text-4xl mb-3 opacity-60">⊞</div>
+            <p className="text-sm">配置参数后点击「开始批量请求」</p>
+          </div>
+        ) : liveLog.map(r => (
+          <div key={r.seq} className="surface-card flex flex-wrap items-center gap-x-2.5 gap-y-1 rounded-xl px-3.5 py-2.5 text-xs"
+            style={{ background: 'var(--bg)', border: `1px solid ${r.status === 'error' ? 'var(--err)' : 'var(--border)'}`, boxShadow: 'var(--shadow)' }}>
+            <span className="font-bold" style={{ color: 'var(--t2)' }}>#{r.seq}</span>
+            <span className="font-mono" style={{ color: 'var(--accent)' }}>{r.model}</span>
+            <Badge color={r.status === 'ok' ? 'ok' : 'err'}>{r.status === 'ok' ? '✓ 成功' : '✗ 失败'}</Badge>
+            {r.httpStatus != null && <Badge>{r.httpStatus}</Badge>}
+            {r.returnedModel != null && (
+              <Badge color={r.returnedModel === r.model ? 'ok' : 'err'}>
+                返回模型 {r.returnedModel}{r.returnedModel !== r.model ? ' ≠' : ''}
+              </Badge>
+            )}
+            {r.tFirst != null && <span style={{ color: 'var(--t2)' }}>首字 {r.tFirst}ms</span>}
+            {r.elapsed != null && <span style={{ color: 'var(--t3)' }}>总 {(r.elapsed / 1000).toFixed(2)}s</span>}
+            {r.inputTokens != null && <span style={{ color: 'var(--t3)' }}>in: {r.inputTokens}</span>}
+            {r.outputTokens != null && <span style={{ color: 'var(--t3)' }}>out: {r.outputTokens}</span>}
+            {r.error && <span style={{ color: 'var(--err)' }}>{r.error.slice(0, 160)}</span>}
+          </div>
+        ))}
+      </div>
+    </div>
+  )
+})
+
+const LlmHistoryPane = React.memo(function LlmHistoryPane({
+  history, histNotice, compareIds, onToggleCompare, onCancelCompare, onOpenCompare,
+  onClearAll, onView, onReuse, onDelete, onRename,
+}: {
+  history: BatchReport[]; histNotice: string; compareIds: string[]
+  onToggleCompare: (id: string) => void; onCancelCompare: () => void; onOpenCompare: () => void
+  onClearAll: () => void; onView: (rep: BatchReport) => void; onReuse: (rep: BatchReport) => void
+  onDelete: (id: string) => void; onRename: (id: string, title: string) => void
+}) {
+  return (
+    <div className="p-5 flex flex-col gap-3">
+      <div className="flex items-center justify-between">
+        <span className="text-xs" style={{ color: 'var(--t3)' }}>已存 {history.length} / {LLM_HIST_MAX} 条历史报告</span>
+        {history.length > 0 && (
+          <Btn small variant="danger" onClick={onClearAll}>清空全部</Btn>
+        )}
+      </div>
+      {histNotice && <p className="text-xs" style={{ color: 'var(--warn)' }}>⚠ {histNotice}</p>}
+      {compareIds.length === 2 && (
+        <div className="flex items-center justify-between rounded-xl px-4 py-2.5" style={{ background: 'var(--accentSub)' }}>
+          <span className="text-xs" style={{ color: 'var(--accent)' }}>已选择 2 条历史报告</span>
+          <div className="flex gap-2">
+            <Btn small variant="ghost" onClick={onCancelCompare}>取消选择</Btn>
+            <Btn small variant="accent" onClick={onOpenCompare}>对比所选 →</Btn>
+          </div>
+        </div>
+      )}
+      {history.length === 0 ? (
+        <div className="flex flex-col items-center justify-center py-16" style={{ color: 'var(--t3)' }}>
+          <p className="text-sm">暂无历史报告。</p>
+        </div>
+      ) : history.map(rep => (
+        <div key={rep.id} className="surface-card rounded-2xl p-4" style={{ background: 'var(--bg)', border: '1px solid var(--border)', boxShadow: 'var(--shadow)' }}>
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <div className="flex items-center gap-2.5 min-w-0">
+              <input type="checkbox" checked={compareIds.includes(rep.id)}
+                disabled={!compareIds.includes(rep.id) && compareIds.length >= 2}
+                onChange={() => onToggleCompare(rep.id)}
+                style={{ accentColor: 'var(--accent)' }} className="w-3.5 h-3.5" />
+              <div className="min-w-0">
+                <InlineEditableTitle
+                  value={rep.title ?? ''}
+                  placeholder={llmFmtTime(rep.startTime)}
+                  onSave={title => onRename(rep.id, title)}
+                />
+                <div className="text-[11px] mt-0.5" style={{ color: 'var(--t3)' }}>
+                  {llmFmtTime(rep.startTime)} · 模型 {rep.models.join(', ')} · 成功 <span style={{ color: 'var(--ok)' }}>{rep.success}</span>/{rep.total} · {llmFmtDur(rep.durationMs)}
+                  {rep.stopped && <span style={{ color: 'var(--warn)' }}> · 已手动停止</span>}
+                </div>
+              </div>
+            </div>
+            <div className="flex items-center gap-1 flex-shrink-0">
+              <IconBtn icon={<IconEye />} tooltip="查看报告" onClick={() => onView(rep)} />
+              <IconBtn icon={<IconRepeat />} tooltip="复用此配置" onClick={() => onReuse(rep)} />
+              <IconBtn icon={<IconTrash />} tooltip="删除该历史报告" danger onClick={() => onDelete(rep.id)} />
+            </div>
+          </div>
+        </div>
+      ))}
+    </div>
+  )
+})
+
+const LlmChannelsPane = React.memo(function LlmChannelsPane({
+  reuseNotice, chNotice, channels, activeChId, chForm, editingChId,
+  onSetActive, onEdit, onDelete, onSave, onChFormChange, onClearForm,
+}: {
+  reuseNotice: string; chNotice: string; channels: LlmChannel[]; activeChId: string | null
+  chForm: LlmChForm; editingChId: string | null
+  onSetActive: (id: string) => void; onEdit: (c: LlmChannel) => void; onDelete: (id: string) => void
+  onSave: () => void; onChFormChange: React.Dispatch<React.SetStateAction<LlmChForm>>; onClearForm: () => void
+}) {
+  return (
+    <div className="p-5 flex flex-col gap-4">
+      {reuseNotice && <p className="text-xs" style={{ color: 'var(--accent)' }}>{reuseNotice}</p>}
+      {chNotice && <p className="text-xs" style={{ color: 'var(--accent)' }}>{chNotice}</p>}
+      <Card>
+        <p className="text-sm font-bold mb-3" style={{ color: 'var(--text)' }}>
+          已保存的渠道 <span className="inline-flex items-center justify-center rounded-full px-2 py-0.5 text-xs font-bold ml-1" style={{ background: 'var(--accentSub)', color: 'var(--accent)' }}>{channels.length}</span>
+        </p>
+        {channels.length === 0 && <p className="text-xs mb-3" style={{ color: 'var(--t3)' }}>还没有渠道，请在下方添加。</p>}
+        <div className="grid grid-cols-1 xl:grid-cols-2 gap-3">
+          {channels.map(c => (
+            <div key={c.id} className="rounded-2xl p-4 relative" style={{ border: `1px solid ${c.id === activeChId ? 'var(--accent)' : 'var(--border)'}`, background: c.id === activeChId ? 'var(--accentSub)' : 'var(--s1)' }}>
+              {c.id === activeChId && <span className="absolute top-3 right-4 text-[11px] font-bold" style={{ color: 'var(--accent)' }}>✓ 当前使用</span>}
+              <div className="text-sm font-bold pr-16 truncate" style={{ color: 'var(--text)' }}>{c.name}</div>
+              <div className="text-xs break-all mt-1" style={{ color: 'var(--t3)' }}>{c.baseUrl}</div>
+              <div className="text-[11px] mt-0.5" style={{ color: 'var(--t3)' }}>超时 {c.timeoutSec}s</div>
+              <div className="text-[11px] font-mono mt-1" style={{ color: 'var(--t3)' }}>{c.keyMask || '（未设置）'}</div>
+              <div className="flex gap-2 mt-3">
+                <Btn small variant="soft" onClick={() => onSetActive(c.id)}>设为当前</Btn>
+                <Btn small variant="soft" onClick={() => onEdit(c)}>编辑</Btn>
+                <Btn small variant="danger" onClick={() => onDelete(c.id)}>删除</Btn>
+              </div>
+            </div>
+          ))}
+        </div>
+      </Card>
+      <Card>
+        <p className="text-sm font-bold mb-3" style={{ color: 'var(--text)' }}>{editingChId ? '编辑渠道' : '添加新渠道'}</p>
+        <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+          <div>
+            <Label className="block mb-1.5">渠道名称</Label>
+            <CustomInput value={chForm.name} onChange={v => onChFormChange(f => ({ ...f, name: v }))} placeholder="例如：主线-Anthropic" />
+          </div>
+          <div>
+            <Label className="block mb-1.5">Base URL</Label>
+            <CustomInput value={chForm.baseUrl} onChange={v => onChFormChange(f => ({ ...f, baseUrl: v }))} placeholder="https://api.anthropic.com" mono />
+          </div>
+          <div>
+            <Label className="block mb-1.5">请求超时（秒）</Label>
+            <CustomInput value={chForm.timeoutSec} onChange={v => onChFormChange(f => ({ ...f, timeoutSec: v }))} type="number" placeholder="120" />
+          </div>
+          <div>
+            <Label className="block mb-1.5">apiKey {editingChId ? '（留空保持不变，本地加密存储）' : ''}</Label>
+            <CustomInput value={chForm.apiKey} onChange={v => onChFormChange(f => ({ ...f, apiKey: v }))} type="password" placeholder="sk-xxxxxxxx" mono />
+          </div>
+        </div>
+        <div className="flex items-center gap-3 mt-4 flex-wrap">
+          <Btn variant="primary" onClick={onSave}>保存渠道</Btn>
+          <Btn variant="soft" onClick={onClearForm}>清空表单</Btn>
+          <span className="text-[11px]" style={{ color: 'var(--t3)' }}>渠道信息保存在本浏览器 IndexedDB 中（apiKey 经 AES-GCM 加密）。</span>
+        </div>
+      </Card>
+    </div>
+  )
+})
+
 function LlmBatchTool() {
   // ── 配置（持久化）──
   const [apiType, setApiType] = useState<ApiType>(() => loadLlmCfg().apiType ?? 'anthropic')
@@ -1696,6 +2006,8 @@ function LlmBatchTool() {
   const [storeResponseBody, setStoreResponseBody] = useState(() => loadLlmCfg().storeResponseBody ?? true)
   const [testTitle, setTestTitle] = useState(() => loadLlmCfg().testTitle ?? '')
   const [reuseNotice, setReuseNotice] = useState('')
+  const reuseNoticeTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
+  useEffect(() => () => { if (reuseNoticeTimer.current) clearTimeout(reuseNoticeTimer.current) }, [])
 
   // 选中项失效（首次加载时持久化的 id 已不存在 / 当前选中的提示词被删除 / prompts 变空）时自动回退到第一条
   useEffect(() => {
@@ -1715,18 +2027,19 @@ function LlmBatchTool() {
     return convertPromptBodyForApiType(selectedPrompt.body, apiType)
   }, [selectedPrompt?.body, apiType, promptBodyErr])
 
-  useEffect(() => {
+  useDebouncedPersist(() => {
     saveLlmCfg({ apiType, models: modelListText, n: nReq, c: concurrency, promptId: selectedPromptId ?? undefined, storeResponseBody, testTitle })
-  }, [apiType, modelListText, nReq, concurrency, selectedPromptId, storeResponseBody])
+  }, [apiType, modelListText, nReq, concurrency, selectedPromptId, storeResponseBody, testTitle])
 
-  useEffect(() => { saveLlmPrompts(prompts) }, [prompts])
+  // 提示词库可能很大（含完整请求体 JSON）：防抖合并写盘，避免每次击键整库 stringify
+  useDebouncedPersist(() => { saveLlmPrompts(prompts) }, [prompts])
 
   useEffect(() => { saveLlmChannels(channels) }, [channels])
   useEffect(() => {
     if (typeof window === 'undefined') return
     try {
-      if (activeChId) localStorage.setItem(LLM_ACTIVE_CH_KEY, activeChId)
-      else localStorage.removeItem(LLM_ACTIVE_CH_KEY)
+      if (activeChId) kvSet(LLM_ACTIVE_CH_KEY, activeChId)
+      else kvRemove(LLM_ACTIVE_CH_KEY)
     } catch { /* ignore */ }
   }, [activeChId])
 
@@ -1739,9 +2052,15 @@ function LlmBatchTool() {
     return () => { cancelled = true }
   }, [activeChannel?.id, activeChannel?.apiKeyEnc])
 
-  const chToast = (m: string) => { setChNotice(m); setTimeout(() => setChNotice(''), 2200) }
+  const chNoticeTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const chToast = (m: string) => {
+    setChNotice(m)
+    if (chNoticeTimer.current) clearTimeout(chNoticeTimer.current)
+    chNoticeTimer.current = setTimeout(() => { chNoticeTimer.current = null; setChNotice('') }, 2200)
+  }
+  useEffect(() => () => { if (chNoticeTimer.current) clearTimeout(chNoticeTimer.current) }, [])
 
-  const saveChannel = async () => {
+  const saveChannel = useCallback(async () => {
     const name = chForm.name.trim()
     const base = chForm.baseUrl.trim().replace(/\/+$/, '')
     const timeoutSecVal = chForm.timeoutSec.trim() || '120'
@@ -1770,18 +2089,24 @@ function LlmBatchTool() {
     setChForm({ name: '', baseUrl: '', timeoutSec: '120', apiKey: '' })
     setEditingChId(null)
     chToast('已保存')
-  }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [chForm, editingChId, channels, activeChId])
 
-  const editChannel = (c: LlmChannel) => {
+  const editChannel = useCallback((c: LlmChannel) => {
     setChForm({ name: c.name, baseUrl: c.baseUrl, timeoutSec: c.timeoutSec, apiKey: '' })
     setEditingChId(c.id)
-  }
+  }, [])
 
-  const delChannel = (id: string) => {
+  const delChannel = useCallback((id: string) => {
     if (!window.confirm('删除该渠道？')) return
-    setChannels(channels.filter(c => c.id !== id))
-    if (activeChId === id) setActiveChId(null)
-  }
+    setChannels(prev => prev.filter(c => c.id !== id))
+    setActiveChId(prev => (prev === id ? null : prev))
+  }, [])
+
+  const clearChForm = useCallback(() => {
+    setChForm({ name: '', baseUrl: '', timeoutSec: '120', apiKey: '' })
+    setEditingChId(null)
+  }, [])
 
   // ── 运行状态 ──
   const [pane, setPane] = useState<'live' | 'report' | 'history' | 'prompts' | 'compare' | 'channels'>('live')
@@ -1812,14 +2137,36 @@ function LlmBatchTool() {
     return () => { cancelled = true }
   }, [])
 
-  const toggleCompare = (id: string) => setCompareIds(prev =>
-    prev.includes(id) ? prev.filter(x => x !== id) : (prev.length >= 2 ? prev : [...prev, id]))
+  const toggleCompare = useCallback((id: string) => setCompareIds(prev =>
+    prev.includes(id) ? prev.filter(x => x !== id) : (prev.length >= 2 ? prev : [...prev, id])), [])
 
-  const viewHistoryReport = (rep: BatchReport) => {
+  const viewHistoryReport = useCallback((rep: BatchReport) => {
     setReport(rep)
     setLastRunReportId(rep.id)
     setPane('report')
-  }
+  }, [])
+
+  const cancelCompare = useCallback(() => setCompareIds([]), [])
+  const openCompare = useCallback(() => setPane('compare'), [])
+
+  const clearAllHistory = useCallback(() => {
+    if (window.confirm('确认清空全部历史报告？此操作不可恢复。')) {
+      setHistory([]); setCompareIds([]); clearLlmHistory().catch(() => {})
+    }
+  }, [])
+
+  const deleteHistoryItem = useCallback((id: string) => {
+    if (window.confirm('确认删除该条历史报告？此操作不可恢复。')) {
+      deleteLlmHistoryItem(id).then(list => {
+        setHistory(list)
+        setCompareIds(ids => ids.filter(x => x !== id))
+      })
+    }
+  }, [])
+
+  const renameHistoryItem = useCallback((id: string, title: string) => {
+    renameLlmHistoryItem(id, title).then(list => setHistory(list))
+  }, [])
 
   const runBatch = async () => {
     setStartErr('')
@@ -1925,7 +2272,7 @@ function LlmBatchTool() {
   // 历史「复用」：把某条历史报告的配置回填。API Key 从不回填（历史本来就不存）。
   // baseUrl/超时已归入渠道，不再是可直接写回的扁平字段：优先匹配一个 baseUrl 相同的已存渠道并切过去；
   // 匹配不到就把 baseUrl/超时带入「渠道管理」的新增表单，跳转过去待用户补充 apiKey 后保存。
-  const reuseHistoryReport = (rep: BatchReport) => {
+  const reuseHistoryReport = useCallback((rep: BatchReport) => {
     setApiType(rep.apiType)
     const derivedBase = rep.baseUrl ?? llmBaseUrlFromEndpoint(rep.apiType, rep.endpoint)
     const matched = derivedBase ? channels.find(c => c.baseUrl === derivedBase) : null
@@ -1960,15 +2307,9 @@ function LlmBatchTool() {
       setPane('live')
       setReuseNotice(`已从「${llmFmtTime(rep.startTime)}」的历史报告回填配置到左侧面板。`)
     }
-    setTimeout(() => setReuseNotice(''), 4000)
-  }
-
-  const completed = results.filter(r => r.status === 'ok' || r.status === 'error').length
-  const total = results.length
-  const pct = total ? Math.round(completed / total * 100) : 0
-  const okCount = results.filter(r => r.status === 'ok').length
-  const errCount = results.filter(r => r.status === 'error').length
-  const statusCodes = Array.from(new Set(results.map(r => r.httpStatus).filter((v): v is number => v != null))).sort((a, b) => a - b)
+    if (reuseNoticeTimer.current) clearTimeout(reuseNoticeTimer.current)
+    reuseNoticeTimer.current = setTimeout(() => { reuseNoticeTimer.current = null; setReuseNotice('') }, 4000)
+  }, [channels, prompts])
 
   return (
     <div className="flex flex-col h-full">
@@ -1983,73 +2324,17 @@ function LlmBatchTool() {
 
       <div className="flex-1 flex overflow-hidden">
         {/* 左侧配置栏 */}
-        <div className="w-72 flex-shrink-0 flex flex-col p-4 gap-3.5 overflow-y-auto" style={{ borderRight: '1px solid var(--border)', background: 'var(--s1)' }}>
-          <div>
-            <Label className="block mb-1.5">测试标题（可选）</Label>
-            <CustomInput value={testTitle} onChange={setTestTitle} placeholder="例如：claude-3.5 vs haiku 计费核查" />
-          </div>
-          <div>
-            <Label className="block mb-1.5">API 类型</Label>
-            <CustomSelect value={apiType} onChange={v => setApiType(v as ApiType)} options={[
-              { value: 'anthropic', label: 'Anthropic Messages API' },
-              { value: 'openai_chat', label: 'OpenAI Chat Completions API' },
-              { value: 'openai_responses', label: 'OpenAI Responses API' },
-            ]} />
-          </div>
-          <div>
-            <Label className="block mb-1.5">使用渠道</Label>
-            <CustomSelect value={activeChId ?? ''} onChange={v => setActiveChId(v)}
-              options={channels.map(c => ({ value: c.id, label: c.name }))} />
-            {channels.length === 0 && <p className="text-xs mt-1.5" style={{ color: 'var(--warn)' }}>⚠ 请先到「渠道管理」添加渠道。</p>}
-          </div>
-
-          <div style={{ borderTop: '1px solid var(--border)', paddingTop: 14 }}>
-            <Label className="block mb-1.5">模型列表（每行一个，或逗号分隔）</Label>
-            <CustomTextarea value={modelListText} onChange={setModelListText} mono rows={3}
-              placeholder={'claude-3-5-sonnet-20241022\nclaude-3-haiku-20240307'} />
-          </div>
-          <div className="grid grid-cols-2 gap-3">
-            <div><Label className="block mb-1.5">每模型次数 N</Label><CustomInput value={nReq} onChange={setNReq} type="number" placeholder="5" /></div>
-            <div><Label className="block mb-1.5">全局并发数 C</Label><CustomInput value={concurrency} onChange={setConcurrency} type="number" placeholder="3" /></div>
-          </div>
-          <div>
-            <Toggle value={storeResponseBody} onChange={setStoreResponseBody} label="存储响应体" />
-          </div>
-          <div style={{ borderTop: '1px solid var(--border)', paddingTop: 14 }}>
-            <Label className="block mb-1.5">提示词（请求体来源）</Label>
-            {prompts.length === 0 ? (
-              <p className="text-xs" style={{ color: 'var(--err)' }}>⚠ 还没有任何提示词，请切换到右侧「提示词」标签页新建一条。</p>
-            ) : (
-              <>
-                <div className="flex items-center gap-2">
-                  <div className="flex-1">
-                    <SearchableSelect value={selectedPromptId} onChange={setSelectedPromptId}
-                      options={prompts.map(p => ({ value: p.id, label: p.title || '（未命名）' }))}
-                      placeholder="选择一个提示词…" />
-                  </div>
-                  {selectedPrompt && (
-                    <button onClick={() => {
-                      const firstModel = parseModelList(modelListText)[0] || ''
-                      const body = firstModel && bodyHasModelPlaceholder(selectedPrompt.body)
-                        ? fillModelPlaceholder(selectedPrompt.body, JSON.stringify(firstModel))
-                        : selectedPrompt.body
-                      setJsonViewerBody({ body, model: firstModel })
-                    }}
-                      className="rounded-lg p-1.5 border-0 outline-none cursor-pointer flex-shrink-0"
-                      style={{ background: 'transparent', color: 'var(--t2)' }}
-                      onPointerEnter={e => { (e.currentTarget as HTMLButtonElement).style.color = 'var(--accent)'; (e.currentTarget as HTMLButtonElement).style.background = 'var(--accentSub)' }}
-                      onPointerLeave={e => { (e.currentTarget as HTMLButtonElement).style.color = 'var(--t2)'; (e.currentTarget as HTMLButtonElement).style.background = 'transparent' }}
-                      title="查看完整请求体"><IconExpand /></button>
-                  )}
-                </div>
-                {!selectedPromptId && <p className="text-xs mt-1.5" style={{ color: 'var(--warn)' }}>⚠ 请选择一个提示词作为请求体来源。</p>}
-                {promptBodyErr && <p className="text-xs mt-1.5" style={{ color: 'var(--err)' }}>{promptBodyErr}</p>}
-                {convertedBody && !convertedBody.ok && <p className="text-xs mt-1.5" style={{ color: 'var(--err)' }}>{convertedBody.error}</p>}
-              </>
-            )}
-          </div>
-          {startErr && <p className="text-xs whitespace-pre-wrap" style={{ color: 'var(--err)' }}>{startErr}</p>}
-        </div>
+        <LlmConfigPane
+          testTitle={testTitle} onTestTitle={setTestTitle}
+          apiType={apiType} onApiType={setApiType}
+          channels={channels} activeChId={activeChId} onActiveChId={setActiveChId}
+          modelListText={modelListText} onModelListText={setModelListText}
+          nReq={nReq} onNReq={setNReq} concurrency={concurrency} onConcurrency={setConcurrency}
+          storeResponseBody={storeResponseBody} onStoreResponseBody={setStoreResponseBody}
+          prompts={prompts} selectedPromptId={selectedPromptId} onSelectedPromptId={setSelectedPromptId}
+          selectedPrompt={selectedPrompt} promptBodyErr={promptBodyErr} convertedBody={convertedBody}
+          startErr={startErr} onPreviewBody={setJsonViewerBody}
+        />
 
         {/* 右侧结果区 */}
         <div className="flex-1 flex flex-col overflow-hidden">
@@ -2065,75 +2350,7 @@ function LlmBatchTool() {
 
           <div className="flex-1 overflow-y-auto">
             {pane === 'live' && (
-              <div className="flex flex-col">
-                {reuseNotice && <p className="px-6 pt-3 text-xs" style={{ color: 'var(--accent)' }}>{reuseNotice}</p>}
-                {total > 0 && (
-                  <div className="px-6 py-3 flex flex-col gap-2 flex-shrink-0" style={{ borderBottom: '1px solid var(--border)' }}>
-                    <div className="flex items-center justify-between text-sm">
-                      <span style={{ color: 'var(--t2)' }}>总进度</span>
-                      <span className="tabular-nums" style={{ color: 'var(--t2)' }}>{completed} / {total}（{pct}%）</span>
-                    </div>
-                    <div className="h-1.5 rounded-full overflow-hidden" style={{ background: 'var(--s2)' }}>
-                      <div className="h-full rounded-full transition-all duration-300" style={{ background: 'var(--accent)', width: pct + '%' }} />
-                    </div>
-                    <div className="flex flex-wrap gap-x-5 gap-y-1 text-xs pt-0.5">
-                      <span style={{ color: 'var(--t2)' }}>成功 <strong className="tabular-nums" style={{ color: 'var(--ok)' }}>{okCount}</strong></span>
-                      <span style={{ color: 'var(--t2)' }}>失败 <strong className="tabular-nums" style={{ color: errCount ? 'var(--err)' : 'var(--t2)' }}>{errCount}</strong></span>
-                      {statusCodes.length > 0 && (
-                        <span style={{ color: 'var(--t2)' }}>状态码 <strong className="tabular-nums" style={{ color: 'var(--text)' }}>{statusCodes.join(', ')}</strong></span>
-                      )}
-                    </div>
-                    <div className="flex flex-col gap-2.5 pt-1">
-                      {liveModels.map(m => {
-                        const rs = results.filter(r => r.model === m)
-                        const doneM = rs.filter(r => r.status === 'ok' || r.status === 'error').length
-                        const okM = rs.filter(r => r.status === 'ok').length
-                        const failM = rs.filter(r => r.status === 'error').length
-                        const pctM = liveN ? Math.round(doneM / liveN * 100) : 0
-                        return (
-                          <div key={m}>
-                            <div className="flex items-center justify-between text-xs mb-1">
-                              <span className="font-mono" style={{ color: 'var(--text)' }}>{m}</span>
-                              <span style={{ color: 'var(--t3)' }}>
-                                <span style={{ color: 'var(--ok)' }}>成功 {okM}</span> / <span style={{ color: 'var(--err)' }}>失败 {failM}</span> · {doneM}/{liveN}
-                              </span>
-                            </div>
-                            <div className="h-1 rounded-full overflow-hidden" style={{ background: 'var(--s2)' }}>
-                              <div className="h-full rounded-full transition-all duration-300" style={{ background: 'var(--accent)', width: pctM + '%' }} />
-                            </div>
-                          </div>
-                        )
-                      })}
-                    </div>
-                  </div>
-                )}
-                <div className="p-4 flex flex-col gap-2">
-                  {liveLog.length === 0 ? (
-                    <div className="flex flex-col items-center justify-center py-16" style={{ color: 'var(--t3)' }}>
-                      <div className="text-4xl mb-3 opacity-60">⊞</div>
-                      <p className="text-sm">配置参数后点击「开始批量请求」</p>
-                    </div>
-                  ) : liveLog.map(r => (
-                    <div key={r.seq} className="surface-card flex flex-wrap items-center gap-x-2.5 gap-y-1 rounded-xl px-3.5 py-2.5 text-xs"
-                      style={{ background: 'var(--bg)', border: `1px solid ${r.status === 'error' ? 'var(--err)' : 'var(--border)'}`, boxShadow: 'var(--shadow)' }}>
-                      <span className="font-bold" style={{ color: 'var(--t2)' }}>#{r.seq}</span>
-                      <span className="font-mono" style={{ color: 'var(--accent)' }}>{r.model}</span>
-                      <Badge color={r.status === 'ok' ? 'ok' : 'err'}>{r.status === 'ok' ? '✓ 成功' : '✗ 失败'}</Badge>
-                      {r.httpStatus != null && <Badge>{r.httpStatus}</Badge>}
-                      {r.returnedModel != null && (
-                        <Badge color={r.returnedModel === r.model ? 'ok' : 'err'}>
-                          返回模型 {r.returnedModel}{r.returnedModel !== r.model ? ' ≠' : ''}
-                        </Badge>
-                      )}
-                      {r.tFirst != null && <span style={{ color: 'var(--t2)' }}>首字 {r.tFirst}ms</span>}
-                      {r.elapsed != null && <span style={{ color: 'var(--t3)' }}>总 {(r.elapsed / 1000).toFixed(2)}s</span>}
-                      {r.inputTokens != null && <span style={{ color: 'var(--t3)' }}>in: {r.inputTokens}</span>}
-                      {r.outputTokens != null && <span style={{ color: 'var(--t3)' }}>out: {r.outputTokens}</span>}
-                      {r.error && <span style={{ color: 'var(--err)' }}>{r.error.slice(0, 160)}</span>}
-                    </div>
-                  ))}
-                </div>
-              </div>
+              <LlmLivePane reuseNotice={reuseNotice} results={results} liveLog={liveLog} liveModels={liveModels} liveN={liveN} />
             )}
 
             {pane === 'report' && (
@@ -2235,67 +2452,12 @@ function LlmBatchTool() {
               </div>
             )}
             {pane === 'history' && (
-              <div className="p-5 flex flex-col gap-3">
-                <div className="flex items-center justify-between">
-                  <span className="text-xs" style={{ color: 'var(--t3)' }}>已存 {history.length} / {LLM_HIST_MAX} 条历史报告</span>
-                  {history.length > 0 && (
-                    <Btn small variant="danger" onClick={() => {
-                      if (window.confirm('确认清空全部历史报告？此操作不可恢复。')) {
-                        setHistory([]); setCompareIds([]); clearLlmHistory().catch(() => {})
-                      }
-                    }}>清空全部</Btn>
-                  )}
-                </div>
-                {histNotice && <p className="text-xs" style={{ color: 'var(--warn)' }}>⚠ {histNotice}</p>}
-                {compareIds.length === 2 && (
-                  <div className="flex items-center justify-between rounded-xl px-4 py-2.5" style={{ background: 'var(--accentSub)' }}>
-                    <span className="text-xs" style={{ color: 'var(--accent)' }}>已选择 2 条历史报告</span>
-                    <div className="flex gap-2">
-                      <Btn small variant="ghost" onClick={() => setCompareIds([])}>取消选择</Btn>
-                      <Btn small variant="accent" onClick={() => setPane('compare')}>对比所选 →</Btn>
-                    </div>
-                  </div>
-                )}
-                {history.length === 0 ? (
-                  <div className="flex flex-col items-center justify-center py-16" style={{ color: 'var(--t3)' }}>
-                    <p className="text-sm">暂无历史报告。</p>
-                  </div>
-                ) : history.map(rep => (
-                  <div key={rep.id} className="surface-card rounded-2xl p-4" style={{ background: 'var(--bg)', border: '1px solid var(--border)', boxShadow: 'var(--shadow)' }}>
-                    <div className="flex flex-wrap items-center justify-between gap-2">
-                      <div className="flex items-center gap-2.5 min-w-0">
-                        <input type="checkbox" checked={compareIds.includes(rep.id)}
-                          disabled={!compareIds.includes(rep.id) && compareIds.length >= 2}
-                          onChange={() => toggleCompare(rep.id)}
-                          style={{ accentColor: 'var(--accent)' }} className="w-3.5 h-3.5" />
-                        <div className="min-w-0">
-                          <InlineEditableTitle
-                            value={rep.title ?? ''}
-                            placeholder={llmFmtTime(rep.startTime)}
-                            onSave={title => { renameLlmHistoryItem(rep.id, title).then(list => setHistory(list)) }}
-                          />
-                          <div className="text-[11px] mt-0.5" style={{ color: 'var(--t3)' }}>
-                            {llmFmtTime(rep.startTime)} · 模型 {rep.models.join(', ')} · 成功 <span style={{ color: 'var(--ok)' }}>{rep.success}</span>/{rep.total} · {llmFmtDur(rep.durationMs)}
-                            {rep.stopped && <span style={{ color: 'var(--warn)' }}> · 已手动停止</span>}
-                          </div>
-                        </div>
-                      </div>
-                      <div className="flex items-center gap-1 flex-shrink-0">
-                        <IconBtn icon={<IconEye />} tooltip="查看报告" onClick={() => viewHistoryReport(rep)} />
-                        <IconBtn icon={<IconRepeat />} tooltip="复用此配置" onClick={() => reuseHistoryReport(rep)} />
-                        <IconBtn icon={<IconTrash />} tooltip="删除该历史报告" danger onClick={() => {
-                          if (window.confirm('确认删除该条历史报告？此操作不可恢复。')) {
-                            deleteLlmHistoryItem(rep.id).then(list => {
-                              setHistory(list)
-                              setCompareIds(ids => ids.filter(id => id !== rep.id))
-                            })
-                          }
-                        }} />
-                      </div>
-                    </div>
-                  </div>
-                ))}
-              </div>
+              <LlmHistoryPane
+                history={history} histNotice={histNotice} compareIds={compareIds}
+                onToggleCompare={toggleCompare} onCancelCompare={cancelCompare} onOpenCompare={openCompare}
+                onClearAll={clearAllHistory} onView={viewHistoryReport} onReuse={reuseHistoryReport}
+                onDelete={deleteHistoryItem} onRename={renameHistoryItem}
+              />
             )}
 
             {pane === 'prompts' && (
@@ -2305,58 +2467,12 @@ function LlmBatchTool() {
             )}
 
             {pane === 'channels' && (
-              <div className="p-5 flex flex-col gap-4">
-                {reuseNotice && <p className="text-xs" style={{ color: 'var(--accent)' }}>{reuseNotice}</p>}
-                {chNotice && <p className="text-xs" style={{ color: 'var(--accent)' }}>{chNotice}</p>}
-                <Card>
-                  <p className="text-sm font-bold mb-3" style={{ color: 'var(--text)' }}>
-                    已保存的渠道 <span className="inline-flex items-center justify-center rounded-full px-2 py-0.5 text-xs font-bold ml-1" style={{ background: 'var(--accentSub)', color: 'var(--accent)' }}>{channels.length}</span>
-                  </p>
-                  {channels.length === 0 && <p className="text-xs mb-3" style={{ color: 'var(--t3)' }}>还没有渠道，请在下方添加。</p>}
-                  <div className="grid grid-cols-1 xl:grid-cols-2 gap-3">
-                    {channels.map(c => (
-                      <div key={c.id} className="rounded-2xl p-4 relative" style={{ border: `1px solid ${c.id === activeChId ? 'var(--accent)' : 'var(--border)'}`, background: c.id === activeChId ? 'var(--accentSub)' : 'var(--s1)' }}>
-                        {c.id === activeChId && <span className="absolute top-3 right-4 text-[11px] font-bold" style={{ color: 'var(--accent)' }}>✓ 当前使用</span>}
-                        <div className="text-sm font-bold pr-16 truncate" style={{ color: 'var(--text)' }}>{c.name}</div>
-                        <div className="text-xs break-all mt-1" style={{ color: 'var(--t3)' }}>{c.baseUrl}</div>
-                        <div className="text-[11px] mt-0.5" style={{ color: 'var(--t3)' }}>超时 {c.timeoutSec}s</div>
-                        <div className="text-[11px] font-mono mt-1" style={{ color: 'var(--t3)' }}>{c.keyMask || '（未设置）'}</div>
-                        <div className="flex gap-2 mt-3">
-                          <Btn small variant="soft" onClick={() => setActiveChId(c.id)}>设为当前</Btn>
-                          <Btn small variant="soft" onClick={() => editChannel(c)}>编辑</Btn>
-                          <Btn small variant="danger" onClick={() => delChannel(c.id)}>删除</Btn>
-                        </div>
-                      </div>
-                    ))}
-                  </div>
-                </Card>
-                <Card>
-                  <p className="text-sm font-bold mb-3" style={{ color: 'var(--text)' }}>{editingChId ? '编辑渠道' : '添加新渠道'}</p>
-                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-                    <div>
-                      <Label className="block mb-1.5">渠道名称</Label>
-                      <CustomInput value={chForm.name} onChange={v => setChForm(f => ({ ...f, name: v }))} placeholder="例如：主线-Anthropic" />
-                    </div>
-                    <div>
-                      <Label className="block mb-1.5">Base URL</Label>
-                      <CustomInput value={chForm.baseUrl} onChange={v => setChForm(f => ({ ...f, baseUrl: v }))} placeholder="https://api.anthropic.com" mono />
-                    </div>
-                    <div>
-                      <Label className="block mb-1.5">请求超时（秒）</Label>
-                      <CustomInput value={chForm.timeoutSec} onChange={v => setChForm(f => ({ ...f, timeoutSec: v }))} type="number" placeholder="120" />
-                    </div>
-                    <div>
-                      <Label className="block mb-1.5">apiKey {editingChId ? '（留空保持不变，本地加密存储）' : ''}</Label>
-                      <CustomInput value={chForm.apiKey} onChange={v => setChForm(f => ({ ...f, apiKey: v }))} type="password" placeholder="sk-xxxxxxxx" mono />
-                    </div>
-                  </div>
-                  <div className="flex items-center gap-3 mt-4 flex-wrap">
-                    <Btn variant="primary" onClick={saveChannel}>保存渠道</Btn>
-                    <Btn variant="soft" onClick={() => { setChForm({ name: '', baseUrl: '', timeoutSec: '120', apiKey: '' }); setEditingChId(null) }}>清空表单</Btn>
-                    <span className="text-[11px]" style={{ color: 'var(--t3)' }}>渠道信息保存在本浏览器 localStorage 中（apiKey 经 AES-GCM 加密）。</span>
-                  </div>
-                </Card>
-              </div>
+              <LlmChannelsPane
+                reuseNotice={reuseNotice} chNotice={chNotice} channels={channels} activeChId={activeChId}
+                chForm={chForm} editingChId={editingChId}
+                onSetActive={setActiveChId} onEdit={editChannel} onDelete={delChannel}
+                onSave={saveChannel} onChFormChange={setChForm} onClearForm={clearChForm}
+              />
             )}
           </div>
         </div>

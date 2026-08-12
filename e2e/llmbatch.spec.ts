@@ -1,5 +1,5 @@
 import { test, expect } from '@playwright/test'
-import { goto, inputByLabel, fieldOf, readHistoryStore } from './helpers'
+import { goto, inputByLabel, fieldOf, readHistoryStore, readKv } from './helpers'
 
 test.beforeEach(async ({ page }) => {
   // 仅在标签页首次加载时清空 localStorage；reload 不再清，便于测试历史报告持久化
@@ -247,20 +247,20 @@ test.describe('LLM 批量测试', () => {
     expect(dialogs).toEqual([]) // 三种格式都没有触发失败提示的 alert
   })
 
-  test('渠道 API Key 加密后持久化：reload 后仍在，localStorage 中不含明文', async ({ page }) => {
+  test('渠道 API Key 加密后持久化：reload 后仍在，落盘不含明文', async ({ page }) => {
     await goto(page, /LLM 批量测试/)
     await addChannel(page, { name: '测试渠道', apiKey: 'sk-test-secret-abc123' })
     await expect(page.locator('div.pr-16', { hasText: '测试渠道' })).toBeVisible()
     await expect(page.getByText('✓ 当前使用')).toBeVisible()
 
-    const stored = await page.evaluate(() => localStorage.getItem('llmbatch-channels'))
-    expect(stored).toBeTruthy()
+    await expect.poll(() => readKv(page, 'llmbatch-channels')).toBeTruthy()
+    const stored = await readKv(page, 'llmbatch-channels')
     expect(stored).not.toContain('sk-test-secret-abc123') // 落盘的是密文，不是明文
 
     await page.reload()
     await page.getByRole('link', { name: /LLM 批量测试/ }).first().click()
     await page.getByRole('button', { name: /渠道管理/ }).click()
-    // reload 后渠道列表与「当前使用」状态仍从 localStorage 正确恢复
+    // reload 后渠道列表与「当前使用」状态仍从 IndexedDB kv 正确恢复
     await expect(page.locator('div.pr-16', { hasText: '测试渠道' })).toBeVisible()
     await expect(page.getByText('✓ 当前使用')).toBeVisible()
     await expect(page.getByRole('button', { name: /开始批量请求/ })).toBeEnabled()
@@ -269,14 +269,13 @@ test.describe('LLM 批量测试', () => {
   test('删除渠道后本地加密存储一并清除', async ({ page }) => {
     await goto(page, /LLM 批量测试/)
     await addChannel(page, { name: '待删除渠道', apiKey: 'sk-test-to-clear' })
-    await expect.poll(() => page.evaluate(() => localStorage.getItem('llmbatch-channels'))).toContain('待删除渠道')
+    await expect.poll(() => readKv(page, 'llmbatch-channels')).toContain('待删除渠道')
 
     page.once('dialog', d => d.accept())
     await page.getByRole('button', { name: '删除', exact: true }).click()
 
     await expect(page.getByText('还没有渠道，请在下方添加。')).toBeVisible()
-    const stored = await page.evaluate(() => localStorage.getItem('llmbatch-channels'))
-    expect(stored).not.toContain('待删除渠道')
+    await expect.poll(async () => (await readKv(page, 'llmbatch-channels')) ?? '').not.toContain('待删除渠道')
     await expect(page.getByRole('button', { name: /开始批量请求/ })).toBeDisabled()
   })
 

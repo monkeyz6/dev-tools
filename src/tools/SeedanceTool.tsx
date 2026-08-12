@@ -1,3 +1,4 @@
+import { kvGet, kvSet, kvRemove } from '../shared/app-kv'
 import React, { useState, useCallback, useRef, useEffect, useLayoutEffect, useMemo, useDeferredValue } from 'react'
 import { Btn, Label, Card, Badge, CustomInput, CustomSelect, SearchableSelect, CustomTextarea, Toggle, SegmentedControl, SectionTitle, CopyBtn } from '../shared/ui'
 import { IconChevron } from '../shared/icons'
@@ -93,7 +94,7 @@ function SeedanceTool() {
   const [tokens, setTokens] = useState('200000')
   const [rate, setRate] = useState(() => {
     if (typeof window !== 'undefined') {
-      const v = parseFloat(localStorage.getItem('seedance-fx-rate') || '')
+      const v = parseFloat(kvGet('seedance-fx-rate') || '')
       if (!isNaN(v) && v > 0) return String(v)
     }
     return String(DEFAULT_RATE)
@@ -101,11 +102,11 @@ function SeedanceTool() {
   const [tableOpen, setTableOpen] = useState(false)
 
   useEffect(() => {
-    localStorage.setItem('seedance-fx-rate', rate)
+    kvSet('seedance-fx-rate', rate)
   }, [rate])
   useEffect(() => {
     // 旧版本手填单价入口已移除（官方价格已公布），清理遗留数据
-    localStorage.removeItem('seedance-intl-25-prices')
+    kvRemove('seedance-intl-25-prices')
   }, [])
 
   const def = SEEDANCE_PRICING[region][model]
@@ -233,7 +234,7 @@ function SeedanceTool() {
         {/* 价目表（可折叠，默认收起，放最下面） */}
         <Card style={{ padding: 0, overflow: 'hidden' }}>
           <button onClick={() => setTableOpen(o => !o)}
-            className="w-full flex items-center justify-between gap-3 px-4 py-3 border-0 outline-none cursor-pointer"
+            className="collapse-head w-full flex items-center justify-between gap-3 px-4 py-3 border-0 outline-none cursor-pointer"
             style={{ background: 'transparent', fontFamily: 'inherit' }}>
             <span className="text-sm font-semibold" style={{ color: 'var(--text)' }}>
               价目表 · {region === 'cn' ? '国内（元/百万 Token）' : '海外（美元/百万 Token）'}
@@ -254,10 +255,8 @@ function SeedanceTool() {
                       const isActive = mk === model && tier.id === activeTierId
                       return (
                         <button key={`${mk}:${tier.id}`} onClick={() => { onModelChange(mk); setResolution(tier.resolutions[0]) }}
-                          className="w-full grid grid-cols-[1fr_auto_auto] items-center gap-3 px-4 py-2 text-xs border-0 outline-none cursor-pointer text-left transition-all duration-100 active:scale-[0.995]"
-                          style={{ background: isActive ? 'var(--accentSubHard)' : 'transparent', borderTop: '1px solid var(--border)', fontFamily: 'inherit' }}
-                          onPointerEnter={e => { if (!isActive) (e.currentTarget as HTMLButtonElement).style.background = 'var(--s1)' }}
-                          onPointerLeave={e => { if (!isActive) (e.currentTarget as HTMLButtonElement).style.background = 'transparent' }}>
+                          className={`row-hover ${isActive ? 'row-active' : ''} w-full grid grid-cols-[1fr_auto_auto] items-center gap-3 px-4 py-2 text-xs border-0 outline-none cursor-pointer text-left active:scale-[0.995]`}
+                          style={{ background: isActive ? 'var(--accentSubHard)' : 'transparent', borderTop: '1px solid var(--border)', fontFamily: 'inherit' }}>
                           <span className="font-medium" style={{ color: isActive ? 'var(--accent)' : 'var(--text)' }}>{tier.label}</span>
                           <span className="tabular-nums" style={{ color: isActive ? 'var(--accent)' : 'var(--t2)' }}>{fmtPrice(tier.price.no, region)}</span>
                           <span className="tabular-nums" style={{ color: isActive ? 'var(--accent)' : 'var(--t2)' }}>{fmtPrice(tier.price.yes, region)}</span>

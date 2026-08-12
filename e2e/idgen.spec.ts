@@ -1,5 +1,5 @@
 import { test, expect } from '@playwright/test'
-import { goto, selectOption } from './helpers'
+import { goto, selectOption, readKv } from './helpers'
 
 test.beforeEach(async ({ page }) => {
   // 仅首次加载清空；reload 保留，便于测试持久化
@@ -52,12 +52,19 @@ test.describe('ID 生成器', () => {
     expect(text).not.toMatch(/[0O1lI]/)
   })
 
-  test('配置刷新后从 localStorage 恢复', async ({ page }) => {
+  test('配置刷新后从 IndexedDB 恢复', async ({ page }) => {
     await goto(page, /ID 生成器/)
     await page.getByRole('button', { name: '随机字符串' }).click()
     await page.getByRole('button', { name: '纯数字 ID' }).click()
     const first = (await page.locator('code').first().textContent())!
     expect(first).toMatch(/^\d{20}$/)
+    // kv 写入 IndexedDB 是异步的，poll 到「纯数字」配置落盘再 reload
+    await expect.poll(async () => {
+      const stored = await readKv(page, 'idgen-opts')
+      if (!stored) return undefined
+      const rand = JSON.parse(stored).rand
+      return rand && rand.len === 20 && rand.digit && !rand.lower && !rand.symbol
+    }).toBe(true)
     // reload 后仍保留「随机字符串 + 纯数字」配置
     await page.reload()
     await goto(page, /ID 生成器/)

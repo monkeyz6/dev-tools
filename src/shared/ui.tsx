@@ -5,7 +5,7 @@ export function Btn({ children, onClick, variant = 'ghost', small, className = '
   children: React.ReactNode; onClick?: () => void; variant?: 'primary' | 'accent' | 'soft' | 'ghost' | 'danger'
   small?: boolean; className?: string; disabled?: boolean; style?: React.CSSProperties; title?: string
 }) {
-  const base = `ui-btn inline-flex items-center justify-center font-semibold select-none cursor-pointer rounded-full border-0 outline-none`
+  const base = `ui-btn ui-btn-${variant} inline-flex items-center justify-center font-semibold select-none cursor-pointer rounded-full border-0 outline-none`
   const sz = small ? 'px-3 py-1.5 text-xs gap-1.5' : 'px-4 py-2 text-sm gap-2'
   const vs = {
     primary: { background: 'var(--primary)', color: 'var(--primaryFg)' },
@@ -68,7 +68,7 @@ export function CustomInput({ value, onChange, placeholder, className = '', type
       style={{
         background: 'var(--inputBg)',
         border: `1px solid ${focused ? 'var(--accent)' : 'var(--inputBorder)'}`,
-        boxShadow: focused ? '0 0 0 3px var(--accentSub)' : '0 1px 2px rgba(0,0,0,0.03)',
+        boxShadow: focused ? '0 0 0 3px var(--accentSub)' : 'var(--shadowSm)',
         ...style,
       }}
     >
@@ -88,8 +88,8 @@ export function CustomInput({ value, onChange, placeholder, className = '', type
           fontSize: 14,
           color: 'var(--text)',
           fontFamily: mono ? '"JetBrains Mono", "JetBrainsMono Nerd Font", "SF Mono", "Fira Code", "Fira Mono", "Roboto Mono", "Droid Sans Mono", "Cascadia Code", Consolas, "Courier New", monospace' : 'inherit',
-          WebkitAppearance: 'none',
-          MozAppearance: 'none',
+          WebkitAppearance: type === 'number' ? 'textfield' : 'none',
+          MozAppearance: type === 'number' ? 'textfield' : 'none',
         }}
       />
     </div>
@@ -140,7 +140,7 @@ export function CustomSelect({ value, onChange, options, className = '' }: {
           padding: '10px 12px',
           background: 'var(--inputBg)',
           border: `1px solid ${open || focused ? 'var(--accent)' : 'var(--inputBorder)'}`,
-          boxShadow: open || focused ? '0 0 0 3px var(--accentSub)' : '0 1px 2px rgba(0,0,0,0.03)',
+          boxShadow: open || focused ? '0 0 0 3px var(--accentSub)' : 'var(--shadowSm)',
           color: 'var(--text)',
           fontSize: 14,
           fontFamily: 'inherit',
@@ -169,7 +169,7 @@ export function CustomSelect({ value, onChange, options, className = '' }: {
               <button
                 key={o.value}
                 onClick={() => { onChange(o.value); setOpen(false) }}
-                className="w-full flex items-center gap-2.5 rounded-xl transition-all duration-100 cursor-pointer border-0 outline-none text-left"
+                className={`ui-option ${isActive ? 'ui-option-active' : ''} w-full flex items-center gap-2.5 rounded-xl cursor-pointer border-0 outline-none text-left`}
                 style={{
                   padding: '8px 10px',
                   background: isActive ? 'var(--accentSubHard)' : 'transparent',
@@ -178,8 +178,6 @@ export function CustomSelect({ value, onChange, options, className = '' }: {
                   fontFamily: 'inherit',
                   marginBottom: idx < options.length - 1 ? 1 : 0,
                 }}
-                onPointerEnter={e => { if (!isActive) (e.currentTarget as HTMLButtonElement).style.background = 'var(--s1)' }}
-                onPointerLeave={e => { if (!isActive) (e.currentTarget as HTMLButtonElement).style.background = 'transparent' }}
               >
                 <span className="flex-1 truncate" title={o.label}>{o.label}</span>
                 {isActive && <span style={{ color: 'var(--accent)', flexShrink: 0 }}><IconCheck /></span>}
@@ -229,7 +227,7 @@ export function SearchableSelect({ value, onChange, options, placeholder, classN
           padding: '10px 12px',
           background: 'var(--inputBg)',
           border: `1px solid ${open || focused ? 'var(--accent)' : 'var(--inputBorder)'}`,
-          boxShadow: open || focused ? '0 0 0 3px var(--accentSub)' : '0 1px 2px rgba(0,0,0,0.03)',
+          boxShadow: open || focused ? '0 0 0 3px var(--accentSub)' : 'var(--shadowSm)',
           color: 'var(--text)',
           fontSize: 14,
           fontFamily: 'inherit',
@@ -265,7 +263,7 @@ export function SearchableSelect({ value, onChange, options, placeholder, classN
                 <button
                   key={o.value}
                   onClick={() => { onChange(o.value); setOpen(false) }}
-                  className="w-full flex items-center gap-2.5 rounded-xl transition-all duration-100 cursor-pointer border-0 outline-none text-left"
+                  className={`ui-option ${isActive ? 'ui-option-active' : ''} w-full flex items-center gap-2.5 rounded-xl cursor-pointer border-0 outline-none text-left`}
                   style={{
                     padding: '8px 10px',
                     background: isActive ? 'var(--accentSubHard)' : 'transparent',
@@ -274,8 +272,6 @@ export function SearchableSelect({ value, onChange, options, placeholder, classN
                     fontFamily: 'inherit',
                     marginBottom: idx < filtered.length - 1 ? 1 : 0,
                   }}
-                  onPointerEnter={e => { if (!isActive) (e.currentTarget as HTMLButtonElement).style.background = 'var(--s1)' }}
-                  onPointerLeave={e => { if (!isActive) (e.currentTarget as HTMLButtonElement).style.background = 'transparent' }}
                 >
                   <span className="flex-1 truncate" title={o.label}>{o.label}</span>
                   {isActive && <span style={{ color: 'var(--accent)', flexShrink: 0 }}><IconCheck /></span>}
@@ -302,7 +298,7 @@ export function CustomTextarea({ value, onChange, placeholder, rows, className =
       style={{
         background: 'var(--inputBg)',
         border: `1px solid ${focused ? 'var(--accent)' : 'var(--inputBorder)'}`,
-        boxShadow: focused ? '0 0 0 3px var(--accentSub)' : '0 1px 2px rgba(0,0,0,0.03)',
+        boxShadow: focused ? '0 0 0 3px var(--accentSub)' : 'var(--shadowSm)',
         display: stretch ? 'flex' : undefined,
         flexDirection: stretch ? 'column' : undefined,
         ...style,
@@ -381,7 +377,7 @@ export function SegmentedControl({ value, options, onChange, className = '' }: {
           <button
             key={o.value}
             onClick={() => onChange(o.value)}
-            className="segmented-option flex-1 px-3 py-1.5 text-sm font-medium rounded-lg cursor-pointer border-0 outline-none whitespace-nowrap inline-flex items-center justify-center gap-1.5"
+            className={`segmented-option ${active ? 'segmented-option-active' : ''} flex-1 px-3 py-1.5 text-sm font-medium rounded-lg cursor-pointer border-0 outline-none whitespace-nowrap inline-flex items-center justify-center gap-1.5`}
             style={{
               background: active ? 'var(--bg)' : 'transparent',
               color: active ? 'var(--text)' : 'var(--t2)',

@@ -20,6 +20,17 @@ export default defineConfig(({ mode }) => {
             compress: true,
             format: { comments: false },
           },
+      // 大依赖拆成稳定的 vendor chunk：多个工具共享时不重复打包，工具代码更新也不影响 vendor 缓存
+      rolldownOptions: {
+        output: {
+          advancedChunks: {
+            groups: [
+              { name: 'vendor-recharts', test: /node_modules[\\/]recharts/ },
+              { name: 'vendor-xlsx', test: /node_modules[\\/]xlsx/ },
+            ],
+          },
+        },
+      },
     },
     plugins: [
       react(),

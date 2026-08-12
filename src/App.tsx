@@ -1,5 +1,6 @@
 import React, { Suspense, useCallback, useEffect, useRef, useState } from 'react'
 import HomePage from './HomePage'
+import { kvHydrate } from './shared/app-kv'
 import { IconCheck, IconSettings } from './shared/icons'
 import {
   TOOL_DEFINITIONS, TOOL_GROUP_SECTIONS, preloadTool, resolveToolRoute,
@@ -14,7 +15,7 @@ interface ThemeVars {
   text: string; t2: string; t3: string
   accent: string; accentFg: string; accentSub: string; accentSubHard: string
   primary: string; primaryFg: string
-  sidebar: string; code: string; shadow: string; shadowMd: string
+  sidebar: string; code: string; shadowSm: string; shadow: string; shadowMd: string
   ok: string; okBg: string
   err: string; errBg: string
   warn: string; warnBg: string
@@ -41,7 +42,7 @@ const THEMES: Record<ThemeKey, { label: string; icon: string; dark: boolean; v: 
       text: '#111827', t2: '#6b7280', t3: '#9ca3af',
       accent: '#2563eb', accentFg: '#fff', accentSub: 'rgba(37,99,235,0.07)', accentSubHard: 'rgba(37,99,235,0.12)',
       primary: '#111827', primaryFg: '#ffffff',
-      sidebar: 'rgba(248,250,255,0.82)', code: '#f1f4f9',
+      sidebar: 'rgba(248,250,255,0.82)', code: '#f1f4f9', shadowSm: '0 1px 2px rgba(27,39,70,0.05)',
       shadow: '0 1px 2px rgba(27,39,70,0.04), 0 10px 28px -18px rgba(27,39,70,0.24)', shadowMd: '0 18px 48px -24px rgba(31,48,89,0.34), 0 2px 8px rgba(31,48,89,0.05)',
       ok: '#16a34a', okBg: 'rgba(22,163,74,0.08)',
       err: '#dc2626', errBg: 'rgba(220,38,38,0.08)',
@@ -64,10 +65,10 @@ const THEMES: Record<ThemeKey, { label: string; icon: string; dark: boolean; v: 
     v: {
       bg: '#090b12', s1: 'rgba(255,255,255,0.045)', s2: 'rgba(255,255,255,0.07)',
       border: 'rgba(255,255,255,0.10)', borderHard: 'rgba(255,255,255,0.20)',
-      text: '#eceef5', t2: '#9aa3b4', t3: '#69728a',
+      text: '#eceef5', t2: '#9aa3b4', t3: '#7e88a0',
       accent: '#ff7a45', accentFg: '#1a0d05', accentSub: 'rgba(255,122,69,0.16)', accentSubHard: 'rgba(255,122,69,0.24)',
       primary: '#ebebed', primaryFg: '#090b12',
-      sidebar: 'rgba(255,255,255,0.035)', code: '#12141d',
+      sidebar: 'rgba(255,255,255,0.035)', code: '#12141d', shadowSm: '0 1px 2px rgba(0,0,0,0.32)',
       shadow: '0 1px 2px rgba(0,0,0,0.4)',
       shadowMd: '0 4px 20px rgba(0,0,0,0.55)',
       ok: '#34d399', okBg: 'rgba(52,211,153,0.1)',
@@ -90,11 +91,11 @@ const THEMES: Record<ThemeKey, { label: string; icon: string; dark: boolean; v: 
     label: '暖陶', icon: '✦', dark: false,
     v: {
       bg: '#f8f2ec', s1: 'rgba(239,230,221,0.78)', s2: 'rgba(230,217,205,0.76)',
-      border: 'rgba(120,70,40,0.1)', borderHard: 'rgba(120,70,40,0.22)',
-      text: '#2c1f14', t2: '#7a5c44', t3: '#b09880',
+      border: 'rgba(120,70,40,0.14)', borderHard: 'rgba(120,70,40,0.22)',
+      text: '#2c1f14', t2: '#7a5c44', t3: '#9a7d61',
       accent: '#b5603a', accentFg: '#fff', accentSub: 'rgba(181,96,58,0.09)', accentSubHard: 'rgba(181,96,58,0.16)',
       primary: '#2c1f14', primaryFg: '#f8f2ec',
-      sidebar: '#f8f2ec', code: '#f2e8dc', shadow: '0 1px 3px rgba(80,40,20,0.07), 0 4px 12px -4px rgba(80,40,20,0.12)', shadowMd: '0 4px 16px rgba(80,40,20,0.14)',
+      sidebar: '#f8f2ec', code: '#f2e8dc', shadowSm: '0 1px 2px rgba(80,40,20,0.06)', shadow: '0 1px 3px rgba(80,40,20,0.07), 0 4px 12px -4px rgba(80,40,20,0.12)', shadowMd: '0 4px 16px rgba(80,40,20,0.14)',
       ok: '#5a8740', okBg: 'rgba(90,135,64,0.09)',
       err: '#c44b38', errBg: 'rgba(196,75,56,0.09)',
       warn: '#b5603a', warnBg: 'rgba(181,96,58,0.09)',
@@ -115,11 +116,11 @@ const THEMES: Record<ThemeKey, { label: string; icon: string; dark: boolean; v: 
     label: '山野绿', icon: '◉', dark: false,
     v: {
       bg: '#f0f5f0', s1: 'rgba(230,238,230,0.78)', s2: 'rgba(218,230,218,0.76)',
-      border: 'rgba(30,70,40,0.09)', borderHard: 'rgba(30,70,40,0.2)',
-      text: '#1a2e1f', t2: '#4a7055', t3: '#85a88e',
+      border: 'rgba(30,70,40,0.13)', borderHard: 'rgba(30,70,40,0.2)',
+      text: '#1a2e1f', t2: '#4a7055', t3: '#67917a',
       accent: '#3d7a54', accentFg: '#fff', accentSub: 'rgba(61,122,84,0.09)', accentSubHard: 'rgba(61,122,84,0.16)',
       primary: '#1a2e1f', primaryFg: '#f0f5f0',
-      sidebar: '#f0f5f0', code: '#eaf3ea', shadow: '0 1px 3px rgba(20,50,30,0.06), 0 4px 12px -4px rgba(20,50,30,0.1)', shadowMd: '0 4px 16px rgba(20,50,30,0.12)',
+      sidebar: '#f0f5f0', code: '#eaf3ea', shadowSm: '0 1px 2px rgba(20,50,30,0.05)', shadow: '0 1px 3px rgba(20,50,30,0.06), 0 4px 12px -4px rgba(20,50,30,0.1)', shadowMd: '0 4px 16px rgba(20,50,30,0.12)',
       ok: '#3d7a54', okBg: 'rgba(61,122,84,0.09)',
       err: '#c44b38', errBg: 'rgba(196,75,56,0.09)',
       warn: '#a07030', warnBg: 'rgba(160,112,48,0.09)',
@@ -285,7 +286,7 @@ function Sidebar({ tool, onNavigate, onToolIntent, theme, setTheme, collapsed, o
           style={{ background: 'var(--s1)', color: 'var(--t2)', border: '1px solid var(--border)' }}
         >
           <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"
-            style={{ transform: collapsed ? 'rotate(180deg)' : 'rotate(0deg)', transition: 'transform 0.2s ease' }}>
+            style={{ transform: collapsed ? 'rotate(180deg)' : 'rotate(0deg)', transition: 'transform 0.24s var(--ease-fluid)' }}>
             <polyline points="15 18 9 12 15 6" />
           </svg>
         </button>
@@ -310,15 +311,46 @@ function AmbientBackground() {
   )
 }
 
-function ToolLoading({ label }: { label: string }) {
+/** 与目标工具布局同构的骨架屏：workbench = 全高工作台（顶部工具栏 + 双栏面板），否则为居中窄栏表单。 */
+function ToolLoading({ label, workbench }: { label: string; workbench?: boolean }) {
+  if (workbench) {
+    return (
+      <div className="tool-loading h-full flex flex-col overflow-hidden" role="status" aria-live="polite" aria-busy="true">
+        <span className="sr-only">正在载入{label}</span>
+        <div className="flex items-center gap-3 px-6 py-4 flex-shrink-0" style={{ borderBottom: '1px solid var(--border)' }}>
+          <div className="tool-loading-chip rounded-full" style={{ width: 108 }} />
+          <div className="tool-loading-chip rounded-full" style={{ width: 64 }} />
+          <div className="tool-loading-chip rounded-full" style={{ width: 64 }} />
+          <div className="flex-1" />
+          <div className="tool-loading-chip rounded-full" style={{ width: 88 }} />
+        </div>
+        <div className="flex-1 min-h-0 flex gap-4 p-5">
+          <div className="tool-loading-panel flex-1 rounded-2xl" style={{ height: 'auto' }} />
+          <div className="tool-loading-panel flex-1 rounded-2xl" style={{ height: 'auto' }} />
+        </div>
+      </div>
+    )
+  }
   return (
-    <div className="tool-loading h-full overflow-hidden px-7 py-6" role="status" aria-live="polite" aria-busy="true">
+    <div className="tool-loading h-full overflow-hidden" role="status" aria-live="polite" aria-busy="true">
       <span className="sr-only">正在载入{label}</span>
-      <div className="tool-loading-title rounded-full" />
-      <div className="surface-card tool-loading-card mt-5 rounded-3xl p-6">
-        <div className="tool-loading-line rounded-full" />
+      <div className="max-w-2xl mx-auto px-6 py-12">
+        <div className="tool-loading-title rounded-full" />
         <div className="tool-loading-line tool-loading-line-short mt-3 rounded-full" />
-        <div className="tool-loading-panel mt-6 rounded-2xl" />
+        <div className="surface-card tool-loading-card mt-6 rounded-2xl p-5">
+          <div className="grid grid-cols-2 gap-4">
+            {[0, 1, 2, 3].map(i => (
+              <div key={i}>
+                <div className="tool-loading-chip rounded-full" style={{ width: 56 + (i % 2) * 18 }} />
+                <div className="tool-loading-field mt-2 rounded-xl" />
+              </div>
+            ))}
+          </div>
+        </div>
+        <div className="surface-card mt-5 rounded-2xl p-5">
+          <div className="tool-loading-line rounded-full" />
+          <div className="tool-loading-line tool-loading-line-short mt-3 rounded-full" />
+        </div>
       </div>
     </div>
   )
@@ -410,6 +442,15 @@ export default function App() {
   useEffect(() => { localStorage.setItem('dev-toolkit-theme', theme) }, [theme])
   useEffect(() => { localStorage.setItem('dev-toolkit-sidebar', sidebarCollapsed ? '1' : '0') }, [sidebarCollapsed])
 
+  // 工具配置存于 IndexedDB（kv store）：渲染工具前先水合到内存缓存，
+  // 各工具内部即可保持同步读取配置的既有模式。水合是一次 getAll，毫秒级。
+  const [kvReady, setKvReady] = useState(false)
+  useEffect(() => {
+    let cancelled = false
+    kvHydrate().finally(() => { if (!cancelled) setKvReady(true) })
+    return () => { cancelled = true }
+  }, [])
+
   useEffect(() => {
     const syncRoute = () => {
       const nextRoute = resolveToolRoute(window.location.pathname)
@@ -442,11 +483,14 @@ export default function App() {
     window.history.pushState(null, '', '/')
     setRoute({ kind: 'home' })
   }, [])
+  const themeXTimer = useRef<number | null>(null)
   const changeTheme = useCallback((next: ThemeKey) => {
     setTheme(next)
     setThemeX(true)
-    window.setTimeout(() => setThemeX(false), 260)
+    if (themeXTimer.current !== null) window.clearTimeout(themeXTimer.current)
+    themeXTimer.current = window.setTimeout(() => { themeXTimer.current = null; setThemeX(false) }, 260)
   }, [])
+  useEffect(() => () => { if (themeXTimer.current !== null) window.clearTimeout(themeXTimer.current) }, [])
 
   const definition = route.kind === 'tool' ? TOOL_DEFINITIONS.find(item => item.key === route.key) ?? null : null
 
@@ -486,15 +530,19 @@ export default function App() {
               />
             </div>
           ) : definition && ToolComponent ? (
-            <ToolLoadBoundary key={definition.key} label={definition.label}>
-              <Suspense fallback={<ToolLoading label={definition.label} />}>
-                {definition.fullHeight ? (
-                  <div className="h-full overflow-hidden"><ToolComponent /></div>
-                ) : (
-                  <div className="h-full overflow-y-auto"><ToolComponent /></div>
-                )}
-              </Suspense>
-            </ToolLoadBoundary>
+            kvReady ? (
+              <ToolLoadBoundary key={definition.key} label={definition.label}>
+                <Suspense fallback={<ToolLoading label={definition.label} workbench={definition.fullHeight} />}>
+                  {definition.fullHeight ? (
+                    <div className="h-full overflow-hidden"><ToolComponent /></div>
+                  ) : (
+                    <div className="h-full overflow-y-auto"><ToolComponent /></div>
+                  )}
+                </Suspense>
+              </ToolLoadBoundary>
+            ) : (
+              <ToolLoading label={definition.label} workbench={definition.fullHeight} />
+            )
           ) : (
             <ToolNotFound pathname={route.kind === 'not-found' ? route.pathname : window.location.pathname} onNavigate={navigateTool} onHome={navigateHome} />
           )}

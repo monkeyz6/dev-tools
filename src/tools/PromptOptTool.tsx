@@ -1,7 +1,9 @@
+import { kvGet, kvSet, kvRemove } from '../shared/app-kv'
 import React, { useState, useEffect, useRef } from 'react'
 import { Btn, Label, Card, Badge, CustomInput, CustomSelect, CustomTextarea, SegmentedControl, SectionTitle, CopyBtn } from '../shared/ui'
 import { IconChevron } from '../shared/icons'
 import { encryptLlmApiKey, decryptLlmApiKey } from '../shared/api-key-crypto'
+import { useDebouncedPersist } from '../shared/use-debounced-persist'
 import {
   FRAMEWORKS, SCENARIOS, frameworkOf, buildGenerateMessages, buildOptimizeMessages,
   parseOptimizeOutput, joinLlmUrl, type FrameworkId, type FrameworkFieldValues,
@@ -23,7 +25,7 @@ interface UiState {
   mode: 'write' | 'optimize'
   scenario: string
   framework: FrameworkId
-  fields: Record<FrameworkId, FrameworkFieldValues>
+  fields: Partial<Record<FrameworkId, FrameworkFieldValues>>
   optimizeInput: string
   targetFw: FrameworkId | 'auto'
 }
@@ -37,7 +39,7 @@ const DEFAULT_UI: UiState = { mode: 'write', scenario: '', framework: 'rtf', fie
 
 function loadChannels(): PromptChannel[] {
   try {
-    const raw = localStorage.getItem(CH_KEY)
+    const raw = kvGet(CH_KEY)
     if (!raw) return []
     const arr = JSON.parse(raw)
     return Array.isArray(arr) ? arr.filter(c => c && typeof c.id === 'string') : []
@@ -46,7 +48,7 @@ function loadChannels(): PromptChannel[] {
 
 function loadUi(): UiState {
   try {
-    const raw = localStorage.getItem(UI_KEY)
+    const raw = kvGet(UI_KEY)
     if (!raw) return DEFAULT_UI
     const j = JSON.parse(raw)
     return {
@@ -111,7 +113,7 @@ function PromptOptTool() {
   const [channels, setChannels] = useState<PromptChannel[]>(() => loadChannels())
   const [activeChId, setActiveChId] = useState<string | null>(() => {
     if (typeof window === 'undefined') return null
-    return localStorage.getItem(ACTIVE_KEY)
+    return kvGet(ACTIVE_KEY)
   })
   const [showChannels, setShowChannels] = useState(false)
   const [chForm, setChForm] = useState({ name: '', baseUrl: '', model: '', apiKey: '' })
@@ -133,12 +135,13 @@ function PromptOptTool() {
   const scenarioMatched = !!scenario && scenario.frameworkId === ui.framework
   const fieldValues = ui.fields[fw.id] ?? {}
 
-  useEffect(() => { try { localStorage.setItem(CH_KEY, JSON.stringify(channels)) } catch { /* ignore */ } }, [channels])
+  useEffect(() => { try { kvSet(CH_KEY, JSON.stringify(channels)) } catch { /* ignore */ } }, [channels])
   useEffect(() => {
-    if (activeChId) { try { localStorage.setItem(ACTIVE_KEY, activeChId) } catch { /* ignore */ } }
+    if (activeChId) { try { kvSet(ACTIVE_KEY, activeChId) } catch { /* ignore */ } }
   }, [activeChId])
-  useEffect(() => {
-    try { localStorage.setItem(UI_KEY, JSON.stringify(ui)) } catch { /* ignore */ }
+  // 工作台状态含长文本字段，每次击键整份 stringify 写盘会卡输入：防抖合并
+  useDebouncedPersist(() => {
+    try { kvSet(UI_KEY, JSON.stringify(ui)) } catch { /* ignore */ }
   }, [ui])
 
   const toastShow = (m: string) => {
@@ -280,7 +283,7 @@ function PromptOptTool() {
         <div className="flex items-center gap-3 mt-4 flex-wrap">
           <Btn variant="primary" onClick={saveChannel}>保存渠道</Btn>
           <Btn variant="soft" onClick={() => { setChForm({ name: '', baseUrl: '', model: '', apiKey: '' }); setEditingChId(null) }}>清空表单</Btn>
-          <span className="text-[11px]" style={{ color: 'var(--t3)' }}>渠道信息保存在本浏览器 localStorage 中（apiKey 经 AES-GCM 加密）。</span>
+          <span className="text-[11px]" style={{ color: 'var(--t3)' }}>渠道信息保存在本浏览器 IndexedDB 中（apiKey 经 AES-GCM 加密）。</span>
         </div>
       </Card>
     </div>

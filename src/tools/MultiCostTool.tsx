@@ -1,3 +1,4 @@
+import { kvGet, kvSet, kvRemove } from '../shared/app-kv'
 import React, { useEffect, useMemo, useState } from 'react'
 import { Card, Label, Badge, Btn, CustomInput, CustomSelect, CustomTextarea, SegmentedControl, SectionTitle } from '../shared/ui'
 import { IconSeedance, IconGrokImage, IconGrokVideo, IconGptImage, IconGeminiImage, IconJson, IconChevron } from '../shared/icons'
@@ -96,7 +97,7 @@ function PriceTable({ region, unitNoun, selectedModel, selectedTier, onSelect, s
   return (
     <Card style={{ padding: 0, overflow: 'hidden' }}>
       <button onClick={() => setOpen(o => !o)}
-        className="w-full flex items-center justify-between gap-3 px-4 py-3 border-0 outline-none cursor-pointer"
+        className="collapse-head w-full flex items-center justify-between gap-3 px-4 py-3 border-0 outline-none cursor-pointer"
         style={{ background: 'transparent', fontFamily: 'inherit' }}>
         <span className="text-sm font-semibold" style={{ color: 'var(--text)' }}>
           价目表 · {region.label}（{sym} / {unitNoun}）
@@ -121,10 +122,8 @@ function PriceTable({ region, unitNoun, selectedModel, selectedTier, onSelect, s
                 const active = selectedModel === m.id && selectedTier === t.id
                 return (
                   <button key={t.id} onClick={() => onSelect(m.id, t.id)}
-                    className="w-full grid grid-cols-[1fr_auto_auto] items-center gap-3 px-4 py-2 text-xs border-0 outline-none cursor-pointer text-left transition-all duration-100 active:scale-[0.995]"
-                    style={{ background: active ? 'var(--accentSubHard)' : 'transparent', borderTop: '1px solid var(--border)', fontFamily: 'inherit' }}
-                    onPointerEnter={e => { if (!active) (e.currentTarget as HTMLButtonElement).style.background = 'var(--s1)' }}
-                    onPointerLeave={e => { if (!active) (e.currentTarget as HTMLButtonElement).style.background = 'transparent' }}>
+                    className={`row-hover ${active ? 'row-active' : ''} w-full grid grid-cols-[1fr_auto_auto] items-center gap-3 px-4 py-2 text-xs border-0 outline-none cursor-pointer text-left active:scale-[0.995]`}
+                    style={{ background: active ? 'var(--accentSubHard)' : 'transparent', borderTop: '1px solid var(--border)', fontFamily: 'inherit' }}>
                     <span className="font-medium truncate" style={{ color: active ? 'var(--accent)' : 'var(--text)' }}>{t.label}</span>
                     <span className="tabular-nums text-right w-20" style={{ color: active ? 'var(--accent)' : 'var(--t2)' }}>
                       {t.priceNo == null ? '—' : sym + fmtUnit(t.priceNo)}
@@ -236,7 +235,7 @@ function JsonRecognizer({ activeProduct, onRecognized }: {
   return (
     <Card style={{ padding: 0, overflow: 'hidden' }}>
       <button onClick={() => setOpen(o => !o)}
-        className="w-full flex items-center justify-between gap-3 px-4 py-3 border-0 outline-none cursor-pointer text-left"
+        className="collapse-head w-full flex items-center justify-between gap-3 px-4 py-3 border-0 outline-none cursor-pointer text-left"
         style={{ background: 'transparent', fontFamily: 'inherit' }}>
         <div className="flex items-center gap-2.5 min-w-0">
           <span className="flex h-7 w-7 items-center justify-center rounded-lg flex-shrink-0" style={{ background: 'var(--accentSub)', color: 'var(--accent)' }}>
@@ -273,10 +272,8 @@ function JsonRecognizer({ activeProduct, onRecognized }: {
               {hint.examples.map(ex => (
                 <button key={ex.label} type="button"
                   onClick={() => { setText(ex.json); handleParse(ex.json) }}
-                  className="rounded-full px-3 py-1 text-[11px] font-medium border-0 outline-none cursor-pointer transition-all duration-150 active:scale-95"
-                  style={{ background: 'var(--s2)', color: 'var(--t2)', border: '1px solid var(--border)', fontFamily: 'inherit' }}
-                  onPointerEnter={e => (e.currentTarget as HTMLButtonElement).style.color = 'var(--accent)'}
-                  onPointerLeave={e => (e.currentTarget as HTMLButtonElement).style.color = 'var(--t2)'}>
+                  className="chip-hover rounded-full px-3 py-1 text-[11px] font-medium border-0 outline-none cursor-pointer transition-all duration-150 active:scale-95"
+                  style={{ background: 'var(--s2)', color: 'var(--t2)', border: '1px solid var(--border)', fontFamily: 'inherit' }}>
                   {ex.label}
                 </button>
               ))}
@@ -764,13 +761,13 @@ const PRODUCT_ICONS: Record<string, React.ReactNode> = {
 function MultiCostTool() {
   const [rateStr, setRateStr] = useState<string>(() => {
     try {
-      return localStorage.getItem(FX_STORAGE_KEY) || '7'
+      return kvGet(FX_STORAGE_KEY) || '7'
     } catch {
       return '7'
     }
   })
   useEffect(() => {
-    try { localStorage.setItem(FX_STORAGE_KEY, rateStr) } catch {}
+    try { kvSet(FX_STORAGE_KEY, rateStr) } catch {}
   }, [rateStr])
   const rate = num(rateStr, 7) || 7
 
@@ -834,7 +831,7 @@ function MultiCostTool() {
 
         <Card>
           <div className="max-w-[240px]">
-            <Field label="汇率 1 USD = ? CNY" hint="修改后自动保存到本地 (localStorage)">
+            <Field label="汇率 1 USD = ? CNY">
               <CustomInput type="number" value={rateStr} onChange={setRateStr} placeholder="7" mono />
             </Field>
           </div>

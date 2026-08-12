@@ -1,12 +1,27 @@
-import React, { useCallback, useEffect, useRef, useState } from 'react'
+import { kvGet, kvSet, kvRemove } from '../shared/app-kv'
+import React, { Suspense, useCallback, useEffect, useRef, useState } from 'react'
 import { Btn, Label, Card, Badge, CustomTextarea, CustomInput, SegmentedControl, SectionTitle, CopyBtn } from '../shared/ui'
 import {
   parseJsonText, parseExcelBuffer, buildReport, SAMPLE_JSON, DEFAULT_REPORT_TITLE,
   type Report,
 } from '../shared/llm-report'
-import {
-  TtftHistChart, TimelineStackedChart, TokensTimelineChart, ErrorPieChart,
-} from './LlmReportCharts'
+import { useDebouncedPersist } from '../shared/use-debounced-persist'
+
+// recharts 体积大：图表二次懒加载（对齐 LlmBatchTool 的 LlmCharts 套路），报告工具本体先渲染
+const LazyTtftHistChart = React.lazy(() => import('./LlmReportCharts').then(m => ({ default: m.TtftHistChart })))
+const LazyTimelineStackedChart = React.lazy(() => import('./LlmReportCharts').then(m => ({ default: m.TimelineStackedChart })))
+const LazyTokensTimelineChart = React.lazy(() => import('./LlmReportCharts').then(m => ({ default: m.TokensTimelineChart })))
+const LazyErrorPieChart = React.lazy(() => import('./LlmReportCharts').then(m => ({ default: m.ErrorPieChart })))
+
+function ChartSkeleton() {
+  return (
+    <div className="surface-card llm-chart-loading rounded-2xl p-4" role="status" aria-label="正在载入图表" aria-busy="true">
+      <div className="tool-loading-line rounded-full" />
+      <div className="tool-loading-panel mt-4 rounded-xl" style={{ height: 220 }} />
+    </div>
+  )
+}
+
 const OPT_KEY = 'llmreport-opts'
 
 const pad2 = (v: number) => String(v).padStart(2, '0')
@@ -198,10 +213,10 @@ function ReportView({ report, onBack, onRenameTitle }: {
       <StatGrid report={report} />
 
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
-        <TtftHistChart report={report} />
-        <TimelineStackedChart report={report} />
-        <TokensTimelineChart report={report} />
-        <ErrorPieChart report={report} />
+        <Suspense fallback={<ChartSkeleton />}><LazyTtftHistChart report={report} /></Suspense>
+        <Suspense fallback={<ChartSkeleton />}><LazyTimelineStackedChart report={report} /></Suspense>
+        <Suspense fallback={<ChartSkeleton />}><LazyTokensTimelineChart report={report} /></Suspense>
+        <Suspense fallback={<ChartSkeleton />}><LazyErrorPieChart report={report} /></Suspense>
       </div>
 
       <PercentileTable report={report} />
@@ -215,10 +230,10 @@ function ReportView({ report, onBack, onRenameTitle }: {
 
 function LlmReportTool() {
   const [mode, setMode] = useState<'json' | 'excel'>(() => {
-    try { return localStorage.getItem(OPT_KEY) === 'excel' ? 'excel' : 'json' } catch { return 'json' }
+    try { return kvGet(OPT_KEY) === 'excel' ? 'excel' : 'json' } catch { return 'json' }
   })
   const [title, setTitle] = useState(() => {
-    try { return localStorage.getItem('llmreport-title') || DEFAULT_REPORT_TITLE } catch { return DEFAULT_REPORT_TITLE }
+    try { return kvGet('llmreport-title') || DEFAULT_REPORT_TITLE } catch { return DEFAULT_REPORT_TITLE }
   })
   const [jsonText, setJsonText] = useState('')
   const [fileName, setFileName] = useState('')
@@ -230,11 +245,11 @@ function LlmReportTool() {
   const fileRef = useRef<HTMLInputElement>(null)
 
   useEffect(() => {
-    try { localStorage.setItem(OPT_KEY, mode) } catch { /* noop */ }
+    try { kvSet(OPT_KEY, mode) } catch { /* noop */ }
   }, [mode])
 
-  useEffect(() => {
-    try { localStorage.setItem('llmreport-title', title) } catch { /* noop */ }
+  useDebouncedPersist(() => {
+    try { kvSet('llmreport-title', title) } catch { /* noop */ }
   }, [title])
 
   const onFile = useCallback((f: File | undefined | null) => {
@@ -247,7 +262,7 @@ function LlmReportTool() {
     }).catch(() => setError('文件读取失败'))
   }, [])
 
-  const generate = () => {
+  const generate = async () => {
     setError(null)
     setNote(null)
     let rows: ReturnType<typeof parseJsonText>
@@ -256,7 +271,7 @@ function LlmReportTool() {
       rows = parseJsonText(jsonText)
     } else {
       if (!fileBuf) { setError('请先选择 Excel/CSV 文件'); return }
-      rows = parseExcelBuffer(fileBuf, fileName)
+      rows = await parseExcelBuffer(fileBuf, fileName)
     }
     if (rows.error) { setError(rows.error); return }
     if (!rows.rows.length) { setError('没有解析到有效日志行（每行需含 created_at 时间戳）'); return }

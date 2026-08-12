@@ -1,3 +1,4 @@
+import { kvGet, kvSet, kvRemove } from '../shared/app-kv'
 import React, { useState, useCallback, useRef, useEffect, useLayoutEffect, useMemo, useDeferredValue } from 'react'
 import { Btn, Label, Card, Badge, CustomInput, CustomSelect, SearchableSelect, CustomTextarea, Toggle, SegmentedControl, SectionTitle, CopyBtn } from '../shared/ui'
 import { decodeUnicode, encodeUnicode, UNI_FORMATS, type UniFmt } from '../shared/unicode'
@@ -6,7 +7,7 @@ import { decodeUnicode, encodeUnicode, UNI_FORMATS, type UniFmt } from '../share
 
 function loadUnicodeOpts(): { fmt: UniFmt; onlyNonAscii: boolean; lowerHex: boolean } {
   try {
-    const raw = localStorage.getItem('unicode-opts')
+    const raw = kvGet('unicode-opts')
     if (!raw) return { fmt: 'js', onlyNonAscii: true, lowerHex: true }
     const p = JSON.parse(raw)
     const fmt = UNI_FORMATS.some(f => f.value === p.fmt) ? (p.fmt as UniFmt) : 'js'
@@ -14,7 +15,7 @@ function loadUnicodeOpts(): { fmt: UniFmt; onlyNonAscii: boolean; lowerHex: bool
   } catch { return { fmt: 'js', onlyNonAscii: true, lowerHex: true } }
 }
 function saveUnicodeOpts(o: { fmt: UniFmt; onlyNonAscii: boolean; lowerHex: boolean }) {
-  try { localStorage.setItem('unicode-opts', JSON.stringify(o)) } catch { /* ignore */ }
+  try { kvSet('unicode-opts', JSON.stringify(o)) } catch { /* ignore */ }
 }
 
 function UnicodeTool() {

@@ -1,5 +1,5 @@
 import { test, expect } from '@playwright/test'
-import { goto, inputByLabel } from './helpers'
+import { goto, inputByLabel, readKv } from './helpers'
 import { readFileSync } from 'fs'
 
 test.beforeEach(async ({ page }) => {
@@ -205,9 +205,11 @@ test.describe('模型探测', () => {
     await page.getByRole('button', { name: '全选' }).click()
     await uncheck(page, 'multi-turn')
 
-    const stored = await page.evaluate(() => localStorage.getItem('modelprobe-config'))
-    expect(stored).toBeTruthy()
-    expect(JSON.parse(stored!).selected['multi-turn']).toBe(false)
+    // kv 写入 IndexedDB 是异步的，poll 到最终勾选状态落盘再 reload
+    await expect.poll(async () => {
+      const stored = await readKv(page, 'modelprobe-config')
+      return stored ? JSON.parse(stored).selected?.['multi-turn'] : undefined
+    }).toBe(false)
 
     await page.reload()
     await goto(page, /模型探测/)
@@ -215,14 +217,14 @@ test.describe('模型探测', () => {
     await expect(page.locator('input[data-id="chat-basic"]')).toBeChecked()
   })
 
-  test('渠道 API Key 加密持久化：reload 后仍在，localStorage 无明文', async ({ page }) => {
+  test('渠道 API Key 加密持久化：reload 后仍在，落盘无明文', async ({ page }) => {
     await goto(page, /模型探测/)
     await addChannel(page, { name: '测试渠道', apiKey: 'sk-enc-secret-abc123' })
     await expect(page.locator('div.pr-16', { hasText: '测试渠道' })).toBeVisible()
     await expect(page.getByText('✓ 当前使用')).toBeVisible()
 
-    const stored = await page.evaluate(() => localStorage.getItem('modelprobe-channels'))
-    expect(stored).toBeTruthy()
+    await expect.poll(() => readKv(page, 'modelprobe-channels')).toBeTruthy()
+    const stored = await readKv(page, 'modelprobe-channels')
     expect(stored).not.toContain('sk-enc-secret-abc123')
 
     await page.reload()

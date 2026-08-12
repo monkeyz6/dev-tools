@@ -359,8 +359,11 @@ function JsonTool() {
   const containerRef = useRef<HTMLDivElement>(null)
   const dragRef = useRef<{ startX: number; startW: number } | null>(null)
 
-  const leftFmt = useMemo(() => formatJson(left), [left])
-  const rightFmt = useMemo(() => formatJson(right), [right])
+  // 大 JSON 每次击键都重新 parse/diff 会卡输入：格式化/对比走 deferred 值，输入保持即时响应
+  const deferredLeft = useDeferredValue(left)
+  const deferredRight = useDeferredValue(right)
+  const leftFmt = useMemo(() => formatJson(deferredLeft), [deferredLeft])
+  const rightFmt = useMemo(() => formatJson(deferredRight), [deferredRight])
 
   const diff = useMemo(() => {
     if (!showDiff || !leftFmt.ok || !rightFmt.ok) return undefined
@@ -427,9 +430,9 @@ function JsonTool() {
           <JsonPane paneId="a" value={left} onChange={setLeft} fmt={leftFmt} types={leftTypes}
             placeholder={'{\n  "name": "Alice",\n  "age": 30\n}'} />
         </div>
-        <div onPointerDown={onDividerDown} className="flex-shrink-0"
+        <div onPointerDown={onDividerDown} className="pane-divider flex-shrink-0"
           style={{ width: 10, cursor: 'col-resize', touchAction: 'none', display: 'flex', justifyContent: 'center' }}>
-          <div className="h-full w-px" style={{ background: 'var(--border)' }} />
+          <div className="pane-divider-line h-full w-px" style={{ background: 'var(--border)' }} />
         </div>
         <div className="flex-1 min-w-0 flex flex-col overflow-hidden">
           <JsonPane paneId="b" value={right} onChange={setRight} fmt={rightFmt} types={rightTypes}

@@ -1,8 +1,10 @@
+import { kvGet, kvSet, kvRemove } from '../shared/app-kv'
 import React, { useState, useCallback, useRef, useEffect, useLayoutEffect, useMemo, useDeferredValue } from 'react'
 import { Btn, Label, Card, Badge, CustomInput, CustomSelect, SearchableSelect, CustomTextarea, Toggle, SegmentedControl, SectionTitle, CopyBtn } from '../shared/ui'
 import { highlightJson } from '../shared/json'
 import { decryptLlmApiKey, encryptLlmApiKey } from '../shared/api-key-crypto'
 import { historyDbGetAll, historyDbPutOne, historyDbDeleteOne, historyDbDeleteMany, historyDbClear, historyDbMigrateFromLocalStorage } from '../shared/history-db'
+import { useDebouncedPersist } from '../shared/use-debounced-persist'
 
 // ─── Tool: 模型探测 ─────────────────────────────────────────────────────────────
 // 定位：API 渠道兼容性实验台 —— 三种协议格式 × 参数/流式/缓存/Token 计数稳定性，
@@ -308,17 +310,17 @@ const probeAggregateStatus = (items: { status: ProbeStatus }[]): ProbeStatus => 
 
 function loadProbeCfg(): Record<string, any> {
   if (typeof window === 'undefined') return {}
-  try { return JSON.parse(localStorage.getItem(PROBE_STORAGE_KEY) || '{}') } catch { return {} }
+  try { return JSON.parse(kvGet(PROBE_STORAGE_KEY) || '{}') } catch { return {} }
 }
 function saveProbeCfg(cfg: Record<string, any>) {
-  try { localStorage.setItem(PROBE_STORAGE_KEY, JSON.stringify(cfg)) } catch { /* ignore */ }
+  try { kvSet(PROBE_STORAGE_KEY, JSON.stringify(cfg)) } catch { /* ignore */ }
 }
 
 // ── 持久化：渠道（探测目标）列表 + 当前激活渠道 ──
 function loadProbeChannelsRaw(): ProbeChannel[] {
   if (typeof window === 'undefined') return []
   try {
-    const raw = localStorage.getItem(PROBE_CHANNELS_KEY)
+    const raw = kvGet(PROBE_CHANNELS_KEY)
     if (!raw) return []
     const list = JSON.parse(raw)
     if (!Array.isArray(list)) return []
@@ -328,11 +330,11 @@ function loadProbeChannelsRaw(): ProbeChannel[] {
 }
 function saveProbeChannels(list: ProbeChannel[]) {
   if (typeof window === 'undefined') return
-  try { localStorage.setItem(PROBE_CHANNELS_KEY, JSON.stringify(list)) } catch { /* ignore */ }
+  try { kvSet(PROBE_CHANNELS_KEY, JSON.stringify(list)) } catch { /* ignore */ }
 }
 function loadProbeActiveChId(): string | null {
   if (typeof window === 'undefined') return null
-  try { return localStorage.getItem(PROBE_ACTIVE_CH_KEY) } catch { return null }
+  try { return kvGet(PROBE_ACTIVE_CH_KEY) } catch { return null }
 }
 // 首次加载时的迁移/兜底：老版本的单一配置（modelprobe-config.baseUrl/chatUrl/responsesUrl/anthropicUrl/timeout
 // + modelprobe-key 加密密文）迁移成一条「默认渠道」；密文直接搬运，无需解密重加密（同一套 AES-GCM passphrase）。
@@ -342,7 +344,7 @@ function loadOrMigrateProbeChannels(): { channels: ProbeChannel[]; activeId: str
   if (existing.length > 0) return { channels: existing, activeId: loadProbeActiveChId() }
   const legacy = loadProbeCfg()
   if (!legacy.baseUrl || !String(legacy.baseUrl).trim()) return { channels: [], activeId: null }
-  const legacyKeyEnc = (typeof window !== 'undefined' && localStorage.getItem(PROBE_KEY_STORAGE_KEY)) || ''
+  const legacyKeyEnc = (typeof window !== 'undefined' && kvGet(PROBE_KEY_STORAGE_KEY)) || ''
   const ch: ProbeChannel = {
     id: 'ch' + Date.now().toString(36) + Math.random().toString(36).slice(2, 7),
     name: '默认渠道',
@@ -355,7 +357,7 @@ function loadOrMigrateProbeChannels(): { channels: ProbeChannel[]; activeId: str
     keyMask: legacyKeyEnc ? '（已加密，未展示）' : '',
   }
   saveProbeChannels([ch])
-  try { localStorage.setItem(PROBE_ACTIVE_CH_KEY, ch.id) } catch { /* ignore */ }
+  try { kvSet(PROBE_ACTIVE_CH_KEY, ch.id) } catch { /* ignore */ }
   return { channels: [ch], activeId: ch.id }
 }
 
@@ -579,6 +581,160 @@ function ProbeFormatCard({ t, checked, disabled, status, onChange }: {
   )
 }
 
+// ─── Panes：按区域拆分的 memo 子组件 ─────────────────────────────────────────
+// 探测运行期间 setStatuses/setProgress/setLogs 高频触发，左侧配置栏与渠道管理
+// 面板的 props 在运行中保持不变，memo 后整体跳过重渲染。
+
+type ProbeChFormState = { name: string; baseUrl: string; timeoutSec: string; chatUrl: string; responsesUrl: string; anthropicUrl: string; apiKey: string }
+type ProbeConnResult = { ok: boolean; status: number | null; ms: number; err: string } | null
+
+const ProbeConfigPane = React.memo(function ProbeConfigPane({
+  channels, activeChId, onActiveChId, model, onModel,
+  randomString, onRandomString, onRegenRandom, tokenRuns, onTokenRuns,
+  running, connRunning, connResults, startErr, onTestConnection,
+}: {
+  channels: ProbeChannel[]; activeChId: string | null; onActiveChId: (v: string) => void
+  model: string; onModel: (v: string) => void
+  randomString: string; onRandomString: (v: string) => void; onRegenRandom: () => void
+  tokenRuns: string; onTokenRuns: (v: string) => void
+  running: boolean; connRunning: boolean; connResults: Record<ProbeFormat, ProbeConnResult>
+  startErr: string; onTestConnection: () => void
+}) {
+  const hasActiveChannel = channels.some(c => c.id === activeChId)
+  return (
+    <div className="w-72 flex-shrink-0 flex flex-col p-4 gap-3.5 overflow-y-auto" style={{ borderRight: '1px solid var(--border)', background: 'var(--s1)' }}>
+      <div>
+        <Label className="block mb-1.5">使用渠道</Label>
+        <CustomSelect value={activeChId ?? ''} onChange={onActiveChId}
+          options={channels.map(c => ({ value: c.id, label: c.name }))} />
+        {channels.length === 0 && <p className="text-xs mt-1.5" style={{ color: 'var(--warn)' }}>⚠ 请先到「渠道管理」添加渠道。</p>}
+      </div>
+      <div>
+        <Label className="block mb-1.5">模型名称</Label>
+        <CustomInput value={model} onChange={onModel} placeholder="gpt-4o-mini / deepseek-chat" />
+      </div>
+
+      <div style={{ borderTop: '1px solid var(--border)', paddingTop: 14 }}>
+        <div className="flex items-center justify-between mb-2">
+          <Label className="block">连接测试</Label>
+          <Btn small variant="soft" onClick={onTestConnection} disabled={running || connRunning || !hasActiveChannel || !model.trim()}>
+            {connRunning ? '测试中…' : '测试连接'}
+          </Btn>
+        </div>
+        <div className="space-y-1.5">
+          {(['chat', 'responses', 'anthropic'] as ProbeFormat[]).map(f => {
+            const r = connResults[f]
+            if (!r) return null
+            const color = r.ok ? 'var(--ok)' : 'var(--err)'
+            const bg = r.ok ? 'var(--okBg)' : 'var(--errBg)'
+            return (
+              <div key={f} data-conn={f} className="flex items-center gap-2 rounded-lg px-2.5 py-1.5 text-xs"
+                style={{ background: bg, color: 'var(--text)' }}>
+                <span className="font-semibold flex-shrink-0" style={{ color }}>{PROBE_FORMAT_LABELS[f]}</span>
+                <span className="ml-auto font-mono text-[11px] truncate" style={{ color, fontFamily: PROBE_MONO }}>
+                  {r.ok ? `✓ ${r.ms} ms` : `✗ ${(r.status ?? r.err) || '失败'}`}{!r.ok && r.err ? ` · ${r.err.length > 18 ? r.err.slice(0, 18) + '…' : r.err}` : ''}
+                </span>
+              </div>
+            )
+          })}
+        </div>
+      </div>
+
+      <div style={{ borderTop: '1px solid var(--border)', paddingTop: 14 }}>
+        <Label className="block mb-1.5">Token 稳定性配置</Label>
+        <div className="flex gap-2">
+          <CustomInput value={randomString} onChange={onRandomString} mono placeholder="FIXED-XXXX" />
+          <Btn small variant="soft" onClick={onRegenRandom} title="重新生成随机字符串">↻</Btn>
+        </div>
+        <div className="mt-2.5">
+          <Label className="block mb-1.5">重复请求次数</Label>
+          <CustomInput value={tokenRuns} onChange={onTokenRuns} type="number" placeholder="3" />
+        </div>
+      </div>
+
+      {startErr && <p className="text-xs whitespace-pre-wrap" style={{ color: 'var(--err)' }}>{startErr}</p>}
+      <p className="text-[11px] leading-4" style={{ color: 'var(--t3)' }}>密钥仅以加密形式保存于本浏览器。请确认目标 API 允许浏览器跨域访问。</p>
+    </div>
+  )
+})
+
+const ProbeChannelsPane = React.memo(function ProbeChannelsPane({
+  chNotice, channels, activeChId, chForm, editingChId,
+  onSetActive, onEdit, onDelete, onSave, onChFormChange, onClearForm,
+}: {
+  chNotice: string; channels: ProbeChannel[]; activeChId: string | null
+  chForm: ProbeChFormState; editingChId: string | null
+  onSetActive: (id: string) => void; onEdit: (c: ProbeChannel) => void; onDelete: (id: string) => void
+  onSave: () => void; onChFormChange: React.Dispatch<React.SetStateAction<ProbeChFormState>>; onClearForm: () => void
+}) {
+  return (
+    <div className="p-5 flex flex-col gap-4">
+      {chNotice && <p className="text-xs" style={{ color: 'var(--accent)' }}>{chNotice}</p>}
+      <Card>
+        <p className="text-sm font-bold mb-3" style={{ color: 'var(--text)' }}>
+          已保存的渠道 <span className="inline-flex items-center justify-center rounded-full px-2 py-0.5 text-xs font-bold ml-1" style={{ background: 'var(--accentSub)', color: 'var(--accent)' }}>{channels.length}</span>
+        </p>
+        {channels.length === 0 && <p className="text-xs mb-3" style={{ color: 'var(--t3)' }}>还没有渠道，请在下方添加。</p>}
+        <div className="grid grid-cols-1 xl:grid-cols-2 gap-3">
+          {channels.map(c => (
+            <div key={c.id} className="rounded-2xl p-4 relative" style={{ border: `1px solid ${c.id === activeChId ? 'var(--accent)' : 'var(--border)'}`, background: c.id === activeChId ? 'var(--accentSub)' : 'var(--s1)' }}>
+              {c.id === activeChId && <span className="absolute top-3 right-4 text-[11px] font-bold" style={{ color: 'var(--accent)' }}>✓ 当前使用</span>}
+              <div className="text-sm font-bold pr-16 truncate" style={{ color: 'var(--text)' }}>{c.name}</div>
+              <div className="text-xs break-all mt-1" style={{ color: 'var(--t3)' }}>{c.baseUrl}</div>
+              <div className="text-[11px] mt-0.5" style={{ color: 'var(--t3)' }}>超时 {c.timeoutSec}s</div>
+              {(c.chatUrl || c.responsesUrl || c.anthropicUrl) && (
+                <div className="text-[11px] mt-0.5" style={{ color: 'var(--t3)' }}>
+                  已独立配置：{[c.chatUrl && 'Chat', c.responsesUrl && 'Responses', c.anthropicUrl && 'Anthropic'].filter(Boolean).join(' / ')}
+                </div>
+              )}
+              <div className="text-[11px] font-mono mt-1" style={{ color: 'var(--t3)' }}>{c.keyMask || '（未设置）'}</div>
+              <div className="flex gap-2 mt-3">
+                <Btn small variant="soft" onClick={() => onSetActive(c.id)}>设为当前</Btn>
+                <Btn small variant="soft" onClick={() => onEdit(c)}>编辑</Btn>
+                <Btn small variant="danger" onClick={() => onDelete(c.id)}>删除</Btn>
+              </div>
+            </div>
+          ))}
+        </div>
+      </Card>
+      <Card>
+        <p className="text-sm font-bold mb-3" style={{ color: 'var(--text)' }}>{editingChId ? '编辑渠道' : '添加新渠道'}</p>
+        <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+          <div>
+            <Label className="block mb-1.5">渠道名称</Label>
+            <CustomInput value={chForm.name} onChange={v => onChFormChange(f => ({ ...f, name: v }))} placeholder="例如：主线-OpenAI 兼容网关" />
+          </div>
+          <div>
+            <Label className="block mb-1.5">Base URL</Label>
+            <CustomInput value={chForm.baseUrl} onChange={v => onChFormChange(f => ({ ...f, baseUrl: v }))} placeholder="https://api.openai.com" mono />
+          </div>
+          <div>
+            <Label className="block mb-1.5">请求超时（秒）</Label>
+            <CustomInput value={chForm.timeoutSec} onChange={v => onChFormChange(f => ({ ...f, timeoutSec: v }))} type="number" placeholder="60" />
+          </div>
+          <div>
+            <Label className="block mb-1.5">apiKey {editingChId ? '（留空保持不变，本地加密存储）' : ''}</Label>
+            <CustomInput value={chForm.apiKey} onChange={v => onChFormChange(f => ({ ...f, apiKey: v }))} type="password" placeholder="sk-xxxxxxxx" mono />
+          </div>
+        </div>
+        <div className="mt-3">
+          <Label className="block mb-1.5">三种协议独立接入地址（可选，留空则回退默认）</Label>
+          <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+            <CustomInput value={chForm.chatUrl} onChange={v => onChFormChange(f => ({ ...f, chatUrl: v }))} placeholder={`${PROBE_FORMAT_LABELS.chat} Base URL`} mono />
+            <CustomInput value={chForm.responsesUrl} onChange={v => onChFormChange(f => ({ ...f, responsesUrl: v }))} placeholder={`${PROBE_FORMAT_LABELS.responses} Base URL`} mono />
+            <CustomInput value={chForm.anthropicUrl} onChange={v => onChFormChange(f => ({ ...f, anthropicUrl: v }))} placeholder={`${PROBE_FORMAT_LABELS.anthropic} Base URL`} mono />
+          </div>
+        </div>
+        <div className="flex items-center gap-3 mt-4 flex-wrap">
+          <Btn variant="primary" onClick={onSave}>保存渠道</Btn>
+          <Btn variant="soft" onClick={onClearForm}>清空表单</Btn>
+          <span className="text-[11px]" style={{ color: 'var(--t3)' }}>渠道信息保存在本浏览器 IndexedDB 中（apiKey 经 AES-GCM 加密）。</span>
+        </div>
+      </Card>
+    </div>
+  )
+})
+
 function ModelProbeTool() {
   const cfg0 = loadProbeCfg()
   const [model, setModel] = useState(cfg0.model ?? '')
@@ -601,7 +757,7 @@ function ModelProbeTool() {
   const selectedRef = useRef(selected)
   useEffect(() => { selectedRef.current = selected }, [selected])
 
-  useEffect(() => {
+  useDebouncedPersist(() => {
     saveProbeCfg({ model, randomString, tokenRuns, selected })
   }, [model, randomString, tokenRuns, selected])
 
@@ -609,14 +765,21 @@ function ModelProbeTool() {
   useEffect(() => {
     if (typeof window === 'undefined') return
     try {
-      if (activeChId) localStorage.setItem(PROBE_ACTIVE_CH_KEY, activeChId)
-      else localStorage.removeItem(PROBE_ACTIVE_CH_KEY)
+      if (activeChId) kvSet(PROBE_ACTIVE_CH_KEY, activeChId)
+      else kvRemove(PROBE_ACTIVE_CH_KEY)
     } catch { /* ignore */ }
   }, [activeChId])
 
-  const chToast = (m: string) => { setChNotice(m); setTimeout(() => setChNotice(''), 2200) }
+  const chNoticeTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const chNoticeFor = (m: string, ms: number) => {
+    setChNotice(m)
+    if (chNoticeTimer.current) clearTimeout(chNoticeTimer.current)
+    chNoticeTimer.current = setTimeout(() => { chNoticeTimer.current = null; setChNotice('') }, ms)
+  }
+  useEffect(() => () => { if (chNoticeTimer.current) clearTimeout(chNoticeTimer.current) }, [])
+  const chToast = (m: string) => chNoticeFor(m, 2200)
 
-  const saveChannel = async () => {
+  const saveChannel = useCallback(async () => {
     const name = chForm.name.trim()
     const base = chForm.baseUrl.trim().replace(/\/+$/, '')
     const timeoutSecVal = chForm.timeoutSec.trim() || '60'
@@ -648,18 +811,24 @@ function ModelProbeTool() {
     setChForm({ name: '', baseUrl: '', timeoutSec: '60', chatUrl: '', responsesUrl: '', anthropicUrl: '', apiKey: '' })
     setEditingChId(null)
     chToast('已保存')
-  }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [chForm, editingChId, channels, activeChId])
 
-  const editChannel = (c: ProbeChannel) => {
+  const editChannel = useCallback((c: ProbeChannel) => {
     setChForm({ name: c.name, baseUrl: c.baseUrl, timeoutSec: c.timeoutSec, chatUrl: c.chatUrl, responsesUrl: c.responsesUrl, anthropicUrl: c.anthropicUrl, apiKey: '' })
     setEditingChId(c.id)
-  }
+  }, [])
 
-  const delChannel = (id: string) => {
+  const delChannel = useCallback((id: string) => {
     if (!window.confirm('删除该渠道？')) return
-    setChannels(channels.filter(c => c.id !== id))
-    if (activeChId === id) setActiveChId(null)
-  }
+    setChannels(prev => prev.filter(c => c.id !== id))
+    setActiveChId(prev => (prev === id ? null : prev))
+  }, [])
+
+  const clearChForm = useCallback(() => {
+    setChForm({ name: '', baseUrl: '', timeoutSec: '60', chatUrl: '', responsesUrl: '', anthropicUrl: '', apiKey: '' })
+    setEditingChId(null)
+  }, [])
 
   const [pane, setPane] = useState<'live' | 'logs' | 'report' | 'history' | 'channels'>('live')
   const [running, setRunning] = useState(false)
@@ -952,6 +1121,11 @@ function ModelProbeTool() {
     }
   }
 
+  // memo 子组件需要稳定的回调引用：latest-ref 包装，避免给复杂闭包逐一维护依赖数组
+  const testConnectionRef = useRef<() => void>(() => {})
+  const onTestConnection = useCallback(() => testConnectionRef.current(), [])
+  const regenRandom = useCallback(() => setRandomString(probeMakeRandom()), [])
+
   const testConnection = async () => {
     const ch = activeChannel
     if (!ch || !model.trim()) {
@@ -1010,6 +1184,7 @@ function ModelProbeTool() {
     }))
     setConnRunning(false)
   }
+  testConnectionRef.current = testConnection
 
   const runProbe = async (name: string) => {
     const ch = activeChannel
@@ -1176,7 +1351,7 @@ function ModelProbeTool() {
     if (matched) {
       setActiveChId(matched.id)
       setPane('live')
-      setChNotice(`已回填模型「${rep.target.model}」，并切换到渠道「${matched.name}」。`)
+      chNoticeFor(`已回填模型「${rep.target.model}」，并切换到渠道「${matched.name}」。`, 4000)
     } else {
       setChForm({
         name: '', baseUrl: rep.target.baseUrl, timeoutSec: '60',
@@ -1185,9 +1360,8 @@ function ModelProbeTool() {
       })
       setEditingChId(null)
       setPane('channels')
-      setChNotice(`已从历史报告带入 Base URL 到「渠道管理」新增表单，请补充 API Key 后保存。`)
+      chNoticeFor('已从历史报告带入 Base URL 到「渠道管理」新增表单，请补充 API Key 后保存。', 4000)
     }
-    setTimeout(() => setChNotice(''), 4000)
   }
 
   useEffect(() => {
@@ -1339,59 +1513,14 @@ function ModelProbeTool() {
 
       <div className="flex-1 flex overflow-hidden">
         {/* 左侧配置栏 */}
-        <div className="w-72 flex-shrink-0 flex flex-col p-4 gap-3.5 overflow-y-auto" style={{ borderRight: '1px solid var(--border)', background: 'var(--s1)' }}>
-          <div>
-            <Label className="block mb-1.5">使用渠道</Label>
-            <CustomSelect value={activeChId ?? ''} onChange={v => setActiveChId(v)}
-              options={channels.map(c => ({ value: c.id, label: c.name }))} />
-            {channels.length === 0 && <p className="text-xs mt-1.5" style={{ color: 'var(--warn)' }}>⚠ 请先到「渠道管理」添加渠道。</p>}
-          </div>
-          <div>
-            <Label className="block mb-1.5">模型名称</Label>
-            <CustomInput value={model} onChange={setModel} placeholder="gpt-4o-mini / deepseek-chat" />
-          </div>
-
-          <div style={{ borderTop: '1px solid var(--border)', paddingTop: 14 }}>
-            <div className="flex items-center justify-between mb-2">
-              <Label className="block">连接测试</Label>
-              <Btn small variant="soft" onClick={testConnection} disabled={running || connRunning || !activeChannel || !model.trim()}>
-                {connRunning ? '测试中…' : '测试连接'}
-              </Btn>
-            </div>
-            <div className="space-y-1.5">
-              {(['chat', 'responses', 'anthropic'] as ProbeFormat[]).map(f => {
-                const r = connResults[f]
-                if (!r) return null
-                const color = r.ok ? 'var(--ok)' : 'var(--err)'
-                const bg = r.ok ? 'var(--okBg)' : 'var(--errBg)'
-                return (
-                  <div key={f} data-conn={f} className="flex items-center gap-2 rounded-lg px-2.5 py-1.5 text-xs"
-                    style={{ background: bg, color: 'var(--text)' }}>
-                    <span className="font-semibold flex-shrink-0" style={{ color }}>{PROBE_FORMAT_LABELS[f]}</span>
-                    <span className="ml-auto font-mono text-[11px] truncate" style={{ color, fontFamily: PROBE_MONO }}>
-                      {r.ok ? `✓ ${r.ms} ms` : `✗ ${(r.status ?? r.err) || '失败'}`}{!r.ok && r.err ? ` · ${r.err.length > 18 ? r.err.slice(0, 18) + '…' : r.err}` : ''}
-                    </span>
-                  </div>
-                )
-              })}
-            </div>
-          </div>
-
-          <div style={{ borderTop: '1px solid var(--border)', paddingTop: 14 }}>
-            <Label className="block mb-1.5">Token 稳定性配置</Label>
-            <div className="flex gap-2">
-              <CustomInput value={randomString} onChange={setRandomString} mono placeholder="FIXED-XXXX" />
-              <Btn small variant="soft" onClick={() => setRandomString(probeMakeRandom())} title="重新生成随机字符串">↻</Btn>
-            </div>
-            <div className="mt-2.5">
-              <Label className="block mb-1.5">重复请求次数</Label>
-              <CustomInput value={tokenRuns} onChange={setTokenRuns} type="number" placeholder="3" />
-            </div>
-          </div>
-
-          {startErr && <p className="text-xs whitespace-pre-wrap" style={{ color: 'var(--err)' }}>{startErr}</p>}
-          <p className="text-[11px] leading-4" style={{ color: 'var(--t3)' }}>密钥仅以加密形式保存于本浏览器。请确认目标 API 允许浏览器跨域访问。</p>
-        </div>
+        <ProbeConfigPane
+          channels={channels} activeChId={activeChId} onActiveChId={setActiveChId}
+          model={model} onModel={setModel}
+          randomString={randomString} onRandomString={setRandomString} onRegenRandom={regenRandom}
+          tokenRuns={tokenRuns} onTokenRuns={setTokenRuns}
+          running={running} connRunning={connRunning} connResults={connResults}
+          startErr={startErr} onTestConnection={onTestConnection}
+        />
 
         {/* 右侧结果区 */}
         <div className="flex-1 flex flex-col overflow-hidden">
@@ -1565,70 +1694,12 @@ function ModelProbeTool() {
             )}
 
             {pane === 'channels' && (
-              <div className="p-5 flex flex-col gap-4">
-                {chNotice && <p className="text-xs" style={{ color: 'var(--accent)' }}>{chNotice}</p>}
-                <Card>
-                  <p className="text-sm font-bold mb-3" style={{ color: 'var(--text)' }}>
-                    已保存的渠道 <span className="inline-flex items-center justify-center rounded-full px-2 py-0.5 text-xs font-bold ml-1" style={{ background: 'var(--accentSub)', color: 'var(--accent)' }}>{channels.length}</span>
-                  </p>
-                  {channels.length === 0 && <p className="text-xs mb-3" style={{ color: 'var(--t3)' }}>还没有渠道，请在下方添加。</p>}
-                  <div className="grid grid-cols-1 xl:grid-cols-2 gap-3">
-                    {channels.map(c => (
-                      <div key={c.id} className="rounded-2xl p-4 relative" style={{ border: `1px solid ${c.id === activeChId ? 'var(--accent)' : 'var(--border)'}`, background: c.id === activeChId ? 'var(--accentSub)' : 'var(--s1)' }}>
-                        {c.id === activeChId && <span className="absolute top-3 right-4 text-[11px] font-bold" style={{ color: 'var(--accent)' }}>✓ 当前使用</span>}
-                        <div className="text-sm font-bold pr-16 truncate" style={{ color: 'var(--text)' }}>{c.name}</div>
-                        <div className="text-xs break-all mt-1" style={{ color: 'var(--t3)' }}>{c.baseUrl}</div>
-                        <div className="text-[11px] mt-0.5" style={{ color: 'var(--t3)' }}>超时 {c.timeoutSec}s</div>
-                        {(c.chatUrl || c.responsesUrl || c.anthropicUrl) && (
-                          <div className="text-[11px] mt-0.5" style={{ color: 'var(--t3)' }}>
-                            已独立配置：{[c.chatUrl && 'Chat', c.responsesUrl && 'Responses', c.anthropicUrl && 'Anthropic'].filter(Boolean).join(' / ')}
-                          </div>
-                        )}
-                        <div className="text-[11px] font-mono mt-1" style={{ color: 'var(--t3)' }}>{c.keyMask || '（未设置）'}</div>
-                        <div className="flex gap-2 mt-3">
-                          <Btn small variant="soft" onClick={() => setActiveChId(c.id)}>设为当前</Btn>
-                          <Btn small variant="soft" onClick={() => editChannel(c)}>编辑</Btn>
-                          <Btn small variant="danger" onClick={() => delChannel(c.id)}>删除</Btn>
-                        </div>
-                      </div>
-                    ))}
-                  </div>
-                </Card>
-                <Card>
-                  <p className="text-sm font-bold mb-3" style={{ color: 'var(--text)' }}>{editingChId ? '编辑渠道' : '添加新渠道'}</p>
-                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-                    <div>
-                      <Label className="block mb-1.5">渠道名称</Label>
-                      <CustomInput value={chForm.name} onChange={v => setChForm(f => ({ ...f, name: v }))} placeholder="例如：主线-OpenAI 兼容网关" />
-                    </div>
-                    <div>
-                      <Label className="block mb-1.5">Base URL</Label>
-                      <CustomInput value={chForm.baseUrl} onChange={v => setChForm(f => ({ ...f, baseUrl: v }))} placeholder="https://api.openai.com" mono />
-                    </div>
-                    <div>
-                      <Label className="block mb-1.5">请求超时（秒）</Label>
-                      <CustomInput value={chForm.timeoutSec} onChange={v => setChForm(f => ({ ...f, timeoutSec: v }))} type="number" placeholder="60" />
-                    </div>
-                    <div>
-                      <Label className="block mb-1.5">apiKey {editingChId ? '（留空保持不变，本地加密存储）' : ''}</Label>
-                      <CustomInput value={chForm.apiKey} onChange={v => setChForm(f => ({ ...f, apiKey: v }))} type="password" placeholder="sk-xxxxxxxx" mono />
-                    </div>
-                  </div>
-                  <div className="mt-3">
-                    <Label className="block mb-1.5">三种协议独立接入地址（可选，留空则回退默认）</Label>
-                    <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
-                      <CustomInput value={chForm.chatUrl} onChange={v => setChForm(f => ({ ...f, chatUrl: v }))} placeholder={`${PROBE_FORMAT_LABELS.chat} Base URL`} mono />
-                      <CustomInput value={chForm.responsesUrl} onChange={v => setChForm(f => ({ ...f, responsesUrl: v }))} placeholder={`${PROBE_FORMAT_LABELS.responses} Base URL`} mono />
-                      <CustomInput value={chForm.anthropicUrl} onChange={v => setChForm(f => ({ ...f, anthropicUrl: v }))} placeholder={`${PROBE_FORMAT_LABELS.anthropic} Base URL`} mono />
-                    </div>
-                  </div>
-                  <div className="flex items-center gap-3 mt-4 flex-wrap">
-                    <Btn variant="primary" onClick={saveChannel}>保存渠道</Btn>
-                    <Btn variant="soft" onClick={() => { setChForm({ name: '', baseUrl: '', timeoutSec: '60', chatUrl: '', responsesUrl: '', anthropicUrl: '', apiKey: '' }); setEditingChId(null) }}>清空表单</Btn>
-                    <span className="text-[11px]" style={{ color: 'var(--t3)' }}>渠道信息保存在本浏览器 localStorage 中（apiKey 经 AES-GCM 加密）。</span>
-                  </div>
-                </Card>
-              </div>
+              <ProbeChannelsPane
+                chNotice={chNotice} channels={channels} activeChId={activeChId}
+                chForm={chForm} editingChId={editingChId}
+                onSetActive={setActiveChId} onEdit={editChannel} onDelete={delChannel}
+                onSave={saveChannel} onChFormChange={setChForm} onClearForm={clearChForm}
+              />
             )}
           </div>
         </div>

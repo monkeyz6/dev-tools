@@ -1,3 +1,4 @@
+import { kvGet, kvSet, kvRemove } from '../shared/app-kv'
 import React, { useState, useCallback, useRef, useEffect, useLayoutEffect, useMemo, useDeferredValue } from 'react'
 import { Btn, Label, Card, Badge, CustomInput, CustomSelect, SearchableSelect, CustomTextarea, Toggle, SegmentedControl, SectionTitle, CopyBtn } from '../shared/ui'
 import { decodeB64, encodeB64 } from '../shared/base64'
@@ -6,14 +7,14 @@ import { decodeB64, encodeB64 } from '../shared/base64'
 
 function loadBase64Opts(): { urlSafe: boolean; lenient: boolean } {
   try {
-    const raw = localStorage.getItem('base64-opts')
+    const raw = kvGet('base64-opts')
     if (!raw) return { urlSafe: false, lenient: true }
     const p = JSON.parse(raw)
     return { urlSafe: !!p.urlSafe, lenient: p.lenient !== false }
   } catch { return { urlSafe: false, lenient: true } }
 }
 function saveBase64Opts(o: { urlSafe: boolean; lenient: boolean }) {
-  try { localStorage.setItem('base64-opts', JSON.stringify(o)) } catch { /* ignore */ }
+  try { kvSet('base64-opts', JSON.stringify(o)) } catch { /* ignore */ }
 }
 
 function Base64Tool() {
