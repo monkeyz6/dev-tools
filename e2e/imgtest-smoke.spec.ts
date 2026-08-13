@@ -283,7 +283,7 @@ test('隐藏价格开关生效，且导出的 HTML 报告不含任何价格信�
   // 导出的 HTML 报告也不得包含任何价格信息（与开关状态无关，恒不含）
   const [download] = await Promise.all([
     page.waitForEvent('download'),
-    page.getByRole('button', { name: '⬇ 导出 HTML' }).click(),
+    page.getByRole('button', { name: '导出 HTML' }).click(),
   ])
   const { readFileSync } = await import('node:fs')
   const content = readFileSync(await download.path(), 'utf8')

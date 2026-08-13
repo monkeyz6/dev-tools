@@ -43,17 +43,35 @@ test('导出图片和 HTML 报告：成功生成、离线可渲染，且不含�
 
   // 「历史记录」详情弹窗：已发送的请求体默认展开（不用点），响应头保持折叠
   await page.getByRole('button', { name: /历史记录/ }).click()
+  const histPng = page.getByRole('button', { name: '导出 PNG' })
+  const histHtml = page.getByRole('button', { name: '导出 HTML' })
+  await expect(histPng).toBeVisible()
+  await expect(histHtml).toBeVisible()
+  await expect(histPng).toBeDisabled()
+  await expect(histHtml).toBeDisabled()
+  await expect(page.getByRole('button', { name: /导出选中|⬇/ })).toHaveCount(0)
+  await page.locator('tbody input[type="checkbox"]').first().check()
+  await expect(histPng).toBeEnabled()
+  await expect(histHtml).toBeEnabled()
+  await expect(histPng).toHaveText('导出 PNG')
+  await expect(histHtml).toHaveText('导出 HTML')
+
   await page.getByRole('button', { name: '详情' }).click()
+  await expect(page.getByText('测试记录详情')).toBeVisible()
+  await expect(page.getByRole('button', { name: '导出 PNG' })).toHaveCount(2) // 历史工具条 + 详情
   await expect(page.getByText('已发送的请求体', { exact: false })).toBeVisible()
   await expect(page.getByText('"model"', { exact: false }).first()).toBeVisible() // 请求体内容不用点开就可见
   await expect(page.locator('pre[data-response-body]')).toBeHidden() // 响应体仍保持折叠
   await page.getByRole('button', { name: '×' }).click()
   await page.getByRole('button', { name: '批量测试', exact: true }).click()
+  await expect(page.getByRole('button', { name: '导出 PNG' })).toBeEnabled()
+  await expect(page.getByRole('button', { name: '导出 HTML' })).toBeEnabled()
+  await expect(page.getByRole('button', { name: /⬇ 导出|导出图片/ })).toHaveCount(0)
 
   // 导出图片：能拿到下载即说明 html2canvas 截图成功（失败会走 catch 弹 alert，不会触发下载）
   const [pngDownload] = await Promise.all([
     page.waitForEvent('download'),
-    page.getByRole('button', { name: '⬇ 导出图片' }).click(),
+    page.getByRole('button', { name: '导出 PNG' }).click(),
   ])
   const pngPath = '/tmp/imgtest-export-test.png'
   await pngDownload.saveAs(pngPath)
@@ -65,7 +83,7 @@ test('导出图片和 HTML 报告：成功生成、离线可渲染，且不含�
   // 导出 HTML
   const [htmlDownload] = await Promise.all([
     page.waitForEvent('download'),
-    page.getByRole('button', { name: '⬇ 导出 HTML' }).click(),
+    page.getByRole('button', { name: '导出 HTML' }).click(),
   ])
   const htmlPath = '/tmp/imgtest-export-test.html'
   await htmlDownload.saveAs(htmlPath)

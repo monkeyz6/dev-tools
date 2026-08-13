@@ -653,6 +653,133 @@ textarea:focus-visible { outline: none; }
   opacity: 1;
 }
 
+/* 报告结果卡片：中性白卡（同 .surface-card 观感），状态只由圆点 + 彩字表达；
+   弹性悬停/按压 + 错峰进场。不复用 .surface-card 是为了保留自定义动效与 --i 延迟。 */
+.probe-tile {
+  position: relative;
+  cursor: pointer;
+  color: inherit;
+  font: inherit;
+  background: var(--surface);
+  border: 1px solid color-mix(in srgb, var(--surfaceEdge) 76%, var(--border));
+  box-shadow: var(--shadow), inset 0 1px 0 color-mix(in srgb, var(--surfaceEdge) 82%, transparent);
+  -webkit-backdrop-filter: blur(22px) saturate(165%);
+  backdrop-filter: blur(22px) saturate(165%);
+  transition:
+    transform 0.4s var(--ease-spring),
+    box-shadow 0.3s var(--ease-fluid);
+  animation: item-enter 0.46s var(--ease-fluid) calc(var(--i, 0) * 35ms) backwards;
+}
+.probe-tile::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  border-radius: inherit;
+  background: radial-gradient(420px circle at 12% -12%, var(--surfaceGlow), transparent 64%);
+  opacity: 0.22;
+  pointer-events: none;
+  transition: opacity 0.32s ease-out;
+}
+.probe-tile:active {
+  transform: scale(0.97);
+  transition-duration: 0.12s;
+  transition-timing-function: var(--ease-press);
+}
+@media (hover: hover) and (pointer: fine) {
+  .probe-tile:hover {
+    transform: translateY(-3px) scale(1.004);
+    box-shadow: var(--shadowHover), inset 0 1px 0 var(--surfaceEdge);
+  }
+  .probe-tile:hover::before { opacity: 0.52; }
+  .probe-tile:hover:active {
+    transform: scale(0.97);
+  }
+}
+
+/* 状态圆点 + 彩色文字（卡片内替代胶囊徽标） */
+.probe-status-text {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  font-weight: 600;
+  white-space: nowrap;
+}
+.probe-status-text::before {
+  content: "";
+  width: 7px;
+  height: 7px;
+  border-radius: 999px;
+  background: currentColor;
+  box-shadow: 0 0 8px currentColor;
+  flex-shrink: 0;
+}
+.probe-status-text.is-passed { color: var(--ok); }
+.probe-status-text.is-failed { color: var(--err); }
+.probe-status-text.is-unsupported { color: var(--warn); }
+
+/* 报告详情弹窗：缩放淡入带轻微回弹（reduced-motion 时全局规则会把时长压到 0.01ms） */
+.probe-sheet-enter { animation: probe-sheet-in 0.4s var(--ease-spring) both; }
+@keyframes probe-sheet-in {
+  from { opacity: 0; transform: translateY(10px) scale(0.95); }
+  to { opacity: 1; transform: none; }
+}
+
+/* 代码块右上角常驻复制图标：半透明底钉在可视区右上角（外层 wrapper 不滚、pre 滚） */
+.probe-copy-btn {
+  position: absolute;
+  top: 8px;
+  right: 8px;
+  z-index: 2;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 26px;
+  height: 26px;
+  padding: 0;
+  border-radius: 8px;
+  border: 1px solid var(--border);
+  background: color-mix(in srgb, var(--code) 72%, transparent);
+  -webkit-backdrop-filter: blur(6px);
+  backdrop-filter: blur(6px);
+  color: var(--t3);
+  cursor: pointer;
+  transition:
+    transform 0.4s var(--ease-spring),
+    color 0.2s ease-out,
+    background 0.2s ease-out,
+    border-color 0.2s ease-out;
+}
+.probe-copy-btn:hover {
+  color: var(--accent);
+  background: color-mix(in srgb, var(--accentSub) 80%, var(--code));
+  border-color: color-mix(in srgb, var(--accent) 32%, var(--border));
+}
+.probe-copy-btn:active {
+  transform: scale(0.9);
+  transition-duration: 0.12s;
+  transition-timing-function: var(--ease-press);
+}
+.probe-copy-btn.is-ok {
+  color: var(--ok);
+  background: var(--okBg);
+  border-color: color-mix(in srgb, var(--ok) 36%, var(--border));
+}
+.probe-copy-btn svg { width: 14px; height: 14px; display: block; }
+
+@media (prefers-reduced-motion: reduce) {
+  .probe-tile, .probe-tile:hover, .probe-tile:active { transform: none !important; animation: none !important; }
+  .probe-sheet-enter { animation: tt-in 0.12s ease-out both; }
+  .probe-copy-btn:active { transform: none; }
+}
+@media (prefers-reduced-transparency: reduce) {
+  .probe-tile { background: var(--bg); -webkit-backdrop-filter: none; backdrop-filter: none; }
+  .probe-copy-btn { background: var(--code); -webkit-backdrop-filter: none; backdrop-filter: none; }
+}
+@media (prefers-contrast: more) {
+  .probe-tile { background: color-mix(in srgb, var(--bg) 96%, transparent); border-color: var(--borderHard); }
+}
+
 /* ─── GraphQL Syntax Highlight ──────────────────────────────────────────── */
 
 .gql-keyword   { color: var(--jKey); font-weight: 500; }

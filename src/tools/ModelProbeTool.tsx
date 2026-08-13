@@ -5,6 +5,7 @@ import { highlightJson } from '../shared/json'
 import { decryptLlmApiKey, encryptLlmApiKey } from '../shared/api-key-crypto'
 import { historyDbGetAll, historyDbPutOne, historyDbDeleteOne, historyDbDeleteMany, historyDbClear, historyDbMigrateFromLocalStorage } from '../shared/history-db'
 import { useDebouncedPersist } from '../shared/use-debounced-persist'
+import { downloadProbeReportHtml } from './ModelProbeExport'
 
 // ─── Tool: 模型探测 ─────────────────────────────────────────────────────────────
 // 定位：API 渠道兼容性实验台 —— 三种协议格式 × 参数/流式/缓存/Token 计数稳定性，
@@ -122,7 +123,7 @@ const PROBE_TESTS: ProbeTestDef[] = [
   { id: 'reasoning_effort', group: '参数与特性', name: 'reasoning_effort', desc: '推理强度参数支持情况', explain: 'reasoning_effort（low/medium/high）仅推理模型支持，普通模型通常会报参数错误。', kind: 'parameter' },
   { id: 'max_tokens', group: '参数与特性', name: 'Token 上限参数', desc: 'max_completion_tokens / max_output_tokens / max_tokens', explain: '三种协议对 Token 上限参数的命名不同，验证目标渠道是否接受对应写法。', kind: 'parameter' },
   { id: 'structured_output', group: '参数与特性', name: '结构化输出', desc: 'JSON Schema / response_format 支持情况', explain: '结构化输出要求模型严格按 Schema 返回；Anthropic 原生无此参数，直接判为不支持。', kind: 'parameter' },
-  { id: 'tool_calling', group: '参数与特性', name: '工具调用', desc: 'function calling / tool use 能力', explain: '工具调用需要请求体带 tools 声明，部分代理仅透传文本请求。', kind: 'parameter' },
+  { id: 'tool_calling', group: '参数与特性', name: '工具调用', desc: 'get_weather + query_order / tool_choice=auto', explain: '验证渠道是否接受 tools 声明与 tool_choice=auto（get_weather 查天气、query_order 查订单）。三种协议用各自原生写法；此处只看请求是否被接受，不检查模型是否真的发起调用。部分代理仅透传文本请求。', kind: 'parameter' },
   { id: 'stream-false', group: '传输与稳定性', name: '非流式响应', desc: '验证 stream=false 的完整 JSON 响应', explain: '非流式是计费与解析最简单的路径，任何渠道都应支持。', kind: 'stream' },
   { id: 'stream-true', group: '传输与稳定性', name: 'SSE 流式响应', desc: '验证 stream=true、SSE 格式与结束标记', explain: '流式响应按 SSE 分块返回，验证事件解析与结束标记（[DONE] / response.completed / message_stop）。', kind: 'stream' },
   { id: 'token-stability', group: '传输与稳定性', name: 'Token 计算稳定性', desc: '对固定短输入重复计数并比较波动', explain: '同一输入多次请求的输入 Token 应恒定；混入固定随机串可暴露计数不一致（如后端换编码）。', kind: 'token' },
@@ -247,6 +248,26 @@ const probeBaseBody = (cfg: ProbeCfg, format: ProbeFormat, prompt = 'Reply with 
   if (format === 'anthropic') return { model, max_tokens: 32, messages: [{ role: 'user', content: prompt }] }
   return { model, messages: [{ role: 'user', content: prompt }] }
 }
+const PROBE_PARAM_COMBO_PROMPT = 'Return a JSON object with ok=true. If a tool is available, call it with value="ok".'
+const PROBE_TOOL_CALL_PROMPT = '帮我看看明天上海的天气怎么样，另外查下订单 SN20260705888 到哪了'
+const PROBE_WEATHER_PARAMS = {
+  type: 'object',
+  properties: {
+    city: { type: 'string', description: '城市名' },
+    date: { type: 'string', description: '日期 YYYY-MM-DD' },
+  },
+  required: ['city'],
+}
+const PROBE_ORDER_PARAMS = {
+  type: 'object',
+  properties: {
+    order_id: { type: 'string' },
+  },
+  required: ['order_id'],
+}
+const probeResponsesInput = (text: string) => ([
+  { type: 'message', role: 'user', content: [{ type: 'input_text', text }] },
+])
 const probeSystemBody = (cfg: ProbeCfg, format: ProbeFormat) => {
   if (format === 'anthropic') return { ...probeBaseBody(cfg, 'anthropic'), system: 'Always reply exactly SYSTEM_OK', messages: [{ role: 'user', content: 'Respond now' }] }
   if (format === 'responses') return { model: cfg.model, instructions: 'Always reply exactly SYSTEM_OK', input: 'Respond now' }
@@ -274,11 +295,42 @@ const probeParamSpec = (id: string, format: ProbeFormat): Record<string, any> =>
       if (format === 'responses') return { text: { format: { type: 'json_schema', name: 'probe', strict: true, schema: { type: 'object', properties: { ok: { type: 'boolean' } }, required: ['ok'], additionalProperties: false } } } }
       if (format === 'anthropic') return {}
       return { response_format: { type: 'json_schema', json_schema: { name: 'probe', strict: true, schema: { type: 'object', properties: { ok: { type: 'boolean' } }, required: ['ok'], additionalProperties: false } } } }
-    case 'tool_calling':
-      if (format === 'anthropic') return { tools: [{ name: 'get_probe_value', description: 'Return a probe value', input_schema: { type: 'object', properties: { value: { type: 'string' } }, required: ['value'] } }] }
-      return { tools: [{ type: 'function', function: { name: 'get_probe_value', description: 'Return a probe value', parameters: { type: 'object', properties: { value: { type: 'string' } }, required: ['value'] } } }] }
+    case 'tool_calling': {
+      const weather = { name: 'get_weather', description: '查询指定城市某天的天气' }
+      const order = { name: 'query_order', description: '根据订单号查询物流状态' }
+      if (format === 'anthropic') return {
+        tools: [
+          { ...weather, input_schema: PROBE_WEATHER_PARAMS },
+          { ...order, input_schema: PROBE_ORDER_PARAMS },
+        ],
+        tool_choice: { type: 'auto' },
+      }
+      if (format === 'responses') return {
+        tools: [
+          { type: 'function', ...weather, parameters: PROBE_WEATHER_PARAMS },
+          { type: 'function', ...order, parameters: PROBE_ORDER_PARAMS },
+        ],
+        tool_choice: 'auto',
+      }
+      return {
+        tools: [
+          { type: 'function', function: { ...weather, parameters: PROBE_WEATHER_PARAMS } },
+          { type: 'function', function: { ...order, parameters: PROBE_ORDER_PARAMS } },
+        ],
+        tool_choice: 'auto',
+      }
+    }
     default: return {}
   }
+}
+const probeParamComboBody = (cfg: ProbeCfg, format: ProbeFormat, pending: Iterable<string>): Record<string, any> => {
+  const ids = pending instanceof Set ? pending : new Set(pending)
+  const toolCalling = ids.has('tool_calling')
+  const prompt = toolCalling ? PROBE_TOOL_CALL_PROMPT : PROBE_PARAM_COMBO_PROMPT
+  const body: Record<string, any> = { ...probeBaseBody(cfg, format, prompt) }
+  if (toolCalling && format === 'responses') body.input = probeResponsesInput(prompt)
+  for (const id of ids) Object.assign(body, probeParamSpec(id, format))
+  return body
 }
 const probeParamMatched = (id: string, err: string): boolean => {
   if (id === 'max_tokens') return /max[_ ]?(completion|output)?[_ ]?tokens/.test(err)
@@ -412,14 +464,47 @@ function probeDownload(content: string, type: string, name: string) {
   setTimeout(() => URL.revokeObjectURL(a.href), 1000)
 }
 
+const PROBE_COPY_SVG = (
+  <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+    <rect x="5.5" y="5.5" width="8" height="8" rx="1.6" />
+    <path d="M10.5 5.5V4a1.5 1.5 0 0 0-1.5-1.5H4A1.5 1.5 0 0 0 2.5 4v5A1.5 1.5 0 0 0 4 10.5h1.5" />
+  </svg>
+)
+const PROBE_CHECK_SVG = (
+  <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+    <path d="M3 8.5l3.2 3.2L13 4.8" />
+  </svg>
+)
+
+function ProbeCopyIconBtn({ text }: { text: string }) {
+  const [copied, setCopied] = useState(false)
+  return (
+    <button
+      type="button"
+      aria-label={copied ? '已复制' : '复制'}
+      title="复制"
+      className={`probe-copy-btn${copied ? ' is-ok' : ''}`}
+      onClick={e => {
+        e.stopPropagation()
+        navigator.clipboard.writeText(text).then(() => { setCopied(true); setTimeout(() => setCopied(false), 1500) })
+      }}
+    >
+      {copied ? PROBE_CHECK_SVG : PROBE_COPY_SVG}
+    </button>
+  )
+}
+
 function ProbeCodeBlock({ title, children, maxH = 320 }: { title: string; children: string; maxH?: number }) {
   const text = children ?? ''
   return (
     <div className="min-w-0">
       <div className="mb-1.5 text-xs font-bold" style={{ color: 'var(--t3)' }}>{title}</div>
-      <pre className="overflow-auto rounded-xl p-3 font-mono text-[11px] leading-5" style={{ background: 'var(--code)', border: '1px solid var(--border)', color: 'var(--text)', maxHeight: maxH, fontFamily: PROBE_MONO }}>
-        <code dangerouslySetInnerHTML={{ __html: highlightJson(text) || ' ' }} />
-      </pre>
+      <div className="relative min-w-0">
+        <ProbeCopyIconBtn text={text} />
+        <pre className="overflow-auto rounded-xl p-3 pr-10 font-mono text-[11px] leading-5" style={{ background: 'var(--code)', border: '1px solid var(--border)', color: 'var(--text)', maxHeight: maxH, fontFamily: PROBE_MONO }}>
+          <code dangerouslySetInnerHTML={{ __html: highlightJson(text) || ' ' }} />
+        </pre>
+      </div>
     </div>
   )
 }
@@ -462,80 +547,144 @@ function ProbeStatusBadge({ status }: { status: ProbeStatus }) {
   )
 }
 
-function ProbeReportRow({ t, report }: { t: ProbeTestDef; report: ProbeReport }) {
-  const [open, setOpen] = useState(false)
-  const keys = probeResultKeysOf(t, report.results)
-  const items = keys.map(k => ({ key: k, r: report.results[k] }))
-  const agg = probeAggregateStatus(items.map(x => x.r))
+function ProbeReportTiles({ report }: { report: ProbeReport }) {
+  const [detail, setDetail] = useState<{ test: ProbeTestDef; key: string; result: ProbeResult } | null>(null)
+  useEffect(() => {
+    if (!detail) return
+    const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') setDetail(null) }
+    window.addEventListener('keydown', onKey)
+    const prev = document.body.style.overflow
+    document.body.style.overflow = 'hidden'
+    return () => {
+      window.removeEventListener('keydown', onKey)
+      document.body.style.overflow = prev
+    }
+  }, [detail])
+
+  const groups: { title: string; items: { test: ProbeTestDef; key: string; result: ProbeResult }[] }[] = []
+  let skipped = 0
+  for (const t of PROBE_TESTS) {
+    const keys = probeResultKeysOf(t, report.results)
+    const items = keys.map(key => ({ test: t, key, result: report.results[key] })).filter(x => x.result)
+    skipped += items.filter(x => x.result.status === 'skipped').length
+    const executed = items.filter(x => x.result.status !== 'skipped')
+    if (!executed.length) continue
+    let g = groups.find(x => x.title === t.group)
+    if (!g) {
+      g = { title: t.group, items: [] }
+      groups.push(g)
+    }
+    g.items.push(...executed)
+  }
+
+  let tileIndex = 0
   return (
-    <div style={{ borderBottom: '1px solid var(--border)' }}>
-      <div className="flex items-center gap-3 px-4 py-3 cursor-pointer select-none" onClick={() => setOpen(o => !o)}
-        style={{ background: 'var(--bg)' }}
-        onPointerEnter={e => { (e.currentTarget as HTMLDivElement).style.background = 'var(--s1)' }}
-        onPointerLeave={e => { (e.currentTarget as HTMLDivElement).style.background = 'var(--bg)' }}>
-        <span className="text-xs" style={{ color: 'var(--t3)' }}>{open ? '▾' : '▸'}</span>
-        <div className="flex-1 min-w-0">
-          <div className="text-sm font-semibold truncate" style={{ color: 'var(--text)' }}>{t.name}</div>
-          {probeMultiFormatKinds.includes(t.kind) ? (
-            <div className="font-mono text-[11px] mt-0.5" style={{ color: 'var(--t3)', fontFamily: PROBE_MONO }}>
-              {items.map(x => `${probeFormatOfKey(x.key) ?? ''}:${PROBE_STATUS_LABELS[x.r.status]}`).join(' · ')}
-            </div>
-          ) : (
-            <div className="text-xs mt-0.5 truncate" style={{ color: 'var(--t3)' }}>{items[0]?.r.detail || ''}</div>
-          )}
-        </div>
-        <ProbeStatusBadge status={agg} />
-        <span className="font-mono text-xs tabular-nums flex-shrink-0" style={{ color: 'var(--t2)', fontFamily: PROBE_MONO }}>
-          {items.length ? (items[0].r.duration != null ? items[0].r.duration + ' ms' : '-') : ''}
-        </span>
-      </div>
-      {open && (
-        <div className="px-5 pb-5 pt-1" style={{ background: 'var(--s1)' }}>
-          <p className="text-xs leading-5 mb-4" style={{ color: 'var(--t2)' }}>
-            <span className="font-bold" style={{ color: 'var(--text)' }}>说明：</span>{t.explain}
-          </p>
-          {items.map(({ key, r }) => (
-            <div key={key} className="mb-3 rounded-xl p-4" style={{ background: 'var(--bg)', border: '1px solid var(--border)' }}>
-              <div className="flex flex-wrap items-center gap-3 mb-2">
-                <span className="text-sm font-bold" style={{ color: 'var(--text)' }}>
-                  {t.name}{probeFormatOfKey(key) ? ` · ${PROBE_FORMAT_LABELS[probeFormatOfKey(key)!]}` : ''}
-                </span>
-                <ProbeStatusBadge status={r.status} />
-                <span className="text-xs" style={{ color: 'var(--t3)' }}>{r.detail}</span>
-                {r.duration != null && <span className="font-mono text-xs" style={{ color: 'var(--t2)', fontFamily: PROBE_MONO }}>{r.duration} ms</span>}
+    <>
+      {groups.map(g => (
+        <section key={g.title} className="mt-5">
+          <div className="text-[11px] font-bold uppercase mb-2.5" style={{ color: 'var(--t3)', letterSpacing: '0.08em' }}>{g.title}</div>
+          <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-3 gap-3">
+            {g.items.map(item => {
+              const fmt = probeFormatOfKey(item.key)
+              const st = item.result.status
+              const i = Math.min(tileIndex++, 12)
+              return (
+                <button
+                  key={item.key}
+                  type="button"
+                  className="probe-tile text-left rounded-2xl px-4 py-3.5"
+                  style={{ '--i': i } as React.CSSProperties}
+                  onClick={() => setDetail(item)}
+                >
+                  <div className="flex items-center justify-between gap-2">
+                    <span className={`probe-status-text is-${st}`}>{PROBE_STATUS_LABELS[st]}</span>
+                    <span className="font-mono text-[11px] tabular-nums" style={{ color: 'var(--t3)', fontFamily: PROBE_MONO }}>
+                      {item.result.duration != null ? `${item.result.duration} ms` : ''}
+                    </span>
+                  </div>
+                  <div className="mt-2 text-sm font-semibold" style={{ color: 'var(--text)', letterSpacing: '-0.011em' }}>{item.test.name}</div>
+                  {fmt && (
+                    <div className="mt-1.5">
+                      <span className="rounded-full px-2 py-0.5 text-[11px]" style={{ background: 'var(--s2)', color: 'var(--t2)' }}>{PROBE_FORMAT_LABELS[fmt]}</span>
+                    </div>
+                  )}
+                  <div className="mt-2 text-xs line-clamp-2 leading-5" style={{ color: 'var(--t2)' }}>{item.result.detail}</div>
+                </button>
+              )
+            })}
+          </div>
+        </section>
+      ))}
+      {skipped > 0 && (
+        <p className="mt-5 text-xs" style={{ color: 'var(--t3)' }}>另有 {skipped} 项未执行。</p>
+      )}
+      {detail && (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center p-5 ia-lightbox-enter"
+          style={{ background: 'color-mix(in srgb, var(--bg) 78%, transparent)', backdropFilter: 'blur(10px)' }}
+          onClick={e => { if (e.target === e.currentTarget) setDetail(null) }}
+        >
+          <div
+            role="dialog"
+            aria-modal="true"
+            className="floating-material probe-sheet-enter rounded-2xl p-6 w-full max-w-3xl max-h-[86vh] overflow-y-auto"
+            style={{ background: 'var(--surfaceStrong)', border: '1px solid var(--border)', boxShadow: 'var(--shadowMd)' }}
+            onClick={e => e.stopPropagation()}
+          >
+            <div className="flex items-start justify-between gap-3">
+              <div className="min-w-0">
+                <div className="flex flex-wrap items-center gap-2">
+                  <ProbeStatusBadge status={detail.result.status} />
+                  {probeFormatOfKey(detail.key) && (
+                    <span className="rounded-full px-2 py-0.5 text-[11px]" style={{ background: 'var(--s2)', color: 'var(--t2)' }}>
+                      {PROBE_FORMAT_LABELS[probeFormatOfKey(detail.key)!]}
+                    </span>
+                  )}
+                </div>
+                <h2 className="text-lg font-bold mt-2" style={{ color: 'var(--text)', letterSpacing: '-0.014em' }}>{detail.test.name}</h2>
+                <p className="text-xs mt-1 leading-5" style={{ color: 'var(--t3)' }}>{detail.test.explain}</p>
               </div>
-              {r.usage && (r.usage.input != null || r.usage.output != null || r.usage.cacheRead != null || r.usage.cacheWrite != null) && (
-                <div className="mb-2"><ProbeUsageChip usage={r.usage} /></div>
+              <Btn small variant="ghost" onClick={() => setDetail(null)}>关闭</Btn>
+            </div>
+            <p className="text-sm mt-3 leading-6" style={{ color: 'var(--text)' }}>{detail.result.detail}</p>
+            <div className="mt-3 flex flex-wrap items-center gap-2">
+              {detail.result.duration != null && (
+                <span className="font-mono text-[11px] px-1.5 py-0.5 rounded" style={{ background: 'var(--s2)', color: 'var(--t2)', fontFamily: PROBE_MONO }}>{detail.result.duration} ms</span>
               )}
-              {r.cache && (
-                <div className="text-xs mb-2" style={{ color: 'var(--t2)' }}>缓存：{r.cache.hits}/{r.cache.total} 次命中 · 读取值 {r.cache.reads.join(', ')}</div>
-              )}
-              {r.tokenValues && r.tokenValues.length > 0 && (
-                <div className="text-xs mb-2" style={{ color: 'var(--t2)' }}>每次输入 Token：{r.tokenValues.join(', ')}</div>
-              )}
-              <div className="text-xs font-bold mb-1.5" style={{ color: 'var(--t3)' }}>复现步骤</div>
-              {r.repro ? (
-                <>
-                  <div className="flex flex-wrap items-center gap-2 mb-1.5">
-                    <span className="font-mono text-[11px] px-1.5 py-0.5 rounded" style={{ background: 'var(--s2)', color: 'var(--text)', fontFamily: PROBE_MONO }}>POST {r.repro.url}</span>
-                    <span className="font-mono text-[11px] px-1.5 py-0.5 rounded" style={{ background: 'var(--s2)', color: 'var(--text)', fontFamily: PROBE_MONO }}>HTTP {r.repro.status ?? '—'}</span>
-                    {r.repro.requestId && (
-                      <span className="inline-flex items-center gap-1"><span className="font-mono text-[11px]" style={{ color: 'var(--t3)', fontFamily: PROBE_MONO }}>Request ID</span><ProbeCopyId value={r.repro.requestId} /></span>
-                    )}
-                  </div>
-                  <div className="grid gap-3 xl:grid-cols-2">
-                    <ProbeCodeBlock title="请求头（密钥已脱敏）" children={probeJsonPretty(r.repro.headers)} />
-                    <ProbeCodeBlock title="请求体" children={probeJsonPretty(r.repro.body)} />
-                  </div>
-                </>
-              ) : (
-                <p className="text-xs" style={{ color: 'var(--t3)' }}>本轮无实际请求（已跳过 / 未执行）。</p>
+              {detail.result.usage && (detail.result.usage.input != null || detail.result.usage.output != null || detail.result.usage.cacheRead != null || detail.result.usage.cacheWrite != null) && (
+                <ProbeUsageChip usage={detail.result.usage} />
               )}
             </div>
-          ))}
+            {detail.result.cache && (
+              <div className="text-xs mt-2" style={{ color: 'var(--t2)' }}>缓存：{detail.result.cache.hits}/{detail.result.cache.total} 次命中 · 读取值 {detail.result.cache.reads.join(', ')}</div>
+            )}
+            {detail.result.tokenValues && detail.result.tokenValues.length > 0 && (
+              <div className="text-xs mt-2" style={{ color: 'var(--t2)' }}>每次输入 Token：{detail.result.tokenValues.join(', ')}</div>
+            )}
+            {detail.result.repro ? (
+              <div className="mt-4">
+                <div className="flex flex-wrap items-center gap-2 mb-3">
+                  <span className="font-mono text-[11px] px-1.5 py-0.5 rounded" style={{ background: 'var(--s2)', color: 'var(--text)', fontFamily: PROBE_MONO }}>POST {detail.result.repro.url}</span>
+                  <span className="font-mono text-[11px] px-1.5 py-0.5 rounded" style={{ background: 'var(--s2)', color: 'var(--text)', fontFamily: PROBE_MONO }}>HTTP {detail.result.repro.status ?? '—'}</span>
+                  {detail.result.repro.requestId && (
+                    <span className="inline-flex items-center gap-1">
+                      <span className="font-mono text-[11px]" style={{ color: 'var(--t3)', fontFamily: PROBE_MONO }}>Request ID</span>
+                      <ProbeCopyId value={detail.result.repro.requestId} />
+                    </span>
+                  )}
+                </div>
+                <div className="grid gap-3 xl:grid-cols-2">
+                  <ProbeCodeBlock title="请求头（密钥已脱敏）" children={probeJsonPretty(detail.result.repro.headers)} />
+                  <ProbeCodeBlock title="请求体" children={probeJsonPretty(detail.result.repro.body)} />
+                </div>
+              </div>
+            ) : (
+              <p className="text-xs mt-4" style={{ color: 'var(--t3)' }}>本轮无实际请求。</p>
+            )}
+          </div>
         </div>
       )}
-    </div>
+    </>
   )
 }
 
@@ -964,9 +1113,8 @@ function ModelProbeTool() {
       outcomes[probeKey('structured_output', format)] = probeResult('unsupported', 'Anthropic Messages 无原生 response_format 参数', { format })
       pending.delete('structured_output')
     }
-    const body: Record<string, any> = { ...probeBaseBody(cfgRef.current!, format, 'Return a JSON object with ok=true. If a tool is available, call it with value="ok".') }
-    for (const id of pending) Object.assign(body, probeParamSpec(id, format))
     while (pending.size) {
+      const body = probeParamComboBody(cfgRef.current!, format, pending)
       const combinedKey = [...pending].join('+') + '@' + format
       const log = probeNewLog(combinedKey, `${[...pending].map(probeParamLabel).join(' + ')}（${PROBE_FORMAT_LABELS[format]}）`, format)
       let r: { ok: boolean; status: number; data: any; raw: string | null; log: ProbeLog }
@@ -986,14 +1134,12 @@ function ModelProbeTool() {
         for (const id of identified) {
           outcomes[probeKey(id, format)] = probeResult('unsupported', probeExtractError(r.data), { format, duration: r.log.duration, usage: r.log.usage, repro: probeReproOf(r.log) })
           pending.delete(id)
-          const spec = probeParamSpec(id, format)
-          for (const k of Object.keys(spec)) delete body[k]
         }
         continue
       }
       for (const id of [...pending]) {
         const singleLog = probeNewLog(probeKey(id, format), `${probeParamLabel(id)}（${PROBE_FORMAT_LABELS[format]}）`, format)
-        const singleBody: Record<string, any> = { ...probeBaseBody(cfgRef.current!, format), ...probeParamSpec(id, format) }
+        const singleBody = probeParamComboBody(cfgRef.current!, format, [id])
         try {
           const one = await probeRequest(singleLog, format, singleBody)
           if (one.ok) {
@@ -1375,6 +1521,10 @@ function ModelProbeTool() {
     if (!report) return
     probeDownload(JSON.stringify(report, null, 2), 'application/json', `${probeSafeName(report.name)}.json`)
   }
+  const exportHtml = () => {
+    if (!report) return
+    downloadProbeReportHtml(report, PROBE_TESTS, PROBE_FORMAT_LABELS)
+  }
   const exportMd = () => {
     if (!report) return
     const r = report
@@ -1652,11 +1802,10 @@ function ModelProbeTool() {
                     <div className="mt-4 flex gap-2">
                       <Btn small variant="soft" onClick={exportJson}>导出 JSON</Btn>
                       <Btn small variant="soft" onClick={exportMd}>导出 Markdown</Btn>
+                      <Btn small variant="soft" onClick={exportHtml}>导出 HTML</Btn>
                     </div>
                   </div>
-                  <div className="mt-5 rounded-2xl overflow-hidden" style={{ border: '1px solid var(--border)' }}>
-                    {PROBE_TESTS.map(t => <ProbeReportRow key={t.id} t={t} report={report} />)}
-                  </div>
+                  <ProbeReportTiles report={report} />
                 </div>
               )
             )}

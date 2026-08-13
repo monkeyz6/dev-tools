@@ -100,13 +100,93 @@ test.describe('模型探测', () => {
     await setupRun(page, 'e2e-参数降级')
 
     const main = page.locator('main')
-    await expect(main).toContainText('chat:不支持', { timeout: 10000 })
-    await expect(main).toContainText('chat:通过')
-    // 展开 temperature / top_p 行查看错误信息与结论
-    await main.getByText('temperature', { exact: true }).click()
-    await expect(main).toContainText('unknown parameter: temperature')
-    await main.getByText('top_p', { exact: true }).click()
+    await expect(main.getByRole('button', { name: /temperature/ })).toBeVisible({ timeout: 10000 })
+    await main.getByRole('button', { name: /temperature/ }).click()
+    const dialog = page.getByRole('dialog')
+    await expect(dialog).toContainText('unknown parameter: temperature')
+    // 请求头 / 请求体两个代码块右上角各有一个复制图标
+    await expect(dialog.getByRole('button', { name: '复制' })).toHaveCount(2)
+    await dialog.getByRole('button', { name: '关闭' }).click()
+    await main.getByRole('button', { name: /top_p/ }).click()
+    await expect(page.getByRole('dialog')).toContainText('组合请求通过')
+  })
+
+  test('工具调用：三协议原生 tools 形状（双工具 + tool_choice，非流式）', async ({ page }) => {
+    const chatBodies: any[] = []
+    const responsesBodies: any[] = []
+    const anthropicBodies: any[] = []
+    await page.route('**/v1/chat/completions', async route => {
+      const body = route.request().postDataJSON()
+      if (body?.tools) chatBodies.push(body)
+      await route.fulfill({ status: 200, contentType: 'application/json', body: CHAT_OK(12) })
+    })
+    await page.route('**/v1/responses', async route => {
+      const body = route.request().postDataJSON()
+      if (body?.tools) responsesBodies.push(body)
+      await route.fulfill({ status: 200, contentType: 'application/json', body: RESPONSES_OK })
+    })
+    await page.route('**/v1/messages', async route => {
+      const body = route.request().postDataJSON()
+      if (body?.tools) anthropicBodies.push(body)
+      await route.fulfill({ status: 200, contentType: 'application/json', body: ANTHROPIC_OK })
+    })
+
+    await goto(page, /模型探测/)
+    await page.getByRole('button', { name: '全不选' }).click()
+    for (const id of ['chat-basic', 'responses-basic', 'anthropic-basic', 'tool_calling']) await check(page, id)
+    await expect(page.locator('main')).toContainText('get_weather + query_order / tool_choice=auto')
+    await setupRun(page, 'e2e-工具调用形状')
+
+    const main = page.locator('main')
+    await expect(main.getByRole('button', { name: /工具调用/ })).toHaveCount(3, { timeout: 10000 })
     await expect(main).toContainText('组合请求通过')
+
+    await page.getByRole('button', { name: /请求日志/ }).click()
+    await page.getByRole('combobox').selectOption('tool_calling')
+    await main.getByText('工具调用（Chat Completions）', { exact: true }).click()
+    await expect(main).toContainText('"name": "get_weather"')
+    await expect(main).toContainText('"tool_choice": "auto"')
+    await expect(main).toContainText('SN20260705888')
+    await main.getByText('工具调用（Responses）', { exact: true }).click()
+    await expect(main).toContainText('"type": "input_text"')
+    await main.getByText('工具调用（Anthropic Messages）', { exact: true }).click()
+    await expect(main).toContainText('"input_schema"')
+    await expect(main).toContainText('"type": "auto"')
+
+    expect(chatBodies).toHaveLength(1)
+    expect(responsesBodies).toHaveLength(1)
+    expect(anthropicBodies).toHaveLength(1)
+
+    const chat = chatBodies[0]
+    expect(chat.tools[0].function.name).toBe('get_weather')
+    expect(chat.tools[0].function.parameters.required).toEqual(['city'])
+    expect(chat.tools[1].function.name).toBe('query_order')
+    expect(chat.tool_choice).toBe('auto')
+    expect(chat.stream).toBeUndefined()
+    expect(String(chat.messages?.[0]?.content)).toContain('上海')
+    expect(String(chat.messages?.[0]?.content)).toContain('SN20260705888')
+
+    const responses = responsesBodies[0]
+    expect(responses.tools[0].name).toBe('get_weather')
+    expect(responses.tools[0].type).toBe('function')
+    expect(responses.tools[0].function).toBeUndefined()
+    expect(responses.tools[1].name).toBe('query_order')
+    expect(responses.tool_choice).toBe('auto')
+    expect(responses.stream).toBeUndefined()
+    expect(responses.max_output_tokens).toBeUndefined()
+    expect(responses.input[0].type).toBe('message')
+    expect(responses.input[0].content[0].type).toBe('input_text')
+    expect(responses.input[0].content[0].text).toContain('上海')
+    expect(responses.input[0].content[0].text).toContain('SN20260705888')
+
+    const anthropic = anthropicBodies[0]
+    expect(anthropic.tools[0].name).toBe('get_weather')
+    expect(anthropic.tools[0].input_schema.required).toEqual(['city'])
+    expect(anthropic.tools[0].function).toBeUndefined()
+    expect(anthropic.tools[1].name).toBe('query_order')
+    expect(anthropic.tool_choice).toEqual({ type: 'auto' })
+    expect(anthropic.stream).toBeUndefined()
+    expect(String(anthropic.messages?.[0]?.content)).toContain('上海')
   })
 
   test('缓存未命中：连续 3 次未报告缓存命中即停止，不再重试', async ({ page }) => {
@@ -165,9 +245,9 @@ test.describe('模型探测', () => {
     await setupRun(page, 'e2e-token稳定性')
 
     const main = page.locator('main')
-    await expect(main).toContainText('chat:通过', { timeout: 10000 })
-    await main.getByText('Token 计算稳定性', { exact: true }).click()
-    await expect(main).toContainText('3 次输入 Token 均为 10')
+    await expect(main.getByRole('button', { name: /Token 计算稳定性/ })).toBeVisible({ timeout: 10000 })
+    await main.getByRole('button', { name: /Token 计算稳定性/ }).click()
+    await expect(page.getByRole('dialog')).toContainText('3 次输入 Token 均为 10')
   })
 
   test('日志脱敏 + 报告导出 Markdown（含说明与复现步骤）', async ({ page }) => {
@@ -197,6 +277,53 @@ test.describe('模型探测', () => {
     expect(content).toContain('/v1/chat/completions')
     expect(content).toContain('sk-secr***5678')
     expect(content).toContain('基础请求返回成功')
+  })
+
+  test('报告导出 HTML：离线单文件、主题切换、复现折叠、密钥脱敏', async ({ page }) => {
+    await page.route('**/v1/chat/completions', route =>
+      route.fulfill({ status: 200, contentType: 'application/json', headers: { 'x-oneapi-request-id': 'req-chat-0001', 'access-control-expose-headers': '*' }, body: CHAT_OK(12) }))
+
+    await goto(page, /模型探测/)
+    await page.getByRole('button', { name: '全不选' }).click()
+    await check(page, 'chat-basic')
+    await setupRun(page, 'e2e探针HTML', { apiKey: 'sk-secret-key-12345678' })
+    await expect(page.locator('main')).toContainText('通过 1', { timeout: 10000 })
+
+    const [download] = await Promise.all([
+      page.waitForEvent('download'),
+      page.getByRole('button', { name: '导出 HTML' }).click(),
+    ])
+    expect(download.suggestedFilename()).toBe('e2e探针HTML.html')
+    const outPath = '/tmp/modelprobe-export-test.html'
+    await download.saveAs(outPath)
+    const html = readFileSync(outPath, 'utf8')
+    expect(html).toContain('模型探测报告')
+    expect(html).toContain('OpenAI Chat Completions')
+    expect(html).toContain('请求体')
+    expect(html).not.toContain('sk-secret-key-12345678')
+    expect(html).not.toContain('sk-secr***5678')
+    expect(html).not.toMatch(/Authorization/i)
+    expect(html).not.toContain('请求头')
+    expect(html).not.toContain('temperature')
+    expect(html).toMatch(/html,body\{[^}]*overflow:visible/)
+
+    await page.goto('file://' + outPath)
+    await expect(page.getByRole('heading', { name: 'e2e探针HTML' })).toBeVisible()
+    await expect(page.getByRole('button', { name: /OpenAI Chat Completions/ })).toBeVisible()
+    await expect(page.getByRole('button', { name: /浅色模式|深色模式/ })).toBeVisible()
+    await page.getByRole('button', { name: /OpenAI Chat Completions/ }).click()
+    const dialog = page.getByRole('dialog')
+    await expect(dialog).toContainText('基础请求返回成功')
+    await expect(dialog).toContainText('请求体')
+    await expect(dialog.getByRole('button', { name: '复制' })).toBeVisible()
+    await expect(dialog).not.toContainText('请求头')
+    await expect(dialog).not.toContainText('Authorization')
+    await dialog.getByRole('button', { name: '关闭' }).click()
+    const overflow = await page.locator('html').evaluate(el => getComputedStyle(el).overflow)
+    expect(overflow === 'visible' || overflow === 'auto' || overflow === 'overlay').toBeTruthy()
+    await page.getByRole('button', { name: /浅色模式|深色模式/ }).click()
+    await expect(page.locator('html')).toHaveAttribute('data-theme', /light|dark/)
+    await expect(page.getByText('temperature', { exact: true })).toHaveCount(0)
   })
 
   test('勾选状态持久化：reload 后仍保持', async ({ page }) => {
@@ -372,7 +499,7 @@ test.describe('模型探测', () => {
     await expect(page.locator('input[data-id="cache-anthropic"]')).toBeDisabled()
     await setupRun(page, 'e2e-Anthropic未启用跳过缓存')
 
-    await expect(page.locator('main')).toContainText('对应协议格式未启用（未勾选 Anthropic Messages 基础测试）', { timeout: 10000 })
+    await expect(page.locator('main')).toContainText('另有 6 项未执行', { timeout: 10000 })
     expect(anthropicCalls).toBe(0)
   })
 })

@@ -981,9 +981,9 @@ const ImgHistoryPane = React.memo(function ImgHistoryPane({
         <p className="text-sm font-bold" style={{ color: 'var(--text)' }}>历史测试记录 <span className="inline-flex items-center justify-center rounded-full px-2 py-0.5 text-xs font-bold ml-1" style={{ background: 'var(--accentSub)', color: 'var(--accent)' }}>{history.length}</span></p>
         <div className="flex items-center gap-2">
           <Btn small variant="soft" disabled={exportBusy || selHistIds.size === 0}
-            onClick={() => onStartExport(filteredHistory.filter(r => selHistIds.has(r.id)), 'png')}>⬇ 导出选中图片 ({selHistIds.size})</Btn>
+            onClick={() => onStartExport(filteredHistory.filter(r => selHistIds.has(r.id)), 'png')}>导出 PNG</Btn>
           <Btn small variant="soft" disabled={exportBusy || selHistIds.size === 0}
-            onClick={() => onStartExport(filteredHistory.filter(r => selHistIds.has(r.id)), 'html')}>⬇ 导出选中 HTML ({selHistIds.size})</Btn>
+            onClick={() => onStartExport(filteredHistory.filter(r => selHistIds.has(r.id)), 'html')}>导出 HTML</Btn>
           <Btn small variant="danger" onClick={onClearAll}>清空全部</Btn>
         </div>
       </div>
@@ -1747,8 +1747,8 @@ function ImgApiTestTool() {
             setCases(arr)
           }}>↺ 重置状态</Btn>
           <Btn small variant="danger" disabled={!running} onClick={() => { stopRef.current = true; toastShow('将在当前用例结束后停止') }}>■ 停止</Btn>
-          <Btn small variant="soft" disabled={exportBusy || !cases.some(c => c.result)} onClick={() => startExport(cases.filter(c => c.result).map(c => c.result!), 'png')}>⬇ 导出图片</Btn>
-          <Btn small variant="soft" disabled={exportBusy || !cases.some(c => c.result)} onClick={() => startExport(cases.filter(c => c.result).map(c => c.result!), 'html')}>⬇ 导出 HTML</Btn>
+          <Btn small variant="soft" disabled={exportBusy || !cases.some(c => c.result)} onClick={() => startExport(cases.filter(c => c.result).map(c => c.result!), 'png')}>导出 PNG</Btn>
+          <Btn small variant="soft" disabled={exportBusy || !cases.some(c => c.result)} onClick={() => startExport(cases.filter(c => c.result).map(c => c.result!), 'html')}>导出 HTML</Btn>
           <div className="flex-1 min-w-40 h-2 rounded-full overflow-hidden" style={{ background: 'var(--s2)' }}>
             <div className="h-full rounded-full transition-all duration-300" style={{ background: 'var(--accent)', width: (cases.length ? (doneCount / cases.length * 100) : 0) + '%' }} />
           </div>
@@ -1819,7 +1819,7 @@ function ImgApiTestTool() {
             <div className="flex items-center justify-between px-5 py-4 sticky top-0" style={{ borderBottom: '1px solid var(--border)', background: 'var(--bg)' }}>
               <p className="text-base font-bold" style={{ color: 'var(--text)' }}>测试记录详情</p>
               <div className="flex items-center gap-2">
-                <Btn small variant="soft" disabled={exportBusy} onClick={() => startExport([detailRec], 'png')}>导出图片</Btn>
+                <Btn small variant="soft" disabled={exportBusy} onClick={() => startExport([detailRec], 'png')}>导出 PNG</Btn>
                 <Btn small variant="soft" disabled={exportBusy} onClick={() => startExport([detailRec], 'html')}>导出 HTML</Btn>
                 <button onClick={() => setDetailRec(null)} className="w-8 h-8 rounded-lg border-0 cursor-pointer text-lg flex items-center justify-center transition-colors duration-150" style={{ color: 'var(--t3)', background: 'transparent' }}
                   onPointerEnter={e => { (e.currentTarget as HTMLButtonElement).style.background = 'var(--s1)' }} onPointerLeave={e => { (e.currentTarget as HTMLButtonElement).style.background = 'transparent' }}>×</button>
