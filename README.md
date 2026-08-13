@@ -168,20 +168,6 @@ npm run preview
     └── seedance.spec.ts
 ```
 
----
-
-## 开源描述
-
-**推荐版（150 字以内）：**
-
-> 纯前端实现、零服务端依赖的工具箱，所有数据本地处理，不上传任何服务器。包含 Seedance 计费、JSON 可视化/Diff、时间戳转换、AI 请求体格式转换、LLM 批量测试与 Token 验真、图片接口测试、模型探测、图片/视频信息识别、ID 生成器、Base64 编解码、Unicode 转换、GraphQL 格式化等 13 个工具，服务前后端开发者，支持 4 套主题。技术栈：React 19 + Vite 8 + Tailwind CSS v4。
-
-**完整版（350 字以内）：**
-
-> 纯前端实现、零服务端依赖的浏览器工具箱，包含 13 个实用工具：Seedance 视频生成计费、JSON 可视化与 Diff、时间戳转换、AI 请求体格式转换、LLM 批量测试与 Token 核查、图片接口测试、模型探测、图片和视频信息识别、UUID 与随机字符串生成、Base64、Unicode、GraphQL 格式化。所有数据在浏览器本地处理，不上传任何服务器。内置 4 套主题，支持工具 URL 直达、毛玻璃 UI 与配置持久化。技术栈：React 19 + Vite 8 + Tailwind CSS v4 + TypeScript + Recharts。
-
----
-
 ## 开源协议
 
 [MIT](https://opensource.org/licenses/MIT)
