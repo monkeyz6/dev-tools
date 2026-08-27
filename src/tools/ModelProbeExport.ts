@@ -225,6 +225,8 @@ h1{margin:10px 0 0;font-size:26px;font-weight:700;letter-spacing:-.021em;line-he
 .tile h2{margin:0;font-size:15px;font-weight:600;letter-spacing:-.011em;color:var(--text)}
 .tile .clip{margin:0;width:100%;font-size:12px;color:var(--t2);line-height:1.45;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
 .tile .ms{font-size:11px;color:var(--t3)}
+.tile .usage{margin-top:2px;font-size:11px;letter-spacing:.02em;color:var(--t2)}
+.tile .usage .empty{color:var(--t3)}
 @keyframes tile-in{from{opacity:0;transform:translateY(10px) scale(.992)}to{opacity:1;transform:none}}
 .dot-st{display:inline-flex;align-items:center;gap:6px;font-size:12px;font-weight:600;white-space:nowrap}
 .dot-st::before{content:"";width:7px;height:7px;border-radius:999px;background:currentColor;box-shadow:0 0 8px currentColor;flex-shrink:0}
@@ -332,9 +334,23 @@ function formatOfKey(key: string): string | null {
   return at > 0 ? key.slice(at + 1) : null
 }
 
+function isHiddenResultKey(key: string): boolean {
+  return key === 'structured_output@anthropic'
+}
+
 function resultKeysOf(id: string, results: Record<string, ProbeHtmlResult>): string[] {
   const prefix = id + '@'
-  return Object.keys(results).filter(k => k === id || k.startsWith(prefix)).sort((a, b) => a.localeCompare(b))
+  return Object.keys(results).filter(k => (k === id || k.startsWith(prefix)) && !isHiddenResultKey(k)).sort((a, b) => a.localeCompare(b))
+}
+
+function sanitizeHtmlReport(report: ProbeHtmlReport): ProbeHtmlReport {
+  const results: Record<string, ProbeHtmlResult> = {}
+  for (const [k, v] of Object.entries(report.results || {})) {
+    if (!isHiddenResultKey(k)) results[k] = v
+  }
+  const summary: Record<ProbeHtmlStatus, number> = { passed: 0, failed: 0, unsupported: 0, skipped: 0 }
+  for (const r of Object.values(results)) summary[r.status]++
+  return { ...report, results, summary }
 }
 
 function buildGroups(report: ProbeHtmlReport, tests: ProbeHtmlTestMeta[], formatLabels: Record<string, string>): ProbeHtmlGroup[] {
@@ -375,7 +391,17 @@ function statClass(kind: 'ok' | 'err' | 'warn', n: number): string {
   return n > 0 ? kind : 'zero'
 }
 
+function ioParts(usage?: ProbeHtmlResult['usage']): { inn: string; out: string; innEmpty: boolean; outEmpty: boolean } {
+  return {
+    inn: usage?.input == null ? '—' : String(usage.input),
+    out: usage?.output == null ? '—' : String(usage.output),
+    innEmpty: usage?.input == null,
+    outEmpty: usage?.output == null,
+  }
+}
+
 function renderTile(item: ProbeHtmlItem, index: number): string {
+  const io = ioParts(item.usage)
   return `<button type="button" class="tile" data-i="${index}" style="--i:${Math.min(index, 12)}" aria-label="${esc(item.name)} ${esc(item.formatLabel)} ${STATUS_LABEL[item.status]}">
     <div class="tile-top">
       <span class="dot-st ${item.status}">${STATUS_LABEL[item.status]}</span>
@@ -384,6 +410,7 @@ function renderTile(item: ProbeHtmlItem, index: number): string {
     <h2>${esc(item.name)}</h2>
     ${item.formatLabel ? `<span class="chip">${esc(item.formatLabel)}</span>` : ''}
     <p class="clip">${esc(item.detail)}</p>
+    <div class="usage mono"><span class="${io.innEmpty ? 'empty' : ''}">↑${esc(io.inn)}</span> <span class="${io.outEmpty ? 'empty' : ''}">↓${esc(io.out)}</span></div>
   </button>`
 }
 
@@ -410,6 +437,7 @@ export function buildProbeReportHtml(
   formatLabels: Record<string, string>,
   theme?: ProbeHtmlTheme,
 ): string {
+  report = sanitizeHtmlReport(report)
   const groups = buildGroups(report, tests, formatLabels)
   const flat: ProbeHtmlItem[] = []
   const groupHtml = groups.map(g => {
@@ -591,9 +619,7 @@ export function buildProbeReportHtml(
       facts.appendChild(s);
     }
     if (item.duration != null) addFact('耗时', item.duration + ' ms');
-    if (item.usage && (item.usage.input != null || item.usage.output != null || item.usage.cacheRead != null || item.usage.cacheWrite != null)) {
-      addFact('用量', '↑' + (item.usage.input == null ? '—' : item.usage.input) + ' ↓' + (item.usage.output == null ? '—' : item.usage.output) + ' 缓存读' + (item.usage.cacheRead == null ? '—' : item.usage.cacheRead) + ' 写' + (item.usage.cacheWrite == null ? '—' : item.usage.cacheWrite));
-    }
+    addFact('用量', '↑' + (item.usage && item.usage.input != null ? item.usage.input : '—') + ' ↓' + (item.usage && item.usage.output != null ? item.usage.output : '—') + ' 缓存读' + (item.usage && item.usage.cacheRead != null ? item.usage.cacheRead : '—') + ' 写' + (item.usage && item.usage.cacheWrite != null ? item.usage.cacheWrite : '—'));
     if (item.cache) addFact('缓存', item.cache.hits + '/' + item.cache.total + ' 次命中');
     if (item.tokenValues && item.tokenValues.length) addFact('输入 Token', item.tokenValues.join(', '));
     var meta = document.getElementById('sheetMeta');

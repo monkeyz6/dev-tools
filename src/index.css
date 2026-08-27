@@ -725,6 +725,53 @@ textarea:focus-visible { outline: none; }
   to { opacity: 1; transform: none; }
 }
 
+/* 配置栏说明：? 圆标 + 悬停气泡（fixed 相对视口，避免被 overflow-y-auto 裁切） */
+.probe-help-tip {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 14px;
+  height: 14px;
+  flex-shrink: 0;
+  border-radius: 999px;
+  border: 1px solid color-mix(in srgb, var(--t3) 48%, transparent);
+  color: var(--t3);
+  font-size: 10px;
+  font-weight: 700;
+  line-height: 1;
+  letter-spacing: 0;
+  text-transform: none;
+  cursor: help;
+  user-select: none;
+  vertical-align: middle;
+}
+.probe-help-tip:hover,
+.probe-help-tip:focus-visible {
+  color: var(--t2);
+  border-color: var(--t2);
+}
+.probe-help-bubble {
+  position: fixed;
+  z-index: 80;
+  width: max-content;
+  max-width: 240px;
+  padding: 8px 10px;
+  border-radius: 10px;
+  font-size: 11px;
+  font-weight: 500;
+  line-height: 1.55;
+  letter-spacing: 0.01em;
+  color: var(--text);
+  background: var(--surfaceStrong);
+  border: 1px solid var(--border);
+  box-shadow: var(--shadowMd);
+  -webkit-backdrop-filter: blur(18px) saturate(160%);
+  backdrop-filter: blur(18px) saturate(160%);
+  pointer-events: none;
+  white-space: normal;
+}
+
 /* 代码块右上角常驻复制图标：半透明底钉在可视区右上角（外层 wrapper 不滚、pre 滚） */
 .probe-copy-btn {
   position: absolute;

@@ -70,6 +70,9 @@ test.describe('模型探测', () => {
     await expect(main).toContainText('OpenAI Responses')
     await expect(main).toContainText('Anthropic Messages')
     await expect(main).toContainText('通过 3')
+    await expect(main.getByRole('button', { name: /OpenAI Chat Completions/ })).toContainText('↑12 ↓5')
+    await expect(main.getByRole('button', { name: /OpenAI Responses/ })).toContainText('↑10 ↓4')
+    await expect(main.getByRole('button', { name: /Anthropic Messages/ })).toContainText('↑8 ↓3')
 
     // 请求日志：token 用量、缓存读写、request id 一键复制
     await page.getByRole('button', { name: /请求日志/ }).click()
@@ -277,6 +280,7 @@ test.describe('模型探测', () => {
     expect(content).toContain('/v1/chat/completions')
     expect(content).toContain('sk-secr***5678')
     expect(content).toContain('基础请求返回成功')
+    expect(content).toContain('用量: 输入 12 · 输出 5')
   })
 
   test('报告导出 HTML：离线单文件、主题切换、复现折叠、密钥脱敏', async ({ page }) => {
@@ -299,6 +303,8 @@ test.describe('模型探测', () => {
     const html = readFileSync(outPath, 'utf8')
     expect(html).toContain('模型探测报告')
     expect(html).toContain('OpenAI Chat Completions')
+    expect(html).toContain('↑12')
+    expect(html).toContain('↓5')
     expect(html).toContain('请求体')
     expect(html).not.toContain('sk-secret-key-12345678')
     expect(html).not.toContain('sk-secr***5678')
@@ -514,5 +520,506 @@ test.describe('模型探测', () => {
 
     await expect(page.locator('main')).toContainText('另有 6 项未执行', { timeout: 10000 })
     expect(anthropicCalls).toBe(0)
+  })
+
+  const chatSse = (usage?: { prompt_tokens?: number; completion_tokens?: number } | null) => {
+    const lines = [
+      `data: ${JSON.stringify({ id: '1', object: 'chat.completion.chunk', choices: [{ delta: { content: 'ha' } }] })}`,
+    ]
+    if (usage) lines.push(`data: ${JSON.stringify({ id: '1', object: 'chat.completion.chunk', choices: [], usage })}`)
+    lines.push('data: [DONE]')
+    return lines.join('\n\n') + '\n\n'
+  }
+
+  test('2xx 无 usage 判失败，报告卡片显示空 token', async ({ page }) => {
+    await page.route('**/v1/chat/completions', route =>
+      route.fulfill({
+        status: 200, contentType: 'application/json',
+        body: JSON.stringify({ id: 'chatcmpl-probe', choices: [{ message: { role: 'assistant', content: 'OK' } }] }),
+      }))
+
+    await goto(page, /模型探测/)
+    await page.getByRole('button', { name: '全不选' }).click()
+    await check(page, 'chat-basic')
+    await setupRun(page, 'e2e-无usage失败')
+
+    const main = page.locator('main')
+    await expect(main).toContainText('失败 1', { timeout: 10000 })
+    await expect(main).toContainText('计费无法落地')
+    await expect(main.getByRole('button', { name: /OpenAI Chat Completions/ })).toContainText('↑— ↓—')
+  })
+
+  test('纯流式请求体为 Chat 最小体，且不请求其它协议', async ({ page }) => {
+    const chatBodies: any[] = []
+    let responsesCalls = 0
+    let anthropicCalls = 0
+    await page.route('**/v1/chat/completions', async route => {
+      const body = route.request().postDataJSON()
+      chatBodies.push(body)
+      await route.fulfill({ status: 200, contentType: 'text/event-stream', body: chatSse({ prompt_tokens: 9, completion_tokens: 40 }) })
+    })
+    await page.route('**/v1/responses', async () => { responsesCalls++ })
+    await page.route('**/v1/messages', async () => { anthropicCalls++ })
+
+    await goto(page, /模型探测/)
+    await page.getByRole('button', { name: '全不选' }).click()
+    await check(page, 'chat-basic')
+    await check(page, 'stream-pure')
+    await setupRun(page, 'e2e-纯流式请求体')
+
+    const main = page.locator('main')
+    await expect(main.getByRole('button', { name: /纯流式/ })).toBeVisible({ timeout: 10000 })
+    await expect(main.getByRole('button', { name: /纯流式/ })).toContainText('↑9 ↓40')
+    expect(responsesCalls).toBe(0)
+    expect(anthropicCalls).toBe(0)
+    const streamBody = chatBodies.find(b => b.stream === true)
+    expect(streamBody).toBeTruthy()
+    expect(streamBody.model).toBe('probe-model')
+    expect(streamBody.messages).toEqual([{ role: 'user', content: '讲个笑话' }])
+    expect(streamBody.max_tokens).toBeUndefined()
+    expect(streamBody.max_completion_tokens).toBeUndefined()
+    expect(streamBody.stream_options).toBeUndefined()
+  })
+
+  test('SSE 流式带 Token 上限；无上限纯流式缺 usage 则对照失败', async ({ page }) => {
+    const chatBodies: any[] = []
+    const responsesBodies: any[] = []
+    await page.route('**/v1/chat/completions', async route => {
+      const body = route.request().postDataJSON()
+      chatBodies.push(body)
+      if (body?.stream) {
+        const usage = body.max_completion_tokens != null
+          ? { prompt_tokens: 11, completion_tokens: 6 }
+          : null
+        await route.fulfill({ status: 200, contentType: 'text/event-stream', body: chatSse(usage) })
+        return
+      }
+      await route.fulfill({ status: 200, contentType: 'application/json', body: CHAT_OK(10) })
+    })
+    await page.route('**/v1/responses', async route => {
+      const body = route.request().postDataJSON()
+      responsesBodies.push(body)
+      if (body?.stream) {
+        const sse = [
+          'event: response.completed',
+          `data: ${JSON.stringify({ response: { usage: { input_tokens: 10, output_tokens: 4 } } })}`,
+          '',
+          '',
+        ].join('\n')
+        await route.fulfill({ status: 200, contentType: 'text/event-stream', body: sse })
+        return
+      }
+      await route.fulfill({ status: 200, contentType: 'application/json', body: RESPONSES_OK })
+    })
+
+    await goto(page, /模型探测/)
+    await page.getByRole('button', { name: '全不选' }).click()
+    await check(page, 'chat-basic')
+    await check(page, 'responses-basic')
+    await check(page, 'stream-true')
+    await check(page, 'stream-pure')
+    await setupRun(page, 'e2e-流式上限对照')
+
+    const main = page.locator('main')
+    await expect(main.getByRole('button', { name: /纯流式/ })).toBeVisible({ timeout: 10000 })
+    await expect(main.getByRole('button', { name: /纯流式/ })).toContainText('失败')
+    await expect(main.getByRole('button', { name: /纯流式/ })).toContainText('↑— ↓—')
+    const sseTiles = main.getByRole('button', { name: /SSE 流式响应/ })
+    await expect(sseTiles).toHaveCount(2)
+    await expect(sseTiles.filter({ hasText: 'Chat Completions' })).toContainText('通过')
+    await expect(sseTiles.filter({ hasText: 'Chat Completions' })).toContainText('↑11 ↓6')
+
+    const limited = chatBodies.find(b => b.stream === true && b.max_completion_tokens === 32)
+    const pure = chatBodies.find(b => b.stream === true && b.max_completion_tokens == null)
+    expect(limited).toBeTruthy()
+    expect(pure).toBeTruthy()
+    expect(pure.messages?.[0]?.content).toBe('讲个笑话')
+    const respStream = responsesBodies.find(b => b.stream === true)
+    expect(respStream?.max_output_tokens).toBe(32)
+  })
+
+  test('流式只回 output token 仍判失败', async ({ page }) => {
+    await page.route('**/v1/chat/completions', async route => {
+      const body = route.request().postDataJSON()
+      if (body?.stream) {
+        await route.fulfill({
+          status: 200, contentType: 'text/event-stream',
+          body: chatSse({ completion_tokens: 8 }),
+        })
+        return
+      }
+      await route.fulfill({ status: 200, contentType: 'application/json', body: CHAT_OK(10) })
+    })
+
+    await goto(page, /模型探测/)
+    await page.getByRole('button', { name: '全不选' }).click()
+    await check(page, 'chat-basic')
+    await check(page, 'stream-true')
+    await setupRun(page, 'e2e-流式只回一端')
+
+    const main = page.locator('main')
+    await expect(main.getByRole('button', { name: /SSE 流式响应/ })).toContainText('失败', { timeout: 10000 })
+    await expect(main).toContainText('计费无法落地')
+    await expect(main.getByRole('button', { name: /SSE 流式响应/ })).toContainText('↑— ↓8')
+  })
+
+  test('打开 include_usage 后 Chat 两套流式都注入 stream_options', async ({ page }) => {
+    const streamBodies: any[] = []
+    await page.route('**/v1/chat/completions', async route => {
+      const body = route.request().postDataJSON()
+      if (body?.stream) streamBodies.push(body)
+      if (body?.stream) {
+        await route.fulfill({
+          status: 200, contentType: 'text/event-stream',
+          body: chatSse({ prompt_tokens: 12, completion_tokens: 7 }),
+        })
+        return
+      }
+      await route.fulfill({ status: 200, contentType: 'application/json', body: CHAT_OK(10) })
+    })
+
+    await goto(page, /模型探测/)
+    await page.getByRole('switch', { name: /include_usage/ }).click()
+    await expect(page.getByRole('switch', { name: /include_usage/ })).toHaveAttribute('aria-checked', 'true')
+    await page.getByRole('button', { name: '全不选' }).click()
+    await check(page, 'chat-basic')
+    await check(page, 'stream-true')
+    await check(page, 'stream-pure')
+    await setupRun(page, 'e2e-注入include_usage')
+
+    await expect(page.locator('main').getByRole('button', { name: /纯流式/ })).toBeVisible({ timeout: 10000 })
+    expect(streamBodies).toHaveLength(2)
+    for (const b of streamBodies) {
+      expect(b.stream_options).toEqual({ include_usage: true })
+    }
+  })
+
+  test('error-shape 4xx 无 usage 仍可通过', async ({ page }) => {
+    await page.route('**/v1/chat/completions', async route => {
+      const body = route.request().postDataJSON()
+      if (body?.model === 'modelprobe-intentionally-invalid-model') {
+        await route.fulfill({
+          status: 400, contentType: 'application/json',
+          body: JSON.stringify({ error: { message: 'invalid model' } }),
+        })
+        return
+      }
+      await route.fulfill({ status: 200, contentType: 'application/json', body: CHAT_OK(10) })
+    })
+
+    await goto(page, /模型探测/)
+    await page.getByRole('button', { name: '全不选' }).click()
+    await check(page, 'chat-basic')
+    await check(page, 'error-shape')
+    await setupRun(page, 'e2e-错误码无usage')
+
+    const main = page.locator('main')
+    await expect(main.getByRole('button', { name: /错误码规范性/ })).toContainText('通过', { timeout: 10000 })
+  })
+
+  test('未勾选 Chat 基础时纯流式跳过且不发请求', async ({ page }) => {
+    let chatCalls = 0
+    await page.route('**/v1/chat/completions', async () => { chatCalls++ })
+    await page.route('**/v1/responses', route =>
+      route.fulfill({ status: 200, contentType: 'application/json', body: RESPONSES_OK }))
+
+    await goto(page, /模型探测/)
+    await page.getByRole('button', { name: '全不选' }).click()
+    await check(page, 'chat-basic')
+    await check(page, 'stream-pure')
+    await check(page, 'responses-basic')
+    await uncheck(page, 'chat-basic')
+    await expect(page.locator('input[data-id="stream-pure"]')).toBeDisabled()
+    await setupRun(page, 'e2e-纯流式随Chat跳过')
+
+    const main = page.locator('main')
+    await expect(main).toContainText('通过 1', { timeout: 10000 })
+    await expect(main.getByRole('button', { name: /纯流式/ })).toHaveCount(0)
+    expect(chatCalls).toBe(0)
+  })
+
+  const anthropicSse = (opts: { input: number; startOutput?: number; deltaOutput?: number }) => {
+    const lines = [
+      'event: message_start',
+      `data: ${JSON.stringify({ type: 'message_start', message: { usage: { input_tokens: opts.input, output_tokens: opts.startOutput ?? 0 } } })}`,
+      '',
+    ]
+    if (opts.deltaOutput != null) {
+      lines.push(
+        'event: message_delta',
+        `data: ${JSON.stringify({ type: 'message_delta', usage: { output_tokens: opts.deltaOutput } })}`,
+        '',
+      )
+    }
+    lines.push('event: message_stop', 'data: {"type":"message_stop"}', '', '')
+    return lines.join('\n')
+  }
+
+  test('Anthropic SSE：message_start 的 output=0 不算最终用量，要等 message_delta', async ({ page }) => {
+    const bodies: any[] = []
+    await page.route('**/v1/messages', async route => {
+      const body = route.request().postDataJSON()
+      bodies.push(body)
+      if (body?.stream) {
+        await route.fulfill({
+          status: 200, contentType: 'text/event-stream',
+          body: anthropicSse({ input: 8, startOutput: 0, deltaOutput: 3 }),
+        })
+        return
+      }
+      await route.fulfill({ status: 200, contentType: 'application/json', body: ANTHROPIC_OK })
+    })
+
+    await goto(page, /模型探测/)
+    await page.getByRole('button', { name: '全不选' }).click()
+    await check(page, 'anthropic-basic')
+    await check(page, 'stream-true')
+    await setupRun(page, 'e2e-Anthropic流式用量')
+
+    const tile = page.locator('main').getByRole('button', { name: /SSE 流式响应/ })
+    await expect(tile).toContainText('通过', { timeout: 10000 })
+    await expect(tile).toContainText('↑8 ↓3')
+    const streamed = bodies.find(b => b.stream === true)
+    expect(streamed?.max_tokens).toBe(32)
+  })
+
+  test('Anthropic SSE：只有 message_start 的 output=0 时判失败', async ({ page }) => {
+    await page.route('**/v1/messages', async route => {
+      const body = route.request().postDataJSON()
+      if (body?.stream) {
+        await route.fulfill({
+          status: 200, contentType: 'text/event-stream',
+          body: anthropicSse({ input: 8, startOutput: 0 }),
+        })
+        return
+      }
+      await route.fulfill({ status: 200, contentType: 'application/json', body: ANTHROPIC_OK })
+    })
+
+    await goto(page, /模型探测/)
+    await page.getByRole('button', { name: '全不选' }).click()
+    await check(page, 'anthropic-basic')
+    await check(page, 'stream-true')
+    await setupRun(page, 'e2e-Anthropic流式占位0')
+
+    const tile = page.locator('main').getByRole('button', { name: /SSE 流式响应/ })
+    await expect(tile).toContainText('失败', { timeout: 10000 })
+    await expect(tile).toContainText('计费无法落地')
+    await expect(tile).toContainText('↑8 ↓—')
+  })
+
+  test('结构化输出：Anthropic 不出现在报告里', async ({ page }) => {
+    const anthropicBodies: any[] = []
+    await page.route('**/v1/chat/completions', route =>
+      route.fulfill({ status: 200, contentType: 'application/json', body: CHAT_OK(12) }))
+    await page.route('**/v1/messages', async route => {
+      anthropicBodies.push(route.request().postDataJSON())
+      await route.fulfill({ status: 200, contentType: 'application/json', body: ANTHROPIC_OK })
+    })
+
+    await goto(page, /模型探测/)
+    await page.getByRole('button', { name: '全不选' }).click()
+    await check(page, 'chat-basic')
+    await check(page, 'anthropic-basic')
+    await check(page, 'structured_output')
+    await setupRun(page, 'e2e-结构化输出不含Anthropic')
+
+    const main = page.locator('main')
+    await expect(main).toContainText('通过 3', { timeout: 10000 })
+    await expect(main).not.toContainText('不支持 1')
+    await expect(main).not.toContainText('无原生 response_format')
+    const soTiles = main.getByRole('button', { name: /结构化输出/ })
+    await expect(soTiles).toHaveCount(1)
+    await expect(soTiles).toContainText('Chat Completions')
+    await expect(soTiles).not.toContainText('Anthropic')
+    expect(anthropicBodies).toHaveLength(1)
+    expect(anthropicBodies[0].response_format).toBeUndefined()
+
+    const [download] = await Promise.all([
+      page.waitForEvent('download'),
+      page.getByRole('button', { name: '导出 JSON' }).click(),
+    ])
+    const raw = readFileSync(await download.path(), 'utf8')
+    expect(raw).not.toContain('structured_output@anthropic')
+    expect(raw).not.toContain('无原生 response_format')
+  })
+
+  test('历史报告：旧的 Anthropic 结构化输出「不支持」项不展示', async ({ page }) => {
+    await goto(page, /模型探测/)
+    await page.evaluate(() => new Promise<void>((resolve, reject) => {
+      const req = indexedDB.open('dev-toolkit-history')
+      req.onupgradeneeded = () => {
+        const db = req.result
+        if (!db.objectStoreNames.contains('modelprobe')) db.createObjectStore('modelprobe', { keyPath: 'id' })
+      }
+      req.onsuccess = () => {
+        const db = req.result
+        if (!db.objectStoreNames.contains('modelprobe')) { resolve(); return }
+        const tx = db.transaction('modelprobe', 'readwrite')
+        tx.objectStore('modelprobe').put({
+          id: 'p-legacy-so-anthropic',
+          name: 'e2e-历史结构化Anthropic',
+          startedAt: '2026-01-01T00:00:00.000Z',
+          completedAt: '2026-01-01T00:00:01.000Z',
+          durationMs: 1000,
+          target: {
+            baseUrl: 'https://api.openai.com',
+            model: 'probe-model',
+            overrides: { chat: null, responses: null, anthropic: null },
+          },
+          results: {
+            'anthropic-basic': {
+              status: 'passed', detail: '基础请求返回成功', duration: 10, format: 'anthropic',
+              usage: { input: 8, output: 3, cacheRead: null, cacheWrite: null }, repro: null,
+            },
+            'structured_output@anthropic': {
+              status: 'unsupported', detail: 'Anthropic Messages 无原生 response_format 参数',
+              duration: null, format: 'anthropic', repro: null,
+            },
+          },
+          summary: { passed: 1, failed: 0, unsupported: 1, skipped: 0 },
+          logs: [],
+        })
+        tx.oncomplete = () => resolve()
+        tx.onerror = () => reject(tx.error)
+      }
+      req.onerror = () => reject(req.error)
+    }))
+    await page.reload()
+    await goto(page, /模型探测/)
+    await page.getByRole('button', { name: /历史/ }).click()
+    const main = page.locator('main')
+    await expect(main).toContainText('e2e-历史结构化Anthropic')
+    await expect(main).toContainText('通过 1 · 失败 0 · 不支持 0')
+    await main.getByRole('button', { name: '查看' }).click()
+    await expect(main).toContainText('通过 1')
+    await expect(main).not.toContainText('不支持 1')
+    await expect(main.getByRole('button', { name: /结构化输出/ })).toHaveCount(0)
+    await expect(main).not.toContainText('无原生 response_format')
+    await expect(main.getByRole('button', { name: /Anthropic Messages/ })).toBeVisible()
+  })
+
+  test('429 后重试成功：等 6s 再发，日志只留最终一发', async ({ page }) => {
+    let chatCalls = 0
+    await page.route('**/v1/chat/completions', async route => {
+      chatCalls++
+      if (chatCalls === 1) {
+        await route.fulfill({
+          status: 429, contentType: 'application/json',
+          body: JSON.stringify({ error: { message: 'rate limited' } }),
+        })
+        return
+      }
+      await route.fulfill({ status: 200, contentType: 'application/json', body: CHAT_OK(12) })
+    })
+
+    await goto(page, /模型探测/)
+    await page.getByRole('button', { name: '全不选' }).click()
+    await check(page, 'chat-basic')
+    await setupRun(page, 'e2e-429重试成功')
+
+    const main = page.locator('main')
+    await expect(main).toContainText('通过 1', { timeout: 25000 })
+    expect(chatCalls).toBe(2)
+    await expect(page.getByRole('button', { name: /请求日志 \(1\)/ })).toBeVisible()
+    await page.getByRole('button', { name: /请求日志/ }).click()
+    await expect(main).toContainText('↑12')
+  })
+
+  test('429 耗尽 3 次后失败，日志只留最后一发', async ({ page }) => {
+    let chatCalls = 0
+    await page.route('**/v1/chat/completions', async route => {
+      chatCalls++
+      await route.fulfill({
+        status: 429, contentType: 'application/json',
+        body: JSON.stringify({ error: { message: 'rate limited' } }),
+      })
+    })
+
+    await goto(page, /模型探测/)
+    await page.getByRole('button', { name: '全不选' }).click()
+    await check(page, 'chat-basic')
+    await setupRun(page, 'e2e-429耗尽')
+
+    const main = page.locator('main')
+    await expect(main).toContainText('失败 1', { timeout: 25000 })
+    expect(chatCalls).toBe(3)
+    await expect(page.getByRole('button', { name: /请求日志 \(1\)/ })).toBeVisible()
+    await page.getByRole('button', { name: /请求日志/ }).click()
+    await expect(main.locator('span.font-mono', { hasText: /^429$/ })).toBeVisible()
+  })
+
+  test('并发请求稳定性遇 429 不重试', async ({ page }) => {
+    let limited = 0
+    await page.route('**/v1/chat/completions', async route => {
+      const body = route.request().postDataJSON()
+      const content = body?.messages?.[0]?.content
+      if (typeof content === 'string' && /Reply only [123]/.test(content)) {
+        limited++
+        await route.fulfill({
+          status: 429, contentType: 'application/json',
+          body: JSON.stringify({ error: { message: 'rate limited' } }),
+        })
+        return
+      }
+      await route.fulfill({ status: 200, contentType: 'application/json', body: CHAT_OK(12) })
+    })
+
+    await goto(page, /模型探测/)
+    await page.getByRole('button', { name: '全不选' }).click()
+    await check(page, 'chat-basic')
+    await check(page, 'concurrency')
+    await setupRun(page, 'e2e-并发不重试429')
+
+    const main = page.locator('main')
+    await expect(main.getByRole('button', { name: /并发请求稳定性/ })).toContainText('0/3', { timeout: 10000 })
+    expect(limited).toBe(3)
+  })
+
+  test('错误码规范性：429 耗尽后失败，不当作规范 4xx', async ({ page }) => {
+    let invalidCalls = 0
+    await page.route('**/v1/chat/completions', async route => {
+      const body = route.request().postDataJSON()
+      if (body?.model === 'modelprobe-intentionally-invalid-model') {
+        invalidCalls++
+        await route.fulfill({
+          status: 429, contentType: 'application/json',
+          body: JSON.stringify({ error: { message: 'rate limited' } }),
+        })
+        return
+      }
+      await route.fulfill({ status: 200, contentType: 'application/json', body: CHAT_OK(12) })
+    })
+
+    await goto(page, /模型探测/)
+    await page.getByRole('button', { name: '全不选' }).click()
+    await check(page, 'chat-basic')
+    await check(page, 'error-shape')
+    await setupRun(page, 'e2e-错误码429')
+
+    const main = page.locator('main')
+    await expect(main.getByRole('button', { name: /错误码规范性/ })).toContainText('全程限流', { timeout: 25000 })
+    expect(invalidCalls).toBe(3)
+  })
+
+  test('测试连接遇 429 不重试', async ({ page }) => {
+    let chatCalls = 0
+    await page.route('**/v1/chat/completions', async route => {
+      chatCalls++
+      await route.fulfill({
+        status: 429, contentType: 'application/json',
+        body: JSON.stringify({ error: { message: 'rate limited' } }),
+      })
+    })
+
+    await goto(page, /模型探测/)
+    await page.getByRole('button', { name: '全不选' }).click()
+    await check(page, 'chat-basic')
+    await addChannel(page, { apiKey: 'sk-test-probe' })
+    await inputByLabel(page, '模型名称').fill('probe-model')
+    await page.getByRole('button', { name: '测试连接' }).click()
+
+    await expect(page.locator('[data-conn="chat"]')).toContainText('✗ 429')
+    expect(chatCalls).toBe(1)
   })
 })
