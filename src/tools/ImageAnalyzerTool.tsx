@@ -2,11 +2,18 @@ import React, { useState, useCallback, useRef, useEffect, useLayoutEffect, useMe
 import { Btn, Label, Card, Badge, CustomInput, CustomSelect, SearchableSelect, CustomTextarea, Toggle, SegmentedControl, SectionTitle, CopyBtn } from '../shared/ui'
 
 interface ImageItem {
-  id: string; order: number; source: 'local' | 'url' | 'base64json'; name: string
+  id: string; order: number; source: 'local' | 'url' | 'base64json' | 'base64'; name: string
   size: number | null; mime: string; status: 'loading' | 'done' | 'error'
   width: number; height: number; format: string; src: string; origin: string
   url?: string; error?: string; note?: string; formatNote?: string
   crossOriginBlocked?: boolean; sizeBlocked?: boolean
+}
+
+interface DecodedImageB64 {
+  buf: ArrayBuffer
+  fmt: string
+  mime: string
+  dataUrl: string
 }
 
 // ─── Image Analyzer Utilities ────────────────────────────────────────────────────
@@ -166,6 +173,62 @@ function imgExtFromUrl(url: string = ''): string {
   } catch { return '' }
 }
 
+const IMG_MIME_BY_FMT: Record<string, string> = {
+  JPEG: 'image/jpeg', PNG: 'image/png', GIF: 'image/gif', BMP: 'image/bmp',
+  WebP: 'image/webp', TIFF: 'image/tiff', AVIF: 'image/avif', HEIC: 'image/heic',
+  ICO: 'image/x-icon', SVG: 'image/svg+xml',
+}
+
+const IMG_B64_MIN_LEN = 32
+
+function imgIsHttpUrl(s: string): boolean {
+  return /^(https?:)?\/\//i.test(s.trim())
+}
+
+function imgExtFromFormat(fmt: string): string {
+  return fmt === 'JPEG' ? 'jpg' : fmt.toLowerCase()
+}
+
+function stripImageBase64(text: string): string | null {
+  let s = text.trim()
+  if (s.length >= 2 && ((s.startsWith('"') && s.endsWith('"')) || (s.startsWith("'") && s.endsWith("'")))) {
+    s = s.slice(1, -1).trim()
+  }
+  const dataUrl = /^data:image\/[\w.+-]+(?:;[\w.=+-]+)*;base64,([\s\S]+)$/i.exec(s)
+  if (dataUrl) s = dataUrl[1]
+  else if (/^data:/i.test(s)) return null
+
+  const compact = s.replace(/\s+/g, '')
+  if (compact.length < IMG_B64_MIN_LEN) return null
+  if (!/^[A-Za-z0-9+/_-]+=*$/.test(compact)) return null
+
+  let b64 = compact.replace(/-/g, '+').replace(/_/g, '/')
+  const rem = b64.length % 4
+  if (rem === 1) return null
+  if (rem === 2) b64 += '=='
+  else if (rem === 3) b64 += '='
+  return b64
+}
+
+function decodeImageBase64(b64: string, fallbackFmt?: string): DecodedImageB64 | null {
+  let binary: string
+  try { binary = atob(b64) } catch { return null }
+  const bytes = new Uint8Array(binary.length)
+  for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i)
+  const fmt = imgDetectFormat(bytes.buffer) || fallbackFmt || null
+  if (!fmt) return null
+  const mime = IMG_MIME_BY_FMT[fmt] || 'image/png'
+  return { buf: bytes.buffer, fmt, mime, dataUrl: `data:${mime};base64,${b64}` }
+}
+
+function tryParseImageBase64(text: string): DecodedImageB64 | null {
+  const t = text.trim()
+  if (!t || imgIsHttpUrl(t)) return null
+  const b64 = stripImageBase64(t)
+  if (!b64) return null
+  return decodeImageBase64(b64)
+}
+
 // ─── Tool: 图片信息识别 ─────────────────────────────────────────────────────────
 
 let imgCounter = 0
@@ -232,6 +295,25 @@ function ImageAnalyzerTool() {
     addToast(`已添加 ${files.length} 张本地图片`, 'ok')
   }, [addToast, updateItem])
 
+  const addBase64Images = useCallback((
+    entries: { decoded: DecodedImageB64; name: string }[],
+    source: 'base64' | 'base64json',
+    origin: string,
+  ) => {
+    entries.forEach(({ decoded, name }) => {
+      const id = Math.random().toString(36).slice(2, 10)
+      const item: ImageItem = {
+        id, order: imgCounter++, source, name, size: decoded.buf.byteLength, mime: decoded.mime,
+        status: 'loading', width: 0, height: 0, format: decoded.fmt, src: decoded.dataUrl, origin,
+      }
+      setItems(prev => [...prev, item])
+      const img = new Image()
+      img.onload = () => updateItem(id, { width: img.naturalWidth, height: img.naturalHeight, status: 'done' })
+      img.onerror = () => updateItem(id, { status: 'error', error: '图片解码失败，base64 数据可能已损坏或被截断' })
+      img.src = decoded.dataUrl
+    })
+  }, [updateItem])
+
   // 解析 OpenAI 图片接口的标准响应结构 { "data": [ { "b64_json": "..." }, ... ] }
   // 每个 b64_json 单独解码为二进制后按 magic bytes 嗅探真实格式，不假设固定为 PNG
   const addOpenAiB64Json = useCallback((text: string) => {
@@ -245,73 +327,111 @@ function ImageAnalyzerTool() {
       .filter((entry): entry is { b64_json?: unknown } => !!entry && typeof entry.b64_json === 'string' && (entry.b64_json as string).trim().length > 0)
       .map(entry => (entry.b64_json as string).trim())
     if (!found.length) { addToast('data[] 中未找到 b64_json 字段', 'err'); return }
-    found.forEach((b64, i) => {
+    const decodedList: { decoded: DecodedImageB64; name: string }[] = []
+    found.forEach((raw, i) => {
       const idx = i + 1
-      const id = Math.random().toString(36).slice(2, 10)
-      const item: ImageItem = {
-        id, order: imgCounter++, source: 'base64json', name: `openai-image-${idx}`,
-        size: null, mime: '', status: 'loading', width: 0, height: 0,
-        format: '', src: '', origin: 'OpenAI Base64 JSON',
+      const normalized = stripImageBase64(raw) ?? raw.replace(/\s+/g, '')
+      const decoded = decodeImageBase64(normalized, 'PNG')
+      if (!decoded) {
+        const id = Math.random().toString(36).slice(2, 10)
+        setItems(prev => [...prev, {
+          id, order: imgCounter++, source: 'base64json', name: `openai-image-${idx}`,
+          size: null, mime: '', status: 'error', width: 0, height: 0, format: '', src: '',
+          origin: 'OpenAI Base64 JSON', error: 'base64 解码失败，可能不是合法的 base64 字符串',
+        }])
+        return
       }
-      setItems(prev => [...prev, item])
-      let buf: ArrayBuffer
-      try {
-        const bin = atob(b64)
-        const bytes = new Uint8Array(bin.length)
-        for (let j = 0; j < bin.length; j++) bytes[j] = bin.charCodeAt(j)
-        buf = bytes.buffer
-      } catch {
-        updateItem(id, { status: 'error', error: 'base64 解码失败，可能不是合法的 base64 字符串' }); return
-      }
-      const fmt = imgDetectFormat(buf) || 'PNG'
-      const mimeByFmt: Record<string, string> = { JPEG: 'image/jpeg', PNG: 'image/png', GIF: 'image/gif', BMP: 'image/bmp', WebP: 'image/webp', TIFF: 'image/tiff', AVIF: 'image/avif', HEIC: 'image/heic', ICO: 'image/x-icon', SVG: 'image/svg+xml' }
-      const mime = mimeByFmt[fmt] || 'image/png'
-      const ext = fmt === 'JPEG' ? 'jpg' : fmt.toLowerCase()
-      const dataUrl = `data:${mime};base64,${b64}`
-      const img = new Image()
-      img.onload = () => updateItem(id, {
-        width: img.naturalWidth, height: img.naturalHeight, src: dataUrl, status: 'done',
-        format: fmt, mime, size: buf.byteLength, name: `openai-image-${idx}.${ext}`,
-      })
-      img.onerror = () => updateItem(id, { status: 'error', error: '图片解码失败，base64 数据可能已损坏或被截断' })
-      img.src = dataUrl
+      decodedList.push({ decoded, name: `openai-image-${idx}.${imgExtFromFormat(decoded.fmt)}` })
     })
+    if (decodedList.length) addBase64Images(decodedList, 'base64json', 'OpenAI Base64 JSON')
     addToast(`已从 JSON 中解析出 ${found.length} 张图片`, 'ok')
-  }, [addToast, updateItem])
+  }, [addToast, addBase64Images])
+
+  const addRemoteUrl = useCallback((url: string) => {
+    const rawName = decodeURIComponent(url.split('/').pop()!.split('?')[0]) || '远程图片'
+    const id = Math.random().toString(36).slice(2, 10)
+    const item: ImageItem = {
+      id, order: imgCounter++, source: 'url', name: rawName.length > 44 ? rawName.slice(0, 42) + '…' : rawName,
+      url, size: null, mime: '', status: 'loading', width: 0, height: 0,
+      format: imgExtFromUrl(url) || '', src: url, origin: 'URL 链接',
+    }
+    setItems(prev => [...prev, item])
+    const img = new Image(); img.crossOrigin = 'anonymous'
+    const fallback = () => {
+      const img2 = new Image()
+      img2.onload = () => updateItem(id, { width: img2.naturalWidth, height: img2.naturalHeight, status: 'done', crossOriginBlocked: true, format: item.format || '未知' })
+      img2.onerror = () => updateItem(id, { status: 'error', error: '无法加载该 URL（链接失效、非图片或被防盗链拦截）' })
+      img2.src = url
+    }
+    img.onload = () => updateItem(id, { width: img.naturalWidth, height: img.naturalHeight, status: 'done' })
+    img.onerror = fallback; img.src = url
+    fetch(url, { mode: 'cors' })
+      .then(r => { if (!r.ok) throw new Error('HTTP ' + r.status); return r.blob() })
+      .then(async blob => {
+        const fmt = await blob.slice(0, 512).arrayBuffer().then(buf => imgDetectFormat(buf) || imgMimeToFormat(blob.type) || item.format || '未知').catch(() => imgMimeToFormat(blob.type) || item.format || '未知')
+        updateItem(id, { size: blob.size, mime: blob.type, format: fmt })
+      })
+      .catch(() => updateItem(id, { sizeBlocked: true, format: item.format || '未知' }))
+  }, [updateItem])
 
   const addUrls = useCallback((text: string) => {
     const trimmed = text.trim()
+    if (!trimmed) {
+      addToast('请输入有效的图片 URL（以 http(s):// 开头）、Base64（可带 data:image 前缀），或粘贴 OpenAI 图片接口返回的 JSON', 'err')
+      return
+    }
     if (trimmed.startsWith('{')) { addOpenAiB64Json(trimmed); return }
-    const urls = text.split(/[\n,\s]+/).map(s => s.trim()).filter(Boolean).filter(u => /^(https?:)?\/\/|^data:image\//i.test(u))
-    if (!urls.length) { addToast('请输入有效的图片 URL（以 http(s):// 开头），或粘贴 OpenAI 图片接口返回的 JSON', 'err'); return }
-    urls.forEach(url => {
-      const rawName = decodeURIComponent(url.split('/').pop()!.split('?')[0]) || '远程图片'
-      const id = Math.random().toString(36).slice(2, 10)
-      const item: ImageItem = {
-        id, order: imgCounter++, source: 'url', name: rawName.length > 44 ? rawName.slice(0, 42) + '…' : rawName,
-        url, size: null, mime: '', status: 'loading', width: 0, height: 0,
-        format: imgExtFromUrl(url) || '', src: url, origin: 'URL 链接',
+
+    const apply = (urls: string[], b64s: DecodedImageB64[]) => {
+      urls.forEach(addRemoteUrl)
+      if (b64s.length) {
+        addBase64Images(
+          b64s.map((decoded, i) => ({ decoded, name: `base64-image-${i + 1}.${imgExtFromFormat(decoded.fmt)}` })),
+          'base64',
+          'Base64',
+        )
       }
-      setItems(prev => [...prev, item])
-      const img = new Image(); img.crossOrigin = 'anonymous'
-      const fallback = () => {
-        const img2 = new Image()
-        img2.onload = () => updateItem(id, { width: img2.naturalWidth, height: img2.naturalHeight, status: 'done', crossOriginBlocked: true, format: item.format || '未知' })
-        img2.onerror = () => updateItem(id, { status: 'error', error: '无法加载该 URL（链接失效、非图片或被防盗链拦截）' })
-        img2.src = url
+      if (urls.length && b64s.length) addToast(`已加载 ${urls.length} 个 URL、${b64s.length} 段 Base64`, 'ok')
+      else if (urls.length) addToast(`已开始加载 ${urls.length} 个 URL 图片`, 'ok')
+      else addToast(`已从 Base64 解析出 ${b64s.length} 张图片`, 'ok')
+    }
+
+    const lines = trimmed.split(/\n+/).map(s => s.trim()).filter(Boolean)
+    if (lines.length > 1) {
+      const urls: string[] = []
+      const b64s: DecodedImageB64[] = []
+      let allParsed = true
+      for (const line of lines) {
+        if (imgIsHttpUrl(line)) { urls.push(line); continue }
+        const decoded = tryParseImageBase64(line)
+        if (decoded) { b64s.push(decoded); continue }
+        allParsed = false
+        break
       }
-      img.onload = () => updateItem(id, { width: img.naturalWidth, height: img.naturalHeight, status: 'done' })
-      img.onerror = fallback; img.src = url
-      fetch(url, { mode: 'cors' })
-        .then(r => { if (!r.ok) throw new Error('HTTP ' + r.status); return r.blob() })
-        .then(async blob => {
-          const fmt = await blob.slice(0, 512).arrayBuffer().then(buf => imgDetectFormat(buf) || imgMimeToFormat(blob.type) || item.format || '未知').catch(() => imgMimeToFormat(blob.type) || item.format || '未知')
-          updateItem(id, { size: blob.size, mime: blob.type, format: fmt })
-        })
-        .catch(() => updateItem(id, { sizeBlocked: true, format: item.format || '未知' }))
-    })
-    addToast(`已开始加载 ${urls.length} 个 URL 图片`, 'ok')
-  }, [addToast, updateItem, addOpenAiB64Json])
+      if (allParsed && (urls.length || b64s.length)) { apply(urls, b64s); return }
+    }
+
+    const whole = tryParseImageBase64(trimmed)
+    if (whole) {
+      apply([], [whole])
+      return
+    }
+
+    const urls: string[] = []
+    const b64s: DecodedImageB64[] = []
+    for (const token of trimmed.split(/[\n,\s]+/).map(s => s.trim()).filter(Boolean)) {
+      if (imgIsHttpUrl(token)) urls.push(token)
+      else {
+        const decoded = tryParseImageBase64(token)
+        if (decoded) b64s.push(decoded)
+      }
+    }
+    if (!urls.length && !b64s.length) {
+      addToast('请输入有效的图片 URL（以 http(s):// 开头）、Base64（可带 data:image 前缀），或粘贴 OpenAI 图片接口返回的 JSON', 'err')
+      return
+    }
+    apply(urls, b64s)
+  }, [addToast, addOpenAiB64Json, addBase64Images, addRemoteUrl])
 
   const removeItem = useCallback((id: string) => setItems(prev => prev.filter(i => i.id !== id)), [])
 
@@ -354,8 +474,13 @@ function ImageAnalyzerTool() {
       const text = e.clipboardData?.getData('text')
       const trimmed = text?.trim()
       if (!trimmed) return
-      // 全局粘贴要保守判断，避免误触发：URL 或者「看起来像带 b64_json 的 JSON」才当图片处理
-      if (/^https?:\/\//i.test(trimmed) || (trimmed.startsWith('{') && /"b64_json"/.test(trimmed))) addUrls(text!)
+      // 全局粘贴要保守判断，避免误触发：URL、data URL、能解码出图片 magic 的 Base64，或带 b64_json 的 JSON
+      if (
+        /^https?:\/\//i.test(trimmed)
+        || (trimmed.startsWith('{') && /"b64_json"/.test(trimmed))
+        || /^data:image\//i.test(trimmed)
+        || tryParseImageBase64(trimmed)
+      ) addUrls(text!)
     }
     window.addEventListener('paste', handler as EventListener)
     return () => window.removeEventListener('paste', handler as EventListener)
@@ -450,7 +575,7 @@ function ImageAnalyzerTool() {
             <span className="w-7 h-7 rounded-lg flex items-center justify-center" style={{ background: 'var(--accentSub)', color: 'var(--accent)' }}>
               <svg viewBox="0 0 24 24" className="w-4 h-4" fill="none" stroke="currentColor" strokeWidth="2"><path d="M10 13a5 5 0 0 0 7.5.5l3-3a5 5 0 0 0-7-7l-1.5 1.5" /><path d="M14 11a5 5 0 0 0-7.5-.5l-3 3a5 5 0 0 0 7 7L12 19" /></svg>
             </span>
-            <span className="text-sm font-semibold" style={{ color: 'var(--text)' }}>图片 URL 加载 <span style={{ color: 'var(--t3)' }} className="font-normal">（每行一个，可批量；也支持粘贴 OpenAI 图片接口返回的 JSON）</span></span>
+            <span className="text-sm font-semibold" style={{ color: 'var(--text)' }}>URL / Base64 加载 <span style={{ color: 'var(--t3)' }} className="font-normal">（每行一个，可批量；支持带或不带 data:image 前缀的 Base64，以及 OpenAI 图片 JSON）</span></span>
           </div>
           <UrlInput onSubmit={addUrls} />
         </div>
@@ -461,9 +586,9 @@ function ImageAnalyzerTool() {
         <section className="surface-card rounded-2xl px-4 py-3 flex flex-wrap items-center gap-3" style={{ background: 'var(--bg)', border: '1px solid var(--border)', boxShadow: 'var(--shadow)' }}>
           <SegmentedControl value={view} options={[{ value: 'card', label: '卡片' }, { value: 'table', label: '表格' }]} onChange={v => setView(v as 'card' | 'table')} />
           <div className="w-px h-5" style={{ background: 'var(--border)' }} />
-          <CustomSelect value={sortBy} onChange={v => setSortBy(v as typeof sortBy)}
-            options={[{ value: 'added', label: '添加顺序' }, { value: 'pixels', label: '像素总数 ↓' }, { value: 'size', label: '文件大小 ↓' }, { value: 'name', label: '文件名 A→Z' }, { value: 'width', label: '宽度 ↓' }]} />
-          <CustomSelect value={filterTier} onChange={setFilterTier} options={tierOptions} />
+          <div className="w-40 min-w-0"><CustomSelect value={sortBy} onChange={v => setSortBy(v as typeof sortBy)}
+            options={[{ value: 'added', label: '添加顺序' }, { value: 'pixels', label: '像素总数 ↓' }, { value: 'size', label: '文件大小 ↓' }, { value: 'name', label: '文件名 A→Z' }, { value: 'width', label: '宽度 ↓' }]} /></div>
+          <div className="w-40 min-w-0"><CustomSelect value={filterTier} onChange={setFilterTier} options={tierOptions} /></div>
           <input type="text" placeholder="搜索文件名 / 格式…" value={search} onChange={e => setSearch(e.target.value)}
             className="rounded-xl px-3 py-1.5 text-xs outline-none transition-all duration-150"
             style={{ background: 'var(--inputBg)', border: '1px solid var(--inputBorder)', color: 'var(--text)', width: 176 }}
@@ -504,12 +629,19 @@ function ImageAnalyzerTool() {
             <rect x="3" y="4" width="18" height="16" rx="3" /><circle cx="8.5" cy="9.5" r="1.6" /><path d="m4 17 4.5-4.5 3 3L15 11l5 5" />
           </svg>
           <p className="font-medium" style={{ color: 'var(--t2)' }}>还没有图片</p>
-          <p className="text-xs mt-1.5" style={{ color: 'var(--t3)' }}>上传本地图片或粘贴图片 URL，即可自动识别分辨率、大小、等级与格式</p>
+          <p className="text-xs mt-1.5" style={{ color: 'var(--t3)' }}>上传本地图片，或粘贴图片 URL / Base64，即可自动识别分辨率、大小、等级与格式</p>
+        </section>
+      )}
+
+      {has && visibleItems.length === 0 && (
+        <section className="surface-card rounded-2xl py-16 text-center" style={{ background: 'var(--bg)', border: '1px solid var(--border)', boxShadow: 'var(--shadow)' }}>
+          <p className="text-sm" style={{ color: 'var(--t2)' }}>没有符合筛选条件的图片</p>
+          <p className="text-xs mt-1.5" style={{ color: 'var(--t3)' }}>试试调整搜索、排序或分辨率档位</p>
         </section>
       )}
 
       {/* Card View */}
-      {view === 'card' && has && (
+      {view === 'card' && has && visibleItems.length > 0 && (
         <div className="grid sm:grid-cols-2 xl:grid-cols-3 2xl:grid-cols-4 gap-4">
           {visibleItems.map(it => {
             const c = imgClassifyResolution(it.width, it.height, loose)
@@ -551,7 +683,7 @@ function ImageAnalyzerTool() {
                 <div className="p-4">
                   <p className="font-semibold text-sm truncate" style={{ color: 'var(--text)' }} title={it.name}>{it.name}</p>
                   <p className="text-[10px] mt-0.5 flex items-center gap-1" style={{ color: 'var(--t3)' }}>
-                    <span className="w-1.5 h-1.5 rounded-full" style={{ background: it.source === 'local' ? 'var(--accent)' : it.source === 'base64json' ? 'var(--jKey)' : 'var(--warn)' }} />{it.origin}
+                    <span className="w-1.5 h-1.5 rounded-full" style={{ background: it.source === 'local' ? 'var(--accent)' : (it.source === 'base64json' || it.source === 'base64') ? 'var(--jKey)' : 'var(--warn)' }} />{it.origin}
                   </p>
                   <div className="grid grid-cols-2 gap-2 mt-3">
                     <div className="rounded-lg px-2.5 py-2" style={{ background: 'var(--s1)', border: '1px solid var(--border)' }}>
@@ -596,7 +728,7 @@ function ImageAnalyzerTool() {
       )}
 
       {/* Table View */}
-      {view === 'table' && has && (
+      {view === 'table' && has && visibleItems.length > 0 && (
         <div className="surface-card rounded-2xl overflow-hidden" style={{ background: 'var(--bg)', border: '1px solid var(--border)', boxShadow: 'var(--shadow)' }}>
           <div className="overflow-x-auto">
             <table className="w-full text-sm min-w-[900px]">
@@ -611,7 +743,7 @@ function ImageAnalyzerTool() {
                 {visibleItems.map(it => {
                   const c = imgClassifyResolution(it.width, it.height, loose)
                   if (it.status === 'loading') return <tr key={it.id}><td colSpan={9} className="px-4 py-3"><div className="h-8 rounded ia-shimmer" /></td></tr>
-                  if (it.status === 'error') return <tr key={it.id}><td className="px-4 py-3" style={{ color: 'var(--err)' }}>—</td><td className="px-4 py-3 text-xs">{it.name}</td><td colSpan={6} className="px-4 py-3 text-xs" style={{ color: 'var(--err)' }}>{it.error}</td><td className="px-4 py-3"><button onClick={() => removeItem(it.id)} className="text-xs hover:underline" style={{ color: 'var(--err)' }}>移除</button></td></tr>
+                  if (it.status === 'error') return <tr key={it.id}><td className="px-4 py-3" style={{ color: 'var(--err)' }}>—</td><td className="px-4 py-3 text-xs max-w-[220px]"><p className="truncate" title={it.name}>{it.name}</p></td><td colSpan={6} className="px-4 py-3 text-xs" style={{ color: 'var(--err)' }}>{it.error}</td><td className="px-4 py-3"><button onClick={() => removeItem(it.id)} className="text-xs hover:underline" style={{ color: 'var(--err)' }}>移除</button></td></tr>
                   const fmtCls = IMG_FORMAT_COLOR[it.format] || 'bg-slate-500/15 text-slate-600 dark:text-slate-300 border-slate-400/25'
                   return (
                     <tr key={it.id} className="transition-colors duration-100" style={{ borderTop: '1px solid var(--border)' }}
@@ -715,7 +847,7 @@ function UrlInput({ onSubmit }: { onSubmit: (text: string) => void }) {
       <textarea
         value={value} onChange={e => setValue(e.target.value)} rows={4} spellCheck={false}
         onFocus={() => setFocused(true)} onBlur={() => setFocused(false)}
-        placeholder={'https://example.com/photo.jpg\nhttps://example.com/banner.png\n\n也支持粘贴 OpenAI 图片接口返回的 JSON（自动提取 data[].b64_json，可含多张）'}
+        placeholder={'https://example.com/photo.jpg\nhttps://example.com/banner.png\n\n也支持粘贴 Base64（可带 data:image/...;base64, 前缀，也可纯字符串）\n以及 OpenAI 图片接口返回的 JSON（自动提取 data[].b64_json，可含多张）'}
         className="w-full flex-1 rounded-xl p-3 text-xs leading-relaxed resize-y outline-none transition-all duration-150"
         style={{
           background: 'var(--inputBg)', color: 'var(--text)',
@@ -726,7 +858,7 @@ function UrlInput({ onSubmit }: { onSubmit: (text: string) => void }) {
         onKeyDown={e => { if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) { onSubmit(value); setValue('') } }}
       />
       <div className="flex items-center gap-2 mt-3 flex-wrap">
-        <Btn variant="accent" onClick={() => { onSubmit(value); setValue('') }}>加载 URL 图片</Btn>
+        <Btn variant="accent" onClick={() => { onSubmit(value); setValue('') }}>加载图片</Btn>
         {[
           { url: 'https://picsum.photos/id/1015/1920/1080', label: '示例 1080P' },
           { url: 'https://picsum.photos/id/1043/3840/2160', label: '示例 4K' },

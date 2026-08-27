@@ -5,10 +5,11 @@ import { highlightJson } from '../shared/json'
 import { decryptLlmApiKey, encryptLlmApiKey } from '../shared/api-key-crypto'
 import { historyDbGetAll, historyDbPutOne, historyDbDeleteOne, historyDbDeleteMany, historyDbClear } from '../shared/history-db'
 import { useDebouncedPersist } from '../shared/use-debounced-persist'
+import { uniqueCopyName } from '../shared/channel-copy'
 
 // ─── Tool: LLM 缓存命中率测试 ──────────────────────────────────────────────────
-// 定位：对三种协议（OpenAI Chat / OpenAI Responses / Anthropic Messages）执行
-// 「预热写缓存 → 顺序 N 轮重复长前缀 + 变化后缀」的命中率闭环测试，输出请求级
+// 定位：对三种协议（OpenAI Chat / OpenAI Responses / Anthropic Messages）跑
+// 三个可选场景（重复请求 / 多轮对话 / 尾部变化），默认只跑尾部变化。输出请求级
 // 命中率、Token 级覆盖率、节省 Token 与延迟对比，报告可导出 PNG / PDF / HTML。
 //
 // 方法依据（无行业统一 benchmark，以各家官方缓存语义为准）：
@@ -21,6 +22,8 @@ import { useDebouncedPersist } from '../shared/use-debounced-persist'
 //   input_tokens 不含缓存部分（与 OpenAI 相反），指标归一化时补齐。
 
 type CacheFormat = 'chat' | 'responses' | 'anthropic'
+type CacheCaseId = 'repeat' | 'multiturn' | 'suffix'
+type CacheTurn = { role: 'user' | 'assistant'; content: string }
 
 export interface CacheUsage {
   /** 协议原始输入 token（OpenAI 含缓存部分；Anthropic 不含） */
@@ -65,6 +68,13 @@ export interface CacheProtocolResult extends CacheMetrics {
   promptCacheKeyDropped?: boolean  // 渠道拒绝 prompt_cache_key 参数，已降级去掉重试
 }
 
+interface CacheCaseResult {
+  caseId: CacheCaseId
+  nonce: string
+  rounds: number
+  results: CacheProtocolResult[]
+}
+
 interface CacheReport {
   id: string
   name: string
@@ -72,8 +82,15 @@ interface CacheReport {
   completedAt: string
   durationMs: number
   target: { baseUrl: string; model: string; channelName?: string; keyMask?: string }
-  params: { prefixTokens: number; rounds: number; nonce: string }
+  params: {
+    prefixTokens: number
+    rounds: number
+    nonce: string
+    cases?: CacheCaseId[]
+    caseRounds?: Partial<Record<CacheCaseId, number>>
+  }
   results: CacheProtocolResult[]
+  caseResults?: CacheCaseResult[]
 }
 
 interface CacheLog {
@@ -129,6 +146,15 @@ const CACHE_FIELD_HINTS: Record<CacheFormat, string> = {
   chat: 'usage.prompt_tokens_details.cached_tokens',
   responses: 'usage.input_tokens_details.cached_tokens',
   anthropic: 'usage.cache_read_input_tokens / cache_creation_input_tokens',
+}
+const CACHE_CASES: CacheCaseId[] = ['repeat', 'multiturn', 'suffix']
+const CACHE_CASE_LABELS: Record<CacheCaseId, string> = {
+  repeat: '重复请求', multiturn: '多轮对话', suffix: '尾部变化',
+}
+const CACHE_CASE_HINTS: Record<CacheCaseId, string> = {
+  repeat: '整份请求体原样重放，测相同 prompt 能否命中',
+  multiturn: '长前缀保留，把真实回复拼进下一轮，测前缀在对话变长后是否仍命中',
+  suffix: '相同长前缀 + 每轮不同问题，测「同上下文、不同提问」',
 }
 
 // ── 纯函数工具 ──
@@ -198,7 +224,7 @@ function cacheTruncateDeep(v: any): any {
 
 // ── 长前缀与请求体构造 ──
 // 前缀 = 运行 nonce（保证测的是本次写入的缓存，不吃上一轮运行的残留）+ 确定性语料
-// 重复到目标 token 数（按 ~4 字符/token 估算）。后缀每轮变化，模拟「同上下文、不同问题」。
+// 重复到目标 token 数（按 ~4 字符/token 估算）。三个 case 共用这段前缀，靠 nonce 隔离。
 function cacheBuildPrefix(nonce: string, targetTokens: number): string {
   const sentence = 'This deterministic filler sentence is repeated to build a long stable prefix for prompt cache hit-rate measurement across providers. '
   const targetChars = Math.max(1, targetTokens) * 4
@@ -208,15 +234,25 @@ function cacheBuildPrefix(nonce: string, targetTokens: number): string {
 }
 const cacheSuffixOf = (round: number): string =>
   `Question ${round}: reply with the single word OK and nothing else.`
+const cacheClampRounds = (v: string | number): number => Math.max(1, Math.min(20, Math.round(Number(v)) || 5))
 
-function cacheBodyOf(format: CacheFormat, model: string, prefix: string, suffix: string, promptCacheKey: string, includeCacheKey: boolean): Record<string, any> {
+function cacheTurnsForRound(caseId: CacheCaseId, round: number, history: CacheTurn[]): CacheTurn[] {
+  if (caseId === 'repeat') return [{ role: 'user', content: cacheSuffixOf(0) }]
+  if (caseId === 'suffix') return [{ role: 'user', content: cacheSuffixOf(round) }]
+  return [...history, { role: 'user', content: cacheSuffixOf(round) }]
+}
+
+function cacheBodyOf(format: CacheFormat, model: string, prefix: string, turns: CacheTurn[], promptCacheKey: string, includeCacheKey: boolean): Record<string, any> {
   if (format === 'chat') {
-    const b: Record<string, any> = { model, messages: [{ role: 'system', content: prefix }, { role: 'user', content: suffix }] }
+    const b: Record<string, any> = { model, messages: [{ role: 'system', content: prefix }, ...turns] }
     if (includeCacheKey) b.prompt_cache_key = promptCacheKey
     return b
   }
   if (format === 'responses') {
-    const b: Record<string, any> = { model, instructions: prefix, input: suffix }
+    const input = turns.length === 1 && turns[0].role === 'user'
+      ? turns[0].content
+      : turns.map(t => ({ role: t.role, content: t.content }))
+    const b: Record<string, any> = { model, instructions: prefix, input }
     if (includeCacheKey) b.prompt_cache_key = promptCacheKey
     return b
   }
@@ -224,8 +260,39 @@ function cacheBodyOf(format: CacheFormat, model: string, prefix: string, suffix:
     model,
     max_tokens: 16,
     system: [{ type: 'text', text: prefix, cache_control: { type: 'ephemeral' } }],
-    messages: [{ role: 'user', content: suffix }],
+    messages: turns.map(t => ({ role: t.role, content: t.content })),
   }
+}
+
+function cacheExtractAssistantText(format: CacheFormat, data: any): string {
+  if (!data || typeof data !== 'object') return ''
+  if (format === 'chat') {
+    const c = data?.choices?.[0]?.message?.content
+    if (typeof c === 'string') return c.trim()
+    if (Array.isArray(c)) {
+      return c.map((p: any) => typeof p === 'string' ? p : String(p?.text ?? p?.content ?? '')).join('').trim()
+    }
+    return ''
+  }
+  if (format === 'responses') {
+    const out = Array.isArray(data.output) ? data.output : []
+    const texts: string[] = []
+    for (const item of out) {
+      if (item?.type === 'message' && Array.isArray(item.content)) {
+        for (const p of item.content) {
+          if (typeof p?.text === 'string') texts.push(p.text)
+        }
+      }
+    }
+    return texts.join('').trim()
+  }
+  const content = Array.isArray(data.content) ? data.content : []
+  return content.filter((b: any) => b?.type === 'text' && typeof b.text === 'string').map((b: any) => b.text).join('').trim()
+}
+
+function cacheCasesOf(report: CacheReport): CacheCaseResult[] {
+  if (report.caseResults && report.caseResults.length) return report.caseResults
+  return [{ caseId: 'suffix', nonce: report.params.nonce, rounds: report.params.rounds, results: report.results }]
 }
 
 // ── 指标计算与结论判定 ──
@@ -254,7 +321,7 @@ function cacheComputeMetrics(rounds: CacheRound[]): CacheMetrics {
   }
 }
 
-function cacheVerdictOf(r: CacheProtocolResult): { tone: 'ok' | 'warn' | 'err'; text: string } {
+function cacheVerdictOf(r: CacheProtocolResult, caseId: CacheCaseId = 'suffix'): { tone: 'ok' | 'warn' | 'err'; text: string } {
   if (r.status === 'error') return { tone: 'err', text: `测试未完成：${r.error || '预热请求失败'}` }
   if (r.status === 'stopped') return { tone: 'warn', text: '测试已停止，以下为已完成轮次。' }
   if (!r.measured) return { tone: 'err', text: '没有成功的测量轮次，无法计算命中率。' }
@@ -263,6 +330,7 @@ function cacheVerdictOf(r: CacheProtocolResult): { tone: 'ok' | 'warn' | 'err'; 
   }
   const rate = r.hitRate ?? 0
   if (rate >= 1) {
+    if (caseId === 'multiturn') return { tone: 'ok', text: `前缀仍命中 · ${r.hitCount}/${r.measured} 轮` }
     if ((r.coverage ?? 0) >= 0.8) return { tone: 'ok', text: `全部命中 · 覆盖率 ${cachePct(r.coverage)}` }
     return { tone: 'warn', text: `全部命中，但 Token 覆盖率仅 ${cachePct(r.coverage)}` }
   }
@@ -276,6 +344,24 @@ interface CacheCfgStored {
   formats?: Partial<Record<CacheFormat, boolean>>
   prefixTokens?: string
   rounds?: string
+  cases?: Partial<Record<CacheCaseId, boolean>>
+  caseRounds?: Partial<Record<CacheCaseId, string>>
+}
+function cacheNormalizeCases(cfg: CacheCfgStored): { cases: Record<CacheCaseId, boolean>; caseRounds: Record<CacheCaseId, string> } {
+  const legacy = cfg.rounds ?? '5'
+  const hasCases = cfg.cases != null
+  return {
+    cases: {
+      repeat: hasCases ? cfg.cases!.repeat === true : false,
+      multiturn: hasCases ? cfg.cases!.multiturn === true : false,
+      suffix: hasCases ? cfg.cases!.suffix !== false : true,
+    },
+    caseRounds: {
+      repeat: cfg.caseRounds?.repeat ?? legacy,
+      multiturn: cfg.caseRounds?.multiturn ?? legacy,
+      suffix: cfg.caseRounds?.suffix ?? legacy,
+    },
+  }
 }
 function loadCacheCfg(): CacheCfgStored {
   if (typeof window === 'undefined') return {}
@@ -575,7 +661,8 @@ async function cacheExportAsImage(rootEl: HTMLElement, filename: string) {
     const blob = await new Promise<Blob | null>(resolve => canvas.toBlob(resolve, 'image/png'))
     if (!blob) throw new Error('toBlob 返回空')
     cacheDownloadBlob(filename, blob)
-  } catch {
+  } catch (err) {
+    console.error(err)
     window.alert('导出图片失败，请改用 JSON 导出获取完整数据。')
   }
 }
@@ -589,7 +676,8 @@ async function cacheExportAsPdf(rootEl: HTMLElement, filename: string) {
     const doc = new jsPDF({ orientation: w > h ? 'l' : 'p', unit: 'mm', format: [w, h] })
     doc.addImage(canvas.toDataURL('image/png'), 'PNG', 0, 0, w, h)
     doc.save(filename)
-  } catch {
+  } catch (err) {
+    console.error(err)
     window.alert('导出 PDF 失败，请改用 JSON 导出获取完整数据。')
   }
 }
@@ -603,7 +691,7 @@ async function cacheExportAsHtml(rootEl: HTMLElement, filename: string) {
       }
       // 覆盖样式必须排在 appCss 之后：应用样式里的 body{overflow:hidden;height:100%} 会让离线报告无法滚动
       const overrideCss = `
-html,body{height:auto!important;min-height:0!important;overflow:visible!important;margin:0!important}
+html,body{height:auto!important;min-height:0!important;overflow:auto!important;margin:0!important}
 html{-webkit-font-smoothing:antialiased;-moz-osx-font-smoothing:grayscale;text-size-adjust:100%}
 body{
   padding:clamp(28px,6vw,72px) clamp(20px,5vw,56px) clamp(48px,8vw,96px);
@@ -616,6 +704,7 @@ body{
 [data-cache-export-root] .surface-card::before,[data-cache-export-root] .surface-card::after{display:none!important}
 [data-cache-export-root] img{max-width:100%;height:auto}
 [data-cache-export-root] [data-export-scroll]{max-height:none!important;overflow:visible!important}
+[data-cache-export-root] .overflow-hidden{overflow:visible!important}
 @media print{
   body{padding:0;background:#fff}
   [data-cache-export-root]{max-width:none;gap:16px}
@@ -626,7 +715,8 @@ body{
       const htmlContent = `<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>LLM 缓存命中率测试报告</title><style>${appCss}\n${varsCss}\n${overrideCss}</style></head><body>${clone.outerHTML}</body></html>`
       cacheDownload(filename, htmlContent, 'text/html;charset=utf-8')
     })
-  } catch {
+  } catch (err) {
+    console.error(err)
     window.alert('导出 HTML 失败，请改用 JSON 导出获取完整数据。')
   }
 }
@@ -683,7 +773,7 @@ function CacheChartSkeleton() {
     </div>
   )
 }
-function CacheRoundsChartLazy(props: { result: CacheProtocolResult }) {
+function CacheRoundsChartLazy(props: { result: CacheProtocolResult; footnote?: string }) {
   return <Suspense fallback={<CacheChartSkeleton />}><LazyCacheRoundsChart {...props} /></Suspense>
 }
 
@@ -692,16 +782,24 @@ function CacheRoundsChartLazy(props: { result: CacheProtocolResult }) {
 type CacheChFormState = { name: string; baseUrl: string; timeoutSec: string; chatUrl: string; responsesUrl: string; anthropicUrl: string; apiKey: string }
 const CACHE_EMPTY_CH_FORM: CacheChFormState = { name: '', baseUrl: '', timeoutSec: '60', chatUrl: '', responsesUrl: '', anthropicUrl: '', apiKey: '' }
 
+const CACHE_CASE_ROUNDS_LABEL: Record<CacheCaseId, string> = {
+  repeat: '重放轮数（不含预热）',
+  multiturn: '对话轮数（不含预热）',
+  suffix: '测量轮数（不含预热）',
+}
+
 const CacheConfigPane = React.memo(function CacheConfigPane({
   channels, activeChId, onActiveChId, model, onModel,
-  formats, onToggleFormat, prefixTokens, onPrefixTokens, rounds, onRounds,
+  formats, onToggleFormat, prefixTokens, onPrefixTokens,
+  cases, onToggleCase, caseRounds, onCaseRounds,
   running, startErr,
 }: {
   channels: CacheChannel[]; activeChId: string | null; onActiveChId: (v: string) => void
   model: string; onModel: (v: string) => void
   formats: Record<CacheFormat, boolean>; onToggleFormat: (f: CacheFormat) => void
   prefixTokens: string; onPrefixTokens: (v: string) => void
-  rounds: string; onRounds: (v: string) => void
+  cases: Record<CacheCaseId, boolean>; onToggleCase: (c: CacheCaseId) => void
+  caseRounds: Record<CacheCaseId, string>; onCaseRounds: (c: CacheCaseId, v: string) => void
   running: boolean; startErr: string
 }) {
   return (
@@ -746,13 +844,44 @@ const CacheConfigPane = React.memo(function CacheConfigPane({
       </div>
 
       <div style={{ borderTop: '1px solid var(--border)', paddingTop: 14 }}>
+        <Label className="block mb-2">测试场景</Label>
+        <div className="space-y-2">
+          {CACHE_CASES.map(c => {
+            const checked = cases[c]
+            return (
+              <div key={c}
+                className={`probe-format-card${checked ? ' is-checked' : ''}${running ? ' is-disabled' : ''}`}
+                style={{ background: checked ? undefined : 'var(--bg)', opacity: running ? 0.55 : 1, cursor: running ? 'default' : 'pointer' }}
+                data-case-card={c}>
+                <label className="block" title={CACHE_CASE_HINTS[c]}>
+                  <input type="checkbox" data-case={c} checked={checked} disabled={running} onChange={() => onToggleCase(c)}
+                    aria-label={`选择 ${CACHE_CASE_LABELS[c]}`} className="probe-format-input" />
+                  <div className="flex items-center justify-between gap-2">
+                    <span className="probe-format-chip" style={{ fontFamily: CACHE_MONO }}>{c}</span>
+                    <span className={`probe-format-check${checked ? ' is-on' : ''}`} aria-hidden="true">
+                      <svg width="10" height="10" viewBox="0 0 10 10" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                        <path d="M1.5 5.2 4 7.7 8.5 2.5" />
+                      </svg>
+                    </span>
+                  </div>
+                  <div className="mt-2 text-sm font-semibold leading-snug" style={{ color: 'var(--text)' }}>{CACHE_CASE_LABELS[c]}</div>
+                  <div className="mt-0.5 text-[11px] leading-4" style={{ color: 'var(--t3)' }}>{CACHE_CASE_HINTS[c]}</div>
+                </label>
+                <div className="mt-2.5" style={{ opacity: checked ? 1 : 0.45 }}
+                  onClick={e => e.stopPropagation()} onPointerDown={e => e.stopPropagation()}>
+                  <Label className="block mb-1.5">{CACHE_CASE_ROUNDS_LABEL[c]}</Label>
+                  <CustomInput value={caseRounds[c]} onChange={v => onCaseRounds(c, v)} type="number" placeholder="5" />
+                </div>
+              </div>
+            )
+          })}
+        </div>
+      </div>
+
+      <div style={{ borderTop: '1px solid var(--border)', paddingTop: 14 }}>
         <Label className="block mb-1.5">前缀目标 Token 数</Label>
         <CustomInput value={prefixTokens} onChange={onPrefixTokens} type="number" placeholder="2048" />
         <p className="text-[11px] mt-1 leading-4" style={{ color: 'var(--t3)' }}>OpenAI 自动缓存要求前缀 &gt; 1024 token，建议 ≥ 2048（按 ~4 字符/token 估算生成）。</p>
-        <div className="mt-2.5">
-          <Label className="block mb-1.5">测量轮数（不含预热）</Label>
-          <CustomInput value={rounds} onChange={onRounds} type="number" placeholder="5" />
-        </div>
       </div>
 
       {startErr && <p className="text-xs whitespace-pre-wrap" style={{ color: 'var(--err)' }}>{startErr}</p>}
@@ -762,11 +891,11 @@ const CacheConfigPane = React.memo(function CacheConfigPane({
 
 const CacheChannelsPane = React.memo(function CacheChannelsPane({
   chNotice, channels, activeChId, chForm, editingChId,
-  onSetActive, onEdit, onDelete, onSave, onChFormChange, onClearForm,
+  onSetActive, onEdit, onCopy, onDelete, onSave, onChFormChange, onClearForm,
 }: {
   chNotice: string; channels: CacheChannel[]; activeChId: string | null
   chForm: CacheChFormState; editingChId: string | null
-  onSetActive: (id: string) => void; onEdit: (c: CacheChannel) => void; onDelete: (id: string) => void
+  onSetActive: (id: string) => void; onEdit: (c: CacheChannel) => void; onCopy: (c: CacheChannel) => void; onDelete: (id: string) => void
   onSave: () => void; onChFormChange: React.Dispatch<React.SetStateAction<CacheChFormState>>; onClearForm: () => void
 }) {
   return (
@@ -790,9 +919,10 @@ const CacheChannelsPane = React.memo(function CacheChannelsPane({
                 </div>
               )}
               <div className="text-[11px] font-mono mt-1" style={{ color: 'var(--t3)' }}>{c.keyMask || '（未设置）'}</div>
-              <div className="flex gap-2 mt-3">
+              <div className="flex gap-2 mt-3 flex-wrap">
                 <Btn small variant="soft" onClick={() => onSetActive(c.id)}>设为当前</Btn>
                 <Btn small variant="soft" onClick={() => onEdit(c)}>编辑</Btn>
+                <Btn small variant="soft" onClick={() => onCopy(c)}>复制</Btn>
                 <Btn small variant="danger" onClick={() => onDelete(c.id)}>删除</Btn>
               </div>
             </div>
@@ -858,6 +988,8 @@ function CacheReportView({ report, reportRef }: { report: CacheReport; reportRef
     }
   }
   const busy = exportKind != null
+  const caseBlocks = cacheCasesOf(report)
+  const paramsLine = `前缀 ≈${report.params.prefixTokens} token · ` + caseBlocks.map(c => `${CACHE_CASE_LABELS[c.caseId]} 预热 1 + 测量 ${c.rounds}`).join(' · ')
   return (
     <div className="flex flex-col">
       {/* 导出动作留在报告文档之外：报告本身保持「一张干净的文档」 */}
@@ -881,13 +1013,13 @@ function CacheReportView({ report, reportRef }: { report: CacheReport; reportRef
             <div className="min-w-0">
               <div className="text-[11px] font-semibold uppercase" style={{ color: 'var(--accent)', letterSpacing: '0.14em' }}>缓存命中率测试报告</div>
               {/* 大字收紧字距、压紧行距；正文字距留 0 */}
-              <h3 className="text-[26px] font-bold mt-2.5" style={{ color: 'var(--text)', letterSpacing: '-0.021em', lineHeight: 1.15 }}>{report.name}</h3>
-              <p className="text-sm mt-3 leading-[1.55]" style={{ color: 'var(--t2)' }}>
+              <h3 className="text-[26px] font-bold mt-2.5 break-words" style={{ color: 'var(--text)', letterSpacing: '-0.021em', lineHeight: 1.15 }}>{report.name}</h3>
+              <p className="text-sm mt-3 leading-[1.55] break-all" style={{ color: 'var(--t2)' }}>
                 {report.target.channelName ? `${report.target.channelName} · ` : ''}{report.target.baseUrl} · {report.target.model}
                 {report.target.keyMask ? ` · ${report.target.keyMask}` : ''}
               </p>
               <p className="text-[11px] mt-2 font-mono" style={{ color: 'var(--t3)', fontFamily: CACHE_MONO, letterSpacing: '0.01em' }}>
-                前缀 ≈{report.params.prefixTokens} token · 预热 1 + 测量 {report.params.rounds}
+                {paramsLine}
               </p>
             </div>
             <div className="text-right">
@@ -897,14 +1029,23 @@ function CacheReportView({ report, reportRef }: { report: CacheReport; reportRef
           </div>
         </div>
 
-        {/* 每协议结果 */}
-        {report.results.map(r => {
-          const verdict = cacheVerdictOf(r)
+        {/* 按 case 分块，块内再按协议 */}
+        {caseBlocks.map(block => (
+            <div key={block.caseId} data-case-report={block.caseId} className="mt-8">
+            <div className="px-1">
+              <h3 className="text-[20px] font-bold" style={{ color: 'var(--text)', letterSpacing: '-0.018em' }}>{CACHE_CASE_LABELS[block.caseId]}</h3>
+              <p className="text-sm mt-1.5 leading-[1.55]" style={{ color: 'var(--t2)' }}>{CACHE_CASE_HINTS[block.caseId]}</p>
+            </div>
+            {block.results.map(r => {
+          const verdict = cacheVerdictOf(r, block.caseId)
           const toneStyle = verdict.tone === 'ok' ? { background: 'var(--okBg)', color: 'var(--ok)' }
             : verdict.tone === 'warn' ? { background: 'var(--warnBg)', color: 'var(--warn)' }
             : { background: 'var(--errBg)', color: 'var(--err)' }
           const latencySub = r.warmupMs != null && r.hitAvgMs != null
             ? `预热 ${r.warmupMs} → 命中 ${r.hitAvgMs} ms`
+            : undefined
+          const chartFoot = block.caseId === 'multiturn'
+            ? '理想形态：预热写入 system 前缀，后续轮次前缀仍被读取；未缓存部分会随对话变长而增加。'
             : undefined
           return (
             <div key={r.format} data-format-report={r.format} className="surface-card rounded-2xl px-7 py-6 mt-6" style={{ background: 'var(--bg)', border: '1px solid var(--border)' }}>
@@ -973,11 +1114,13 @@ function CacheReportView({ report, reportRef }: { report: CacheReport; reportRef
               )}
 
               <div className="mt-6 pt-5" style={{ borderTop: '1px solid var(--border)' }}>
-                <CacheRoundsChartLazy result={r} />
+                <CacheRoundsChartLazy result={r} footnote={chartFoot} />
               </div>
             </div>
           )
-        })}
+            })}
+          </div>
+        ))}
         </div>
       </div>
     </div>
@@ -988,6 +1131,7 @@ function CacheReportView({ report, reportRef }: { report: CacheReport; reportRef
 
 function CacheHitTool() {
   const cfg0 = loadCacheCfg()
+  const cases0 = cacheNormalizeCases(cfg0)
   const [model, setModel] = useState(cfg0.model ?? '')
   const [formats, setFormats] = useState<Record<CacheFormat, boolean>>({
     chat: cfg0.formats?.chat !== false,
@@ -995,7 +1139,8 @@ function CacheHitTool() {
     anthropic: cfg0.formats?.anthropic !== false,
   })
   const [prefixTokens, setPrefixTokens] = useState(cfg0.prefixTokens ?? '2048')
-  const [rounds, setRounds] = useState(cfg0.rounds ?? '5')
+  const [cases, setCases] = useState<Record<CacheCaseId, boolean>>(cases0.cases)
+  const [caseRounds, setCaseRounds] = useState<Record<CacheCaseId, string>>(cases0.caseRounds)
 
   const [channels, setChannels] = useState<CacheChannel[]>(() => loadCacheChannels())
   const [activeChId, setActiveChId] = useState<string | null>(() => loadCacheActiveChId())
@@ -1005,8 +1150,12 @@ function CacheHitTool() {
   const activeChannel = channels.find(c => c.id === activeChId) ?? null
 
   useDebouncedPersist(() => {
-    saveCacheCfg({ model, formats, prefixTokens, rounds })
-  }, [model, formats, prefixTokens, rounds])
+    saveCacheCfg({
+      model, formats, prefixTokens,
+      rounds: caseRounds.suffix,
+      cases, caseRounds,
+    })
+  }, [model, formats, prefixTokens, cases, caseRounds])
   useEffect(() => { saveCacheChannels(channels) }, [channels])
   useEffect(() => {
     if (typeof window === 'undefined') return
@@ -1063,6 +1212,14 @@ function CacheHitTool() {
     setChForm({ name: c.name, baseUrl: c.baseUrl, timeoutSec: c.timeoutSec, chatUrl: c.chatUrl, responsesUrl: c.responsesUrl, anthropicUrl: c.anthropicUrl, apiKey: '' })
     setEditingChId(c.id)
   }, [])
+  const copyChannel = useCallback((c: CacheChannel) => {
+    const name = uniqueCopyName(c.name, channels.map(x => x.name))
+    const nc: CacheChannel = { ...c, id: 'ch' + Date.now().toString(36) + Math.random().toString(36).slice(2, 7), name }
+    setChannels([...channels, nc])
+    chToast(`已复制为 ${name}`)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [channels])
+
   const delChannel = useCallback((id: string) => {
     if (!window.confirm('删除该渠道？')) return
     setChannels(prev => prev.filter(c => c.id !== id))
@@ -1075,6 +1232,12 @@ function CacheHitTool() {
   const toggleFormat = useCallback((f: CacheFormat) => {
     setFormats(prev => ({ ...prev, [f]: !prev[f] }))
   }, [])
+  const toggleCase = useCallback((c: CacheCaseId) => {
+    setCases(prev => ({ ...prev, [c]: !prev[c] }))
+  }, [])
+  const setCaseRoundsOf = useCallback((c: CacheCaseId, v: string) => {
+    setCaseRounds(prev => ({ ...prev, [c]: v }))
+  }, [])
 
   // ── 运行状态 ──
   const [pane, setPane] = useState<'live' | 'logs' | 'report' | 'history' | 'channels'>('live')
@@ -1085,7 +1248,7 @@ function CacheHitTool() {
   const [history, setHistory] = useState<CacheReport[]>([])
   const [logs, setLogs] = useState<CacheLog[]>([])
   const [openLogs, setOpenLogs] = useState<Record<string, boolean>>({})
-  const [liveResults, setLiveResults] = useState<Partial<Record<CacheFormat, CacheProtocolResult>>>({})
+  const [liveResults, setLiveResults] = useState<Partial<Record<CacheCaseId, Partial<Record<CacheFormat, CacheProtocolResult>>>>>({})
   const [progress, setProgress] = useState<{ done: number; total: number; label: string }>({ done: 0, total: 0, label: '' })
   const [startErr, setStartErr] = useState('')
 
@@ -1153,47 +1316,81 @@ function CacheHitTool() {
     }
   }
 
-  // ── 单协议命中率闭环：预热 + 顺序 N 轮 ──
+  // ── 单协议命中率闭环：预热 + 顺序 N 轮（按 case 构造 turns）──
   const runFormatTest = async (
     cfg: CacheCfg, format: CacheFormat, prefix: string, nonce: string, measureRounds: number,
+    caseId: CacheCaseId,
     onRound: (partial: CacheProtocolResult) => void,
   ): Promise<CacheProtocolResult> => {
     const roundsArr: CacheRound[] = []
     let useCacheKey = format !== 'anthropic'
     let cacheKeyDropped = false
     const promptCacheKey = `cache-hit-test-${nonce}`
+    let history: CacheTurn[] = []
+    const caseLabel = CACHE_CASE_LABELS[caseId]
 
     const snapshot = (status: CacheProtocolResult['status'], error?: string): CacheProtocolResult => ({
       format, status, error, rounds: [...roundsArr], promptCacheKeyDropped: cacheKeyDropped || undefined,
       ...cacheComputeMetrics(roundsArr),
     })
 
-    const doRound = async (round: number): Promise<CacheRound> => {
+    const doRound = async (round: number, isRetry = false): Promise<{ rec: CacheRound; assistantText: string }> => {
       const warmup = round === 0
-      const label = `${CACHE_FORMAT_LABELS[format]} · ${warmup ? '预热' : `第 ${round} 轮`}`
-      const body = cacheBodyOf(format, cfg.model, prefix, cacheSuffixOf(round), promptCacheKey, useCacheKey)
+      const label = `${caseLabel} · ${CACHE_FORMAT_LABELS[format]} · ${warmup ? '预热' : `第 ${round} 轮`}${isRetry ? '（重试）' : ''}`
+      const turns = cacheTurnsForRound(caseId, round, history)
+      const body = cacheBodyOf(format, cfg.model, prefix, turns, promptCacheKey, useCacheKey)
       try {
         let r = await cacheRequest(cfg, format, label, body)
         // 部分网关会拒绝 prompt_cache_key 参数：去掉后重试一次，并在后续轮次保持去掉
         if (!r.ok && useCacheKey && /prompt_cache_key/i.test(cacheExtractError(r.data))) {
           useCacheKey = false
           cacheKeyDropped = true
-          const retryBody = cacheBodyOf(format, cfg.model, prefix, cacheSuffixOf(round), promptCacheKey, false)
+          const retryBody = cacheBodyOf(format, cfg.model, prefix, turns, promptCacheKey, false)
           r = await cacheRequest(cfg, format, label + '（去掉 prompt_cache_key 重试）', retryBody)
         }
         const usage = cacheUsageOf(format, r.data)
+        const assistantText = r.ok ? cacheExtractAssistantText(format, r.data) : ''
         if (!r.ok) {
-          return { round, warmup, status: 'error', httpStatus: r.status, durationMs: r.durationMs, usage, hit: false, error: cacheExtractError(r.data) }
+          return {
+            rec: { round, warmup, status: 'error', httpStatus: r.status, durationMs: r.durationMs, usage, hit: false, error: cacheExtractError(r.data) },
+            assistantText: '',
+          }
         }
-        return { round, warmup, status: 'ok', httpStatus: r.status, durationMs: r.durationMs, usage, hit: (usage.cacheRead ?? 0) > 0 }
+        return {
+          rec: { round, warmup, status: 'ok', httpStatus: r.status, durationMs: r.durationMs, usage, hit: (usage.cacheRead ?? 0) > 0 },
+          assistantText,
+        }
       } catch (e: any) {
-        return { round, warmup, status: 'error', httpStatus: null, durationMs: null, usage: cacheEmptyUsage(), hit: false, error: e?.message || String(e) }
+        return {
+          rec: { round, warmup, status: 'error', httpStatus: null, durationMs: null, usage: cacheEmptyUsage(), hit: false, error: e?.message || String(e) },
+          assistantText: '',
+        }
       }
     }
 
+    const commitMultiturn = (round: number, assistantText: string) => {
+      history = [...history, { role: 'user', content: cacheSuffixOf(round) }, { role: 'assistant', content: assistantText }]
+    }
+
+    const runRound = async (round: number): Promise<CacheRound> => {
+      const first = await doRound(round)
+      if (caseId !== 'multiturn') return first.rec
+      if (first.rec.status === 'ok' && first.assistantText) {
+        commitMultiturn(round, first.assistantText)
+        return first.rec
+      }
+      const retry = await doRound(round, true)
+      if (retry.rec.status === 'ok' && retry.assistantText) {
+        commitMultiturn(round, retry.assistantText)
+        return retry.rec
+      }
+      if (retry.rec.status === 'error') return retry.rec
+      return { ...retry.rec, status: 'error', error: retry.rec.error || '未拿到可用的 assistant 回复' }
+    }
+
     // 第 0 轮：预热写缓存。失败则该协议终止（后续轮次没有测量意义）。
-    setProgress(p => ({ ...p, label: `${CACHE_FORMAT_LABELS[format]}：预热写缓存` }))
-    const warmupRound = await doRound(0)
+    setProgress(p => ({ ...p, label: `${caseLabel} · ${CACHE_FORMAT_LABELS[format]}：预热写缓存` }))
+    const warmupRound = await runRound(0)
     roundsArr.push(warmupRound)
     onRound(snapshot('ok'))
     if (warmupRound.status === 'error') return snapshot('error', warmupRound.error)
@@ -1201,10 +1398,11 @@ function CacheHitTool() {
     // 顺序执行 N 轮测量（顺序而非并发：缓存写入需在首个响应后才可用，并发会全部 miss）
     for (let i = 1; i <= measureRounds; i++) {
       if (stopRef.current) return snapshot('stopped')
-      setProgress(p => ({ ...p, label: `${CACHE_FORMAT_LABELS[format]}：测量第 ${i}/${measureRounds} 轮` }))
-      const rd = await doRound(i)
+      setProgress(p => ({ ...p, label: `${caseLabel} · ${CACHE_FORMAT_LABELS[format]}：测量第 ${i}/${measureRounds} 轮` }))
+      const rd = await runRound(i)
       roundsArr.push(rd)
       onRound(snapshot('ok'))
+      if (caseId === 'multiturn' && rd.status === 'error') return snapshot('error', rd.error)
     }
     return snapshot('ok')
   }
@@ -1216,7 +1414,13 @@ function CacheHitTool() {
     if (!model.trim()) errs.push('模型名称不能为空。')
     const activeFormats = CACHE_FORMATS.filter(f => formats[f])
     if (!activeFormats.length) errs.push('请至少勾选一个测试协议。')
-    const measureRounds = Math.max(1, Math.min(20, Math.round(Number(rounds)) || 5))
+    const activeCases = CACHE_CASES.filter(c => cases[c])
+    if (!activeCases.length) errs.push('请至少勾选一个测试场景。')
+    const roundsOf: Record<CacheCaseId, number> = {
+      repeat: cacheClampRounds(caseRounds.repeat),
+      multiturn: cacheClampRounds(caseRounds.multiturn),
+      suffix: cacheClampRounds(caseRounds.suffix),
+    }
     const prefixTok = Math.max(256, Math.min(32000, Math.round(Number(prefixTokens)) || 2048))
     const cfg = ch ? await cacheBuildCfgFromChannel(ch, model.trim()) : null
     if (ch && cfg && !cfg.apiKey.trim()) errs.push('渠道 API Key 解密失败，请重新编辑渠道并保存。')
@@ -1232,40 +1436,61 @@ function CacheHitTool() {
     setRunning(true)
     setPane('live')
 
-    const totalRounds = activeFormats.length * (measureRounds + 1)
+    const totalRounds = activeCases.reduce((sum, c) => sum + activeFormats.length * (roundsOf[c] + 1), 0)
     let done = 0
     setProgress({ done: 0, total: totalRounds, label: '准备测试' })
 
-    const nonce = cacheMakeNonce()
+    const runNonce = cacheMakeNonce()
     const startedAt = new Date().toISOString()
     const startMs = Date.now()
-    const results: CacheProtocolResult[] = []
+    const caseResults: CacheCaseResult[] = []
     try {
-      for (const f of activeFormats) {
+      for (const caseId of activeCases) {
         if (stopRef.current) break
-        // 每个协议用独立 nonce 后缀，避免协议之间的前缀在网关侧意外互相影响
-        const prefix = cacheBuildPrefix(`${nonce}-${f}`, prefixTok)
-        const out = await runFormatTest(cfg!, f, prefix, `${nonce}-${f}`, measureRounds, partial => {
-          done++
-          setProgress(p => ({ ...p, done: Math.min(done, totalRounds) }))
-          setLiveResults(prev => ({ ...prev, [f]: partial }))
-        })
-        results.push(out)
-        setLiveResults(prev => ({ ...prev, [f]: out }))
+        const measureRounds = roundsOf[caseId]
+        const results: CacheProtocolResult[] = []
+        for (const f of activeFormats) {
+          if (stopRef.current) break
+          // 每个 case × 协议用独立 nonce，避免场景之间的前缀在网关侧串缓存
+          const scopedNonce = `${runNonce}-${caseId}-${f}`
+          const prefix = cacheBuildPrefix(scopedNonce, prefixTok)
+          const out = await runFormatTest(cfg!, f, prefix, scopedNonce, measureRounds, caseId, partial => {
+            done++
+            setProgress(p => ({ ...p, done: Math.min(done, totalRounds) }))
+            setLiveResults(prev => ({ ...prev, [caseId]: { ...prev[caseId], [f]: partial } }))
+          })
+          results.push(out)
+          setLiveResults(prev => ({ ...prev, [caseId]: { ...prev[caseId], [f]: out } }))
+        }
+        for (const f of activeFormats) {
+          if (!results.some(r => r.format === f)) {
+            results.push({ format: f, status: 'stopped', rounds: [], ...cacheComputeMetrics([]) })
+          }
+        }
+        caseResults.push({ caseId, nonce: `${runNonce}-${caseId}`, rounds: measureRounds, results })
       }
-      // 未执行到的协议（手动停止）标记为 stopped
-      for (const f of activeFormats) {
-        if (!results.some(r => r.format === f)) {
-          results.push({ format: f, status: 'stopped', rounds: [], ...cacheComputeMetrics([]) })
+      for (const caseId of activeCases) {
+        if (!caseResults.some(c => c.caseId === caseId)) {
+          caseResults.push({
+            caseId, nonce: `${runNonce}-${caseId}`, rounds: roundsOf[caseId],
+            results: activeFormats.map(f => ({ format: f, status: 'stopped' as const, rounds: [], ...cacheComputeMetrics([]) })),
+          })
         }
       }
     } finally {
+      const flatResults = caseResults.length === 1 ? caseResults[0].results : caseResults.flatMap(c => c.results)
+      const primaryRounds = caseResults[0]?.rounds ?? roundsOf.suffix
       const rep: CacheReport = {
         id: 'c' + Date.now() + '_' + Math.random().toString(36).slice(2, 7),
         name, startedAt, completedAt: new Date().toISOString(), durationMs: Date.now() - startMs,
         target: { baseUrl: cfg!.baseUrl, model: cfg!.model, channelName: ch?.name, keyMask: ch?.keyMask },
-        params: { prefixTokens: prefixTok, rounds: measureRounds, nonce },
-        results,
+        params: {
+          prefixTokens: prefixTok, rounds: primaryRounds, nonce: runNonce,
+          cases: activeCases,
+          caseRounds: Object.fromEntries(activeCases.map(c => [c, roundsOf[c]])),
+        },
+        results: flatResults,
+        caseResults,
       }
       setReport(rep)
       try { setHistory(await saveCacheHistory(rep)) } catch { /* IndexedDB 不可用时仅当前会话可见 */ }
@@ -1283,7 +1508,8 @@ function CacheHitTool() {
   }, [nameModal])
 
   const uiActiveFormats = CACHE_FORMATS.filter(f => formats[f])
-  const canStart = !!activeChannel && !!model.trim() && uiActiveFormats.length > 0
+  const uiActiveCases = CACHE_CASES.filter(c => cases[c])
+  const canStart = !!activeChannel && !!model.trim() && uiActiveFormats.length > 0 && uiActiveCases.length > 0
   const liveIdle = !running && progress.total === 0
 
   const renderLogRow = (log: CacheLog) => {
@@ -1344,7 +1570,7 @@ function CacheHitTool() {
           model={model} onModel={setModel}
           formats={formats} onToggleFormat={toggleFormat}
           prefixTokens={prefixTokens} onPrefixTokens={setPrefixTokens}
-          rounds={rounds} onRounds={setRounds}
+          cases={cases} onToggleCase={toggleCase} caseRounds={caseRounds} onCaseRounds={setCaseRoundsOf}
           running={running} startErr={startErr}
         />
 
@@ -1376,39 +1602,49 @@ function CacheHitTool() {
                 {uiActiveFormats.length === 0 && (
                   <p className="text-xs mb-4" style={{ color: 'var(--warn)' }}>至少勾选一个测试协议才能开始。</p>
                 )}
+                {uiActiveCases.length === 0 && (
+                  <p className="text-xs mb-4" style={{ color: 'var(--warn)' }}>至少勾选一个测试场景才能开始。</p>
+                )}
                 {/* 还没跑过时只留说明卡，不摆一排「待执行」空卡片（左侧已经列了勾选的协议） */}
-                <div className={liveIdle ? 'hidden' : 'space-y-4'}>
-                  {uiActiveFormats.map(f => {
-                    const r = liveResults[f]
-                    return (
-                      <Card key={f}>
-                        <div className="flex items-center gap-3 flex-wrap">
-                          <span className="text-sm font-bold" style={{ color: 'var(--text)' }}>{CACHE_FORMAT_LABELS[f]}</span>
-                          {r ? (
-                            <span className="font-mono text-xs tabular-nums" style={{ color: 'var(--t2)', fontFamily: CACHE_MONO }}>
-                              命中 {r.hitCount}/{r.measured}{r.failedRounds ? ` · 失败 ${r.failedRounds}` : ''} · 覆盖率 {cachePct(r.coverage)}
-                            </span>
-                          ) : (
-                            <span className="text-xs" style={{ color: 'var(--t3)' }}>{running ? '排队中…' : '待执行'}</span>
-                          )}
-                        </div>
-                        {r && r.rounds.length > 0 && (
-                          <div className="flex flex-wrap gap-1.5 mt-3">
-                            {r.rounds.map(rd => (
-                              <span key={rd.round} className="inline-flex items-center gap-1 px-2 py-1 rounded-lg font-mono text-[11px]" style={{
-                                fontFamily: CACHE_MONO,
-                                background: rd.status === 'error' ? 'var(--errBg)' : rd.warmup ? 'var(--s2)' : rd.hit ? 'var(--okBg)' : 'var(--warnBg)',
-                                color: rd.status === 'error' ? 'var(--err)' : rd.warmup ? 'var(--t2)' : rd.hit ? 'var(--ok)' : 'var(--warn)',
-                              }}>
-                                {rd.warmup ? '预热' : `#${rd.round}`} {rd.status === 'error' ? '✗' : rd.hit ? `读${rd.usage.cacheRead}` : '未命中'}
-                              </span>
-                            ))}
-                          </div>
-                        )}
-                        {r?.status === 'error' && <p className="text-xs mt-2" style={{ color: 'var(--err)' }}>{r.error}</p>}
-                      </Card>
-                    )
-                  })}
+                <div className={liveIdle ? 'hidden' : 'space-y-6'}>
+                  {uiActiveCases.map(caseId => (
+                    <div key={caseId}>
+                      <div className="text-sm font-bold mb-2.5" style={{ color: 'var(--text)' }}>{CACHE_CASE_LABELS[caseId]}</div>
+                      <div className="space-y-4">
+                        {uiActiveFormats.map(f => {
+                          const r = liveResults[caseId]?.[f]
+                          return (
+                            <Card key={f}>
+                              <div className="flex items-center gap-3 flex-wrap">
+                                <span className="text-sm font-bold" style={{ color: 'var(--text)' }}>{CACHE_FORMAT_LABELS[f]}</span>
+                                {r ? (
+                                  <span className="font-mono text-xs tabular-nums" style={{ color: 'var(--t2)', fontFamily: CACHE_MONO }}>
+                                    命中 {r.hitCount}/{r.measured}{r.failedRounds ? ` · 失败 ${r.failedRounds}` : ''} · 覆盖率 {cachePct(r.coverage)}
+                                  </span>
+                                ) : (
+                                  <span className="text-xs" style={{ color: 'var(--t3)' }}>{running ? '排队中…' : '待执行'}</span>
+                                )}
+                              </div>
+                              {r && r.rounds.length > 0 && (
+                                <div className="flex flex-wrap gap-1.5 mt-3">
+                                  {r.rounds.map(rd => (
+                                    <span key={rd.round} className="inline-flex items-center gap-1 px-2 py-1 rounded-lg font-mono text-[11px]" style={{
+                                      fontFamily: CACHE_MONO,
+                                      background: rd.status === 'error' ? 'var(--errBg)' : rd.warmup ? 'var(--s2)' : rd.hit ? 'var(--okBg)' : 'var(--warnBg)',
+                                      color: rd.status === 'error' ? 'var(--err)' : rd.warmup ? 'var(--t2)' : rd.hit ? 'var(--ok)' : 'var(--warn)',
+                                    }}>
+                                      {rd.warmup ? '预热' : `#${rd.round}`} {rd.status === 'error' ? '✗' : rd.hit ? `读${rd.usage.cacheRead}` : '未命中'}
+                                    </span>
+                                  ))}
+                                </div>
+                              )}
+                              {r?.status === 'error' && <p className="text-xs mt-2" style={{ color: 'var(--err)' }}>{r.error}</p>}
+                            </Card>
+                          )
+                        })}
+                      </div>
+                    </div>
+                  ))}
                 </div>
                 {liveIdle && (
                   <div className="max-w-[760px] mx-auto">
@@ -1416,9 +1652,9 @@ function CacheHitTool() {
                       <p className="text-sm font-bold" style={{ color: 'var(--text)' }}>这个工具做什么？</p>
                       <div className="mt-3.5 space-y-3">
                         {[
-                          { step: '1', title: '预热写缓存', desc: '先发 1 轮“预热”请求，把生成的长前缀写入服务端提示词缓存（不计入命中率）。' },
-                          { step: '2', title: '顺序 N 轮测量', desc: '相同长前缀 + 每轮变化的短问题，模拟“同上下文、不同提问”的真实用法。' },
-                          { step: '3', title: '统计缓存字段', desc: '读取各协议返回的 cached_tokens / cache_read_input_tokens 等字段，归一化口径差异后汇总。' },
+                          { step: '1', title: '重复请求', desc: '预热后把同一份请求体原样重放，验证相同 prompt 能否命中缓存。' },
+                          { step: '2', title: '多轮对话', desc: '长 system 前缀保留，每一轮把模型真实回复拼进下一轮，验证对话变长后前缀是否仍命中。' },
+                          { step: '3', title: '尾部变化', desc: '相同长前缀 + 每轮不同短问题，模拟「同上下文、不同提问」。默认只跑这一项。' },
                         ].map(s => (
                           <div key={s.step} className="flex items-start gap-3">
                             <span className="inline-flex h-5 w-5 items-center justify-center rounded-full text-[11px] font-bold flex-shrink-0 mt-px"
@@ -1481,9 +1717,9 @@ function CacheHitTool() {
                           <div className="text-sm font-bold truncate" style={{ color: 'var(--text)' }}>{h.name}</div>
                           <div className="text-xs mt-1 flex flex-wrap gap-x-4 gap-y-0.5" style={{ color: 'var(--t3)' }}>
                             <span>{new Date(h.completedAt).toLocaleString()}</span>
-                            <span className="font-mono truncate">{h.target.baseUrl} · {h.target.model}</span>
+                            <span className="font-mono min-w-0 max-w-full truncate">{h.target.baseUrl} · {h.target.model}</span>
                             <span>
-                              {h.results.map(r => `${r.format} ${cachePct(r.hitRate)}`).join(' · ')}
+                              {cacheCasesOf(h).map(c => `${CACHE_CASE_LABELS[c.caseId]} ${c.results.map(r => `${r.format} ${cachePct(r.hitRate)}`).join('/')}`).join(' · ')}
                             </span>
                           </div>
                         </div>
@@ -1502,7 +1738,7 @@ function CacheHitTool() {
               <CacheChannelsPane
                 chNotice={chNotice} channels={channels} activeChId={activeChId}
                 chForm={chForm} editingChId={editingChId}
-                onSetActive={setActiveChId} onEdit={editChannel} onDelete={delChannel}
+                onSetActive={setActiveChId} onEdit={editChannel} onCopy={copyChannel} onDelete={delChannel}
                 onSave={saveChannel} onChFormChange={setChForm} onClearForm={clearChForm}
               />
             )}

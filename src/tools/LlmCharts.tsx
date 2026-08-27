@@ -102,7 +102,7 @@ export function LlmCompareChart({ reportA, reportB, model, field, title }: {
           <span className="text-xs font-mono px-2 py-0.5 rounded-md" style={{ background: 'var(--accentSub)', color: 'var(--accent)' }}>{model}</span>
           <b className="text-sm" style={{ color: 'var(--text)' }}>{title}</b>
         </div>
-        <div className="flex items-center gap-1 rounded-lg p-0.5" style={{ background: 'var(--s2)', border: '1px solid var(--border)' }}>
+        <div className="flex items-center gap-1 rounded-lg p-0.5" data-html2canvas-ignore="true" style={{ background: 'var(--s2)', border: '1px solid var(--border)' }}>
           <button onClick={() => setChartType('bar')}
             className="px-2 py-0.5 text-[11px] font-medium rounded-md border-0 cursor-pointer outline-none"
             style={{ background: chartType === 'bar' ? 'var(--bg)' : 'transparent', color: chartType === 'bar' ? 'var(--text)' : 'var(--t2)', boxShadow: chartType === 'bar' ? '0 1px 2px rgba(0,0,0,0.06)' : 'none' }}>柱状图</button>

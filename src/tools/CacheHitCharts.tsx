@@ -6,7 +6,7 @@ import type { CacheProtocolResult } from './CacheHitTool'
 
 // 每轮输入 Token 构成：缓存读取 / 缓存写入 / 未缓存输入 三段堆叠，
 // 直观呈现「预热写入 → 后续轮次大面积命中」的理想形态与实际偏差。
-export function CacheRoundsChart({ result }: { result: CacheProtocolResult }) {
+export function CacheRoundsChart({ result, footnote }: { result: CacheProtocolResult; footnote?: string }) {
   const data = result.rounds.map(r => {
     const read = r.usage.cacheRead ?? 0
     const write = r.usage.cacheWrite ?? 0
@@ -45,7 +45,7 @@ export function CacheRoundsChart({ result }: { result: CacheProtocolResult }) {
         </ResponsiveContainer>
       </div>
       <div className="text-[11.5px] mt-1.5 leading-[1.5]" style={{ color: 'var(--t3)' }}>
-        理想形态：预热轮全部为「缓存写入 / 未缓存输入」，后续轮次绝大部分为「缓存读取」。
+        {footnote ?? '理想形态：预热轮全部为「缓存写入 / 未缓存输入」，后续轮次绝大部分为「缓存读取」。'}
       </div>
     </div>
   )

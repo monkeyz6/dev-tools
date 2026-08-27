@@ -29,16 +29,31 @@ export function formatJsonWithPlaceholders(raw: string): { ok: boolean; text: st
   }
 }
 
-export function highlightJson(text: string, matchCol?: number): string {
-  let safe = text
+export function highlightJson(text: string, matchCols?: number | readonly number[]): string {
+  // 先以不会被 JSON token 正则识别的占位符标记匹配括号。若提前插入 span，下面的
+  // 语法高亮会把 span 的 class="json-bracket-match" 当成 JSON 字符串再次包裹，
+  // 从而破坏生成的 HTML 并泄露出类名文本。
+  const requestedCols = typeof matchCols === 'number' ? [matchCols] : matchCols ?? []
+  const bracketMarks: { marker: string; char: string; col: number }[] = []
+  let markerCode = 0xE000
+  for (const col of [...new Set(requestedCols)].sort((a, b) => a - b)) {
+    if (col < 0 || col >= text.length || !'{[]}'.includes(text[col])) continue
+    let marker = String.fromCodePoint(markerCode++)
+    while (text.includes(marker)) marker = String.fromCodePoint(markerCode++)
+    bracketMarks.push({ marker, char: text[col], col })
+  }
+
+  let source = text
+  for (const mark of bracketMarks) {
+    source = source.slice(0, mark.col) + mark.marker + source.slice(mark.col + 1)
+  }
+
+  const safe = source
     .replace(/&/g, '&amp;')
     .replace(/</g, '&lt;')
     .replace(/>/g, '&gt;')
-  // 在匹配的括号字符周围插入高亮 span（括号字符不会被 highlightJson 正则匹配，安全）
-  if (matchCol != null && matchCol >= 0 && matchCol < safe.length && '{[]}'.includes(safe[matchCol])) {
-    safe = safe.slice(0, matchCol) + `<span class="json-bracket-match">${safe[matchCol]}</span>` + safe.slice(matchCol + 1)
-  }
-  return safe.replace(
+
+  const highlighted = safe.replace(
     /("(?:\\u[a-fA-F0-9]{4}|\\[^u]|[^\\"])*"(\s*:)?|true|false|null|-?\d+(?:\.\d*)?(?:[eE][+\-]?\d+)?)/g,
     (m) => {
       if (/^"/.test(m)) return /:$/.test(m) ? `<span class="json-key">${m}</span>` : `<span class="json-str">${m}</span>`
@@ -46,6 +61,11 @@ export function highlightJson(text: string, matchCol?: number): string {
       if (m === 'null') return `<span class="json-null">${m}</span>`
       return `<span class="json-num">${m}</span>`
     }
+  )
+
+  return bracketMarks.reduce(
+    (html, mark) => html.split(mark.marker).join(`<span class="json-bracket-match">${mark.char}</span>`),
+    highlighted,
   )
 }
 
@@ -84,45 +104,64 @@ export function computeDiff(a: string[], b: string[]): DiffLine[] {
   })
 }
 
-/** 查找匹配的括号位置（返回绝对值字符索引，null 表示无匹配） */
-export function findMatchingBracket(text: string, cursorPos: number): number | null {
-  if (cursorPos <= 0 || cursorPos > text.length) return null
-  const ch = text[cursorPos - 1]
-  if (!'{[]}'.includes(ch)) return null
-  const isOpen = ch === '{' || ch === '['
-  const open = ch === '{' || ch === '}' ? '{' : '['
-  const close = ch === '{' || ch === '}' ? '}' : ']'
-  let depth = 1
-  const step = isOpen ? 1 : -1
-  let i = cursorPos - 1 + step
-  while (i >= 0 && i < text.length) {
-    if (text[i] === '"') {
-      if (step === 1) {
-        i++
-        while (i < text.length) {
-          if (text[i] === '\\') i += 2
-          else if (text[i] === '"') break
-          else i++
-        }
-      } else {
-        i--
-        while (i >= 0) {
-          if (text[i] === '\\') i--
-          else if (text[i] === '"') break
-          else i--
-        }
-      }
-      i += step
+export interface JsonBracketPair {
+  current: number
+  match: number
+}
+
+/**
+ * 查找光标相邻括号及其配对位置。优先取光标左侧括号，也支持光标停在括号前。
+ * 扫描时跳过 JSON 字符串，因此字符串内容和转义引号不会干扰嵌套关系。
+ */
+export function findBracketPair(text: string, cursorPos: number): JsonBracketPair | null {
+  if (cursorPos < 0 || cursorPos > text.length) return null
+  const before = cursorPos > 0 ? cursorPos - 1 : -1
+  const current = before >= 0 && '{[]}'.includes(text[before])
+    ? before
+    : cursorPos < text.length && '{[]}'.includes(text[cursorPos])
+      ? cursorPos
+      : -1
+  if (current < 0) return null
+
+  const stack: { char: '{' | '['; index: number }[] = []
+  let inString = false
+  let escaped = false
+
+  for (let i = 0; i < text.length; i++) {
+    const ch = text[i]
+    if (inString) {
+      if (escaped) escaped = false
+      else if (ch === '\\') escaped = true
+      else if (ch === '"') inString = false
       continue
     }
-    if (text[i] === open) depth++
-    else if (text[i] === close) {
-      depth--
-      if (depth === 0) return i
+    if (ch === '"') {
+      inString = true
+      continue
     }
-    i += step
+    if (ch === '{' || ch === '[') {
+      stack.push({ char: ch, index: i })
+      continue
+    }
+    if (ch !== '}' && ch !== ']') continue
+
+    const expected = ch === '}' ? '{' : '['
+    const open = stack[stack.length - 1]
+    if (!open || open.char !== expected) {
+      if (i === current) return null
+      continue
+    }
+    stack.pop()
+    if (open.index === current) return { current, match: i }
+    if (i === current) return { current, match: open.index }
   }
+
   return null
+}
+
+/** 查找匹配括号的位置（兼容只需要对应位置的调用方）。 */
+export function findMatchingBracket(text: string, cursorPos: number): number | null {
+  return findBracketPair(text, cursorPos)?.match ?? null
 }
 
 export const JSON_ROW = 20        // 单行高度：查看态/编辑态统一，切换时不跳

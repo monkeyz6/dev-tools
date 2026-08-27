@@ -1,5 +1,13 @@
 import { Page, Locator } from '@playwright/test'
 
+/** 渠道卡片：按名称精确匹配标题，避免「测试渠道」命中「测试渠道_copy」 */
+export const channelCard = (page: Page, name: string): Locator => {
+  const escaped = name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+  return page.locator('div.rounded-2xl.p-4.relative').filter({
+    has: page.locator('div.pr-16', { hasText: new RegExp(`^${escaped}$`) }),
+  })
+}
+
 /** 字段容器：Label 的父级 div（内含 label + 控件） */
 export const fieldOf = (page: Page, label: string): Locator =>
   page.locator(`label:has-text("${label}")`).locator('..')

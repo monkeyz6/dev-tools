@@ -269,7 +269,7 @@ function VideoAnalyzerTool() {
             <div className="mt-3 space-y-1">
               {pendingFiles.map((f, idx) => (
                 <div key={f.name + idx} className="flex items-center justify-between gap-2 text-xs px-2.5 py-1.5 rounded-lg" style={{ background: 'var(--s1)' }}>
-                  <span className="truncate" style={{ color: 'var(--text)' }} title={f.name}>{f.name}</span>
+                  <span className="min-w-0 flex-1 truncate" style={{ color: 'var(--text)' }} title={f.name}>{f.name}</span>
                   <button onClick={() => removePendingFile(idx)} className="flex-shrink-0 transition-colors duration-100" style={{ color: 'var(--t3)' }}
                     onMouseEnter={e => (e.currentTarget.style.color = 'var(--err)')} onMouseLeave={e => (e.currentTarget.style.color = 'var(--t3)')}>移除</button>
                 </div>

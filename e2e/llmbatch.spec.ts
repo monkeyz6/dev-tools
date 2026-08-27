@@ -1,5 +1,6 @@
+import { readFileSync } from 'node:fs'
 import { test, expect } from '@playwright/test'
-import { goto, inputByLabel, fieldOf, readHistoryStore, readKv } from './helpers'
+import { goto, inputByLabel, fieldOf, readHistoryStore, readKv, channelCard } from './helpers'
 
 test.beforeEach(async ({ page }) => {
   // 仅在标签页首次加载时清空 localStorage；reload 不再清，便于测试历史报告持久化
@@ -15,9 +16,9 @@ test.beforeEach(async ({ page }) => {
 // 默认请求体含 "model": "{{model}}" 占位符（见 App.tsx 的 DEFAULT_LLM_BODY）。
 // 跑完一批请求后，右侧面板会自动从「实时」切到「报告」，所以断言一律针对报告面板的
 // 稳定内容（而非转瞬即逝的实时日志），避免 mock 响应过快导致实时面板还没被断言到就已切走。
-const ANTHROPIC_OK_BODY = (model: string, inputTokens: number, outputTokens: number) => JSON.stringify({
+const ANTHROPIC_OK_BODY = (model: string, inputTokens: number, outputTokens: number, text = '这是一段测试回复。') => JSON.stringify({
   model, usage: { input_tokens: inputTokens, output_tokens: outputTokens },
-  content: [{ type: 'text', text: '这是一段测试回复。' }],
+  content: [{ type: 'text', text }],
 })
 
 // 渠道管理已取代左侧栏直填 baseUrl/apiKey（见「渠道管理」Tab）：新增一个渠道并保存，
@@ -247,6 +248,196 @@ test.describe('LLM 批量测试', () => {
     expect(dialogs).toEqual([]) // 三种格式都没有触发失败提示的 alert
   })
 
+  // 回归：导出 HTML 会内嵌应用样式，其中 body{overflow:hidden;height:100%} 若不被覆盖，
+  // 多模型长报告离线打开后整页锁死、滚不到汇总/明细。覆盖样式必须排在 appCss 之后。
+  test('导出 HTML：多模型离线打开可滚动', async ({ page }) => {
+    await page.route('**/v1/messages', async route => {
+      const body = route.request().postDataJSON() as { model: string }
+      await route.fulfill({ status: 200, contentType: 'application/json', body: ANTHROPIC_OK_BODY(body.model, 20, 8) })
+    })
+
+    await goto(page, /LLM 批量测试/)
+    await addChannel(page, { apiKey: 'sk-test' })
+    await fieldOf(page, '模型列表').locator('textarea').fill('claude-3-5-sonnet-20241022\nclaude-3-haiku-20240307')
+    await fieldOf(page, '每模型次数 N').locator('input').fill('2')
+    await fieldOf(page, '全局并发数 C').locator('input').fill('2')
+    await page.getByRole('button', { name: /开始批量请求/ }).click()
+    await expect(page.locator('main')).toContainText('总请求 4')
+    await expect(page.getByRole('status', { name: '正在载入图表' })).toHaveCount(0)
+
+    await page.getByRole('button', { name: /^导出/ }).click()
+    const [download] = await Promise.all([
+      page.waitForEvent('download'),
+      page.getByRole('button', { name: '导出 HTML' }).click(),
+    ])
+    const html = readFileSync(await download.path(), 'utf-8')
+    expect(html).toContain('LLM 批量测试报告')
+    expect(html).toContain('claude-3-5-sonnet-20241022')
+    expect(html).toContain('claude-3-haiku-20240307')
+    expect(html).toMatch(/html,body\{[^}]*overflow:auto/)
+
+    await page.setContent(html)
+    const before = await page.evaluate(() => ({
+      bodyOverflow: getComputedStyle(document.body).overflow,
+      docScrollH: document.documentElement.scrollHeight,
+      innerH: window.innerHeight,
+    }))
+    expect(before.bodyOverflow).toBe('auto')
+    expect(before.docScrollH).toBeGreaterThan(before.innerH)
+    // setContent 后 Playwright 的 mouse.wheel 不会带动离线页，用 scrollBy 验证覆盖样式确实解开了
+    // 应用里 body{overflow:hidden} 的锁死（hidden 时这里会停在 0）。
+    await page.evaluate(() => window.scrollTo(0, 0))
+    expect(await page.evaluate(() => {
+      window.scrollBy(0, 400)
+      return window.scrollY
+    })).toBeGreaterThan(0)
+  })
+
+  // 回归：exportReportAsHtml 签名加了 report 之后菜单漏传，导出百分百 alert；
+  // 离线页靠 data-llm-view + 内嵌 __LLM_EXPORT__ 弹层，克隆后 React onClick 已经没了。
+  test('导出 HTML：无失败弹窗，离线打开可查看响应', async ({ page }) => {
+    const dialogs: string[] = []
+    page.on('dialog', async d => { dialogs.push(d.message()); await d.dismiss() })
+
+    await page.route('**/v1/messages', route =>
+      route.fulfill({ status: 200, contentType: 'application/json', body: ANTHROPIC_OK_BODY('claude-3-5-sonnet-20241022', 9, 4) }))
+
+    await goto(page, /LLM 批量测试/)
+    await addChannel(page, { apiKey: 'sk-test' })
+    await fieldOf(page, '每模型次数 N').locator('input').fill('1')
+    await page.getByRole('button', { name: /开始批量请求/ }).click()
+    await expect(page.locator('main')).toContainText('总请求 1')
+    await expect(page.getByRole('status', { name: '正在载入图表' })).toHaveCount(0)
+
+    await page.getByRole('button', { name: /^导出/ }).click()
+    const [download] = await Promise.all([
+      page.waitForEvent('download'),
+      page.getByRole('button', { name: '导出 HTML' }).click(),
+    ])
+    expect(dialogs).toEqual([])
+    const html = readFileSync(await download.path(), 'utf-8')
+    expect(html).toContain('window.__LLM_EXPORT__')
+    expect(html).toContain('data-llm-view="response"')
+    expect(html).toContain('data-llm-view="request"')
+
+    await page.setContent(html)
+    await page.getByRole('button', { name: '响应' }).first().click()
+    const overlay = page.locator('#llm-html-overlay')
+    await expect(overlay).toBeVisible()
+    await expect(overlay).toContainText('响应正文')
+    await expect(overlay).toContainText('这是一段测试回复')
+  })
+
+  test('对比所选：导出 HTML，离线打开可按侧查看响应', async ({ page }) => {
+    test.setTimeout(60_000)
+    const dialogs: string[] = []
+    page.on('dialog', async d => { dialogs.push(d.message()); await d.dismiss() })
+
+    await goto(page, /LLM 批量测试/)
+    await addChannel(page, { apiKey: 'sk-test' })
+    await fieldOf(page, '每模型次数 N').locator('input').fill('1')
+
+    await page.route('**/v1/messages', route =>
+      route.fulfill({ status: 200, contentType: 'application/json', body: ANTHROPIC_OK_BODY('claude-3-5-sonnet-20241022', 9, 4, '回复-甲') }))
+    await inputByLabel(page, '测试标题（可选）').fill('对照甲')
+    await page.getByRole('button', { name: /开始批量请求/ }).click()
+    await expect(page.locator('main')).toContainText('总请求 1')
+    await expect(page.getByRole('status', { name: '正在载入图表' })).toHaveCount(0)
+
+    await page.unroute('**/v1/messages')
+    await page.route('**/v1/messages', route =>
+      route.fulfill({ status: 200, contentType: 'application/json', body: ANTHROPIC_OK_BODY('claude-3-5-sonnet-20241022', 9, 8, '回复-乙') }))
+    await inputByLabel(page, '测试标题（可选）').fill('对照乙')
+    await page.getByRole('button', { name: /开始批量请求/ }).click()
+    await expect(page.locator('main')).toContainText('总请求 1')
+    await expect(page.getByRole('status', { name: '正在载入图表' })).toHaveCount(0)
+
+    await page.getByRole('button', { name: /历史 \(2\)/ }).click()
+    await expect(page.locator('main')).toContainText('已存 2 / 20 条历史报告')
+    await page.getByRole('checkbox').nth(0).check()
+    await page.getByRole('checkbox').nth(1).check()
+    await page.getByRole('button', { name: '对比所选 →' }).click()
+
+    await expect(page.locator('main')).toContainText('历史报告对比')
+    await expect(page.locator('main')).toContainText('成功率')
+    await expect(page.getByRole('button', { name: '导出 HTML' })).toBeVisible()
+    await expect(page.getByRole('button', { name: /^导出 ▾$/ })).toHaveCount(0)
+    await expect(page.getByRole('status', { name: '正在载入图表' })).toHaveCount(0)
+    await expect(page.getByRole('button', { name: '导出 HTML' })).toBeEnabled()
+
+    const [download] = await Promise.all([
+      page.waitForEvent('download'),
+      page.getByRole('button', { name: '导出 HTML' }).click(),
+    ])
+    expect(dialogs).toEqual([])
+    expect(download.suggestedFilename()).toMatch(/^对比_对照乙_vs_对照甲_\d{8}_\d{6}\.html$/)
+
+    const html = readFileSync(await download.path(), 'utf-8')
+    expect(html).toContain('历史报告对比')
+    expect(html).toContain('LLM 批量测试对照')
+    expect(html).toContain('对照乙')
+    expect(html).toContain('对照甲')
+    expect(html).toContain('data-llm-export-side="a"')
+    expect(html).toContain('data-llm-export-side="b"')
+    expect(html).toMatch(/\[data-llm-export-side\]\{[^}]*overflow-x:auto/)
+    expect(html).toMatch(/html,body\{[^}]*overflow:auto/)
+    expect(html).not.toContain('导出 ▾')
+    expect(html).not.toContain('返回历史列表')
+
+    await page.setContent(html)
+    const overlay = page.locator('#llm-html-overlay')
+    const sideA = page.locator('[data-llm-export-side="a"]')
+    const sideB = page.locator('[data-llm-export-side="b"]')
+    const clickSideBtn = async (side: typeof sideA, name: string) => {
+      const btn = side.getByRole('button', { name }).first()
+      await btn.scrollIntoViewIfNeeded()
+      await btn.click()
+    }
+
+    await clickSideBtn(sideA, '响应')
+    await expect(overlay).toBeVisible()
+    await expect(overlay).toContainText('回复-乙')
+    await expect(overlay).not.toContainText('回复-甲')
+    await overlay.locator('#llm-html-close').click()
+    await expect(overlay).toBeHidden()
+
+    await clickSideBtn(sideB, '响应')
+    await expect(overlay).toBeVisible()
+    await expect(overlay).toContainText('回复-甲')
+    await expect(overlay).not.toContainText('回复-乙')
+    await overlay.locator('#llm-html-close').click()
+
+    await clickSideBtn(sideA, '请求体 / cURL')
+    await expect(overlay).toBeVisible()
+    await expect(overlay).toContainText('请求体 JSON')
+    await expect(overlay).toContainText('YOUR_API_KEY')
+  })
+
+  test('超长提示词标题：下拉保持一行，不把预览按钮挤走', async ({ page }) => {
+    const longTitle = '超长提示词标题用于回归截断'.repeat(8)
+    await goto(page, /LLM 批量测试/)
+    await page.getByRole('button', { name: /^提示词/ }).click()
+    await page.locator('label').filter({ hasText: /^标题$/ }).locator('..').locator('input').fill(longTitle)
+
+    const field = fieldOf(page, '提示词（请求体来源）')
+    const trigger = field.getByRole('button').first()
+    const preview = field.locator('button[title="查看完整请求体"]')
+    await expect(preview).toBeVisible()
+
+    const tBox = await trigger.boundingBox()
+    const pBox = await preview.boundingBox()
+    const fBox = await field.boundingBox()
+    expect(tBox && pBox && fBox).toBeTruthy()
+    expect(tBox!.width).toBeLessThan(fBox!.width)
+    expect(Math.abs(tBox!.y - pBox!.y)).toBeLessThan(12)
+
+    const overflow = await trigger.evaluate(el => {
+      const label = el.querySelector('span')
+      return { scroll: label?.scrollWidth ?? 0, client: label?.clientWidth ?? 0 }
+    })
+    expect(overflow.scroll).toBeGreaterThan(overflow.client)
+  })
+
   test('渠道 API Key 加密后持久化：reload 后仍在，落盘不含明文', async ({ page }) => {
     await goto(page, /LLM 批量测试/)
     await addChannel(page, { name: '测试渠道', apiKey: 'sk-test-secret-abc123' })
@@ -277,6 +468,19 @@ test.describe('LLM 批量测试', () => {
     await expect(page.getByText('还没有渠道，请在下方添加。')).toBeVisible()
     await expect.poll(async () => (await readKv(page, 'llmbatch-channels')) ?? '').not.toContain('待删除渠道')
     await expect(page.getByRole('button', { name: /开始批量请求/ })).toBeDisabled()
+  })
+
+  test('渠道管理：复制渠道不切换当前使用', async ({ page }) => {
+    await goto(page, /LLM 批量测试/)
+    await addChannel(page, { name: '测试渠道', apiKey: 'sk-test-copy' })
+    await channelCard(page, '测试渠道').getByRole('button', { name: '复制' }).click()
+    await expect(channelCard(page, '测试渠道_copy')).toBeVisible()
+    await expect(channelCard(page, '测试渠道').getByText('✓ 当前使用')).toBeVisible()
+    await expect(channelCard(page, '测试渠道_copy').getByText('✓ 当前使用')).toHaveCount(0)
+    await expect.poll(async () => {
+      const raw = await readKv(page, 'llmbatch-channels')
+      return raw ? JSON.parse(raw).map((c: { name: string }) => c.name) : []
+    }).toEqual(['测试渠道', '测试渠道_copy'])
   })
 
   test('报告支持查看请求体与复制 cURL', async ({ page }) => {

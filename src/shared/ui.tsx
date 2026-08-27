@@ -129,7 +129,7 @@ export function CustomSelect({ value, onChange, options, className = '' }: {
   }
 
   return (
-    <div ref={ref} className={`relative ${className}`}>
+    <div ref={ref} className={`relative w-full min-w-0 ${className}`}>
       <button
         onClick={() => setOpen(o => !o)}
         onFocus={() => setFocused(true)}
@@ -146,7 +146,7 @@ export function CustomSelect({ value, onChange, options, className = '' }: {
           fontFamily: 'inherit',
         }}
       >
-        <span className="truncate" style={{ color: selected ? 'var(--text)' : 'var(--t3)' }} title={selected?.label ?? ''}>{selected?.label ?? '选择…'}</span>
+        <span className="min-w-0 flex-1 truncate" style={{ color: selected ? 'var(--text)' : 'var(--t3)' }} title={selected?.label ?? ''}>{selected?.label ?? '选择…'}</span>
         <span style={{ color: 'var(--t3)', marginLeft: 8, flexShrink: 0 }}>
           <IconChevron open={open} />
         </span>
@@ -179,7 +179,7 @@ export function CustomSelect({ value, onChange, options, className = '' }: {
                   marginBottom: idx < options.length - 1 ? 1 : 0,
                 }}
               >
-                <span className="flex-1 truncate" title={o.label}>{o.label}</span>
+                <span className="min-w-0 flex-1 truncate" title={o.label}>{o.label}</span>
                 {isActive && <span style={{ color: 'var(--accent)', flexShrink: 0 }}><IconCheck /></span>}
               </button>
             )
@@ -217,7 +217,7 @@ export function SearchableSelect({ value, onChange, options, placeholder, classN
   }, [open])
 
   return (
-    <div ref={ref} className={`relative ${className}`}>
+    <div ref={ref} className={`relative w-full min-w-0 ${className}`}>
       <button
         onClick={() => setOpen(o => !o)}
         onFocus={() => setFocused(true)}
@@ -233,7 +233,7 @@ export function SearchableSelect({ value, onChange, options, placeholder, classN
           fontFamily: 'inherit',
         }}
       >
-        <span className="truncate" style={{ color: selected ? 'var(--text)' : 'var(--t3)' }} title={selected?.label ?? ''}>{selected?.label ?? placeholder ?? '选择…'}</span>
+        <span className="min-w-0 flex-1 truncate" style={{ color: selected ? 'var(--text)' : 'var(--t3)' }} title={selected?.label ?? ''}>{selected?.label ?? placeholder ?? '选择…'}</span>
         <span style={{ color: 'var(--t3)', marginLeft: 8, flexShrink: 0 }}>
           <IconChevron open={open} />
         </span>
@@ -273,7 +273,7 @@ export function SearchableSelect({ value, onChange, options, placeholder, classN
                     marginBottom: idx < filtered.length - 1 ? 1 : 0,
                   }}
                 >
-                  <span className="flex-1 truncate" title={o.label}>{o.label}</span>
+                  <span className="min-w-0 flex-1 truncate" title={o.label}>{o.label}</span>
                   {isActive && <span style={{ color: 'var(--accent)', flexShrink: 0 }}><IconCheck /></span>}
                 </button>
               )

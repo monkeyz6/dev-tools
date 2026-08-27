@@ -5,6 +5,7 @@ import { highlightJson } from '../shared/json'
 import { decryptLlmApiKey, encryptLlmApiKey } from '../shared/api-key-crypto'
 import { historyDbGetAll, historyDbPutOne, historyDbDeleteOne, historyDbDeleteMany, historyDbClear, historyDbMigrateFromLocalStorage } from '../shared/history-db'
 import { useDebouncedPersist } from '../shared/use-debounced-persist'
+import { uniqueCopyName } from '../shared/channel-copy'
 import { downloadProbeReportHtml } from './ModelProbeExport'
 
 // ─── Tool: 模型探测 ─────────────────────────────────────────────────────────────
@@ -781,7 +782,9 @@ const ProbeConfigPane = React.memo(function ProbeConfigPane({
                 style={{ background: bg, color: 'var(--text)' }}>
                 <span className="font-semibold flex-shrink-0" style={{ color }}>{PROBE_FORMAT_LABELS[f]}</span>
                 <span className="ml-auto font-mono text-[11px] truncate" style={{ color, fontFamily: PROBE_MONO }}>
-                  {r.ok ? `✓ ${r.ms} ms` : `✗ ${(r.status ?? r.err) || '失败'}`}{!r.ok && r.err ? ` · ${r.err.length > 18 ? r.err.slice(0, 18) + '…' : r.err}` : ''}
+                  {r.ok ? `✓ ${r.ms} ms` : r.status != null
+                    ? `✗ ${r.status}${r.err ? ` · ${r.err.length > 18 ? r.err.slice(0, 18) + '…' : r.err}` : ''}`
+                    : `✗ ${r.err || '失败'}`}
                 </span>
               </div>
             )
@@ -809,11 +812,11 @@ const ProbeConfigPane = React.memo(function ProbeConfigPane({
 
 const ProbeChannelsPane = React.memo(function ProbeChannelsPane({
   chNotice, channels, activeChId, chForm, editingChId,
-  onSetActive, onEdit, onDelete, onSave, onChFormChange, onClearForm,
+  onSetActive, onEdit, onCopy, onDelete, onSave, onChFormChange, onClearForm,
 }: {
   chNotice: string; channels: ProbeChannel[]; activeChId: string | null
   chForm: ProbeChFormState; editingChId: string | null
-  onSetActive: (id: string) => void; onEdit: (c: ProbeChannel) => void; onDelete: (id: string) => void
+  onSetActive: (id: string) => void; onEdit: (c: ProbeChannel) => void; onCopy: (c: ProbeChannel) => void; onDelete: (id: string) => void
   onSave: () => void; onChFormChange: React.Dispatch<React.SetStateAction<ProbeChFormState>>; onClearForm: () => void
 }) {
   return (
@@ -837,9 +840,10 @@ const ProbeChannelsPane = React.memo(function ProbeChannelsPane({
                 </div>
               )}
               <div className="text-[11px] font-mono mt-1" style={{ color: 'var(--t3)' }}>{c.keyMask || '（未设置）'}</div>
-              <div className="flex gap-2 mt-3">
+              <div className="flex gap-2 mt-3 flex-wrap">
                 <Btn small variant="soft" onClick={() => onSetActive(c.id)}>设为当前</Btn>
                 <Btn small variant="soft" onClick={() => onEdit(c)}>编辑</Btn>
+                <Btn small variant="soft" onClick={() => onCopy(c)}>复制</Btn>
                 <Btn small variant="danger" onClick={() => onDelete(c.id)}>删除</Btn>
               </div>
             </div>
@@ -967,6 +971,14 @@ function ModelProbeTool() {
     setChForm({ name: c.name, baseUrl: c.baseUrl, timeoutSec: c.timeoutSec, chatUrl: c.chatUrl, responsesUrl: c.responsesUrl, anthropicUrl: c.anthropicUrl, apiKey: '' })
     setEditingChId(c.id)
   }, [])
+
+  const copyChannel = useCallback((c: ProbeChannel) => {
+    const name = uniqueCopyName(c.name, channels.map(x => x.name))
+    const nc: ProbeChannel = { ...c, id: 'ch' + Date.now().toString(36) + Math.random().toString(36).slice(2, 7), name }
+    setChannels([...channels, nc])
+    chToast(`已复制为 ${name}`)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [channels])
 
   const delChannel = useCallback((id: string) => {
     if (!window.confirm('删除该渠道？')) return
@@ -1781,10 +1793,10 @@ function ModelProbeTool() {
                 <div className="p-6">
                   <div className="surface-card rounded-2xl p-5" style={{ background: 'var(--bg)', border: '1px solid var(--border)', boxShadow: 'var(--shadow)' }}>
                     <div className="flex flex-wrap items-start justify-between gap-6">
-                      <div>
+                      <div className="min-w-0 flex-1">
                         <div className="text-xs font-semibold uppercase tracking-wide" style={{ color: 'var(--accent)', letterSpacing: '0.12em' }}>测试报告</div>
-                        <h3 className="text-xl font-bold mt-1" style={{ color: 'var(--text)' }}>{report.name}</h3>
-                        <p className="text-sm mt-1" style={{ color: 'var(--t2)' }}>{report.target.baseUrl} · {report.target.model}</p>
+                        <h3 className="text-xl font-bold mt-1 break-words" style={{ color: 'var(--text)' }}>{report.name}</h3>
+                        <p className="text-sm mt-1 break-all" style={{ color: 'var(--t2)' }}>{report.target.baseUrl} · {report.target.model}</p>
                       </div>
                       <div className="text-right">
                         <div className="font-mono text-2xl font-bold tabular-nums" style={{ color: 'var(--text)', fontFamily: PROBE_MONO }}>{(report.durationMs / 1000).toFixed(1)}s</div>
@@ -1826,7 +1838,7 @@ function ModelProbeTool() {
                           <div className="text-sm font-bold truncate" style={{ color: 'var(--text)' }}>{h.name}</div>
                           <div className="text-xs mt-1 flex flex-wrap gap-x-4 gap-y-0.5" style={{ color: 'var(--t3)' }}>
                             <span>{new Date(h.completedAt).toLocaleString()}</span>
-                            <span className="font-mono truncate">{h.target.baseUrl} · {h.target.model}</span>
+                            <span className="font-mono min-w-0 max-w-full truncate">{h.target.baseUrl} · {h.target.model}</span>
                             <span>通过 {h.summary.passed} · 失败 {h.summary.failed} · 不支持 {h.summary.unsupported}</span>
                           </div>
                         </div>
@@ -1846,7 +1858,7 @@ function ModelProbeTool() {
               <ProbeChannelsPane
                 chNotice={chNotice} channels={channels} activeChId={activeChId}
                 chForm={chForm} editingChId={editingChId}
-                onSetActive={setActiveChId} onEdit={editChannel} onDelete={delChannel}
+                onSetActive={setActiveChId} onEdit={editChannel} onCopy={copyChannel} onDelete={delChannel}
                 onSave={saveChannel} onChFormChange={setChForm} onClearForm={clearChForm}
               />
             )}

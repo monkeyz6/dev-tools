@@ -1,5 +1,5 @@
 import { test, expect } from '@playwright/test'
-import { goto, inputByLabel, readKv } from './helpers'
+import { goto, inputByLabel, readKv, channelCard } from './helpers'
 import { readFileSync } from 'fs'
 
 test.beforeEach(async ({ page }) => {
@@ -361,6 +361,19 @@ test.describe('模型探测', () => {
     await expect(page.getByText('✓ 当前使用')).toBeVisible()
     await inputByLabel(page, '模型名称').fill('probe-model')
     await expect(page.getByRole('button', { name: /开始测试/ })).toBeEnabled()
+  })
+
+  test('渠道管理：复制渠道不切换当前使用', async ({ page }) => {
+    await goto(page, /模型探测/)
+    await addChannel(page, { name: '测试渠道', apiKey: 'sk-test-copy' })
+    await channelCard(page, '测试渠道').getByRole('button', { name: '复制' }).click()
+    await expect(channelCard(page, '测试渠道_copy')).toBeVisible()
+    await expect(channelCard(page, '测试渠道').getByText('✓ 当前使用')).toBeVisible()
+    await expect(channelCard(page, '测试渠道_copy').getByText('✓ 当前使用')).toHaveCount(0)
+    await expect.poll(async () => {
+      const raw = await readKv(page, 'modelprobe-channels')
+      return raw ? JSON.parse(raw).map((c: { name: string }) => c.name) : []
+    }).toEqual(['测试渠道', '测试渠道_copy'])
   })
 
   test('测试连接：三格式端点可达性与鉴权即时反馈', async ({ page }) => {

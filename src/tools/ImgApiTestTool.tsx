@@ -3,6 +3,7 @@ import React, { useState, useCallback, useRef, useEffect, useLayoutEffect, useMe
 import { Btn, Label, Card, Badge, CustomInput, CustomSelect, SearchableSelect, CustomTextarea, Toggle, SegmentedControl, SectionTitle, CopyBtn } from '../shared/ui'
 import { historyDbGetAll, historyDbPutOne, historyDbDeleteOne, historyDbDeleteMany, historyDbClear, historyDbMigrateFromLocalStorage } from '../shared/history-db'
 import { useDebouncedPersist } from '../shared/use-debounced-persist'
+import { uniqueCopyName } from '../shared/channel-copy'
 
 // ─── Tool: 图片接口测试 ─────────────────────────────────────────────────────────
 
@@ -121,11 +122,13 @@ function imgLoadHidePrices(): boolean {
   return false
 }
 
-type ImgApiType = 'openai' | 'grok' | 'gemini' | 'seedream'
-const IMG_API_LABEL: Record<ImgApiType, string> = { openai: 'OpenAI', grok: 'Grok', gemini: 'Gemini', seedream: 'Seedream' }
+type ImgApiType = 'openai' | 'grok' | 'gemini' | 'seedream' | 'volcanoArk'
+const IMG_API_LABEL: Record<ImgApiType, string> = { openai: 'OpenAI', grok: 'Grok', gemini: 'Gemini', seedream: 'Seedream', volcanoArk: 'ZeroFA /ark' }
 const IMG_PLACEHOLDER_MODEL: Record<ImgApiType, string> = {
-  openai: 'gpt-image-2', grok: 'grok-imagine-image-quality', gemini: 'gemini-3-pro-image', seedream: 'doubao-seedream-5-0-pro',
+  openai: 'gpt-image-2', grok: 'grok-imagine-image-quality', gemini: 'gemini-3-pro-image', seedream: 'doubao-seedream-5-0-pro', volcanoArk: 'doubao-seedream-5-0-pro',
 }
+
+const ZEROFA_ARK_BASE_URL = 'https://api.fornai.im/ark'
 
 interface ImgChannel { id: string; name: string; baseUrl: string; apiKeyEnc: string; keyMask: string }
 interface ImgRef { dataUri?: string | null; url?: string; name?: string }
@@ -176,6 +179,17 @@ const IMG_TEST_SETS: Record<ImgApiType, ImgCaseDef[]> = {
     { name: 'watermark=true', desc: '水印参数是否生效', params: { size: '1K', response_format: 'url', output_format: 'png', watermark: true, seed: -1 } },
     { name: 'seed=42 固定种子', desc: 'seed 参数透传', params: { size: '1K', response_format: 'url', output_format: 'png', watermark: false, seed: 42 } },
     { name: '参考图 + 2048×2048', desc: 'image 参数 + 精确尺寸', params: { size: '2048x2048', response_format: 'url', output_format: 'png', watermark: false, seed: -1 }, needRef: true, prompt: '基于输入图生成写实风格头像' },
+  ],
+  // ZeroFA 的 /ark 是火山方舟原生透传：Base URL 需填到 /ark，路径保持火山的 /v3/images/generations。
+  // 字段与 Seedream 原生图片 API 相同，但不能走 OpenAI 兼容的 /v1/images/generations。
+  volcanoArk: [
+    { name: '原生 1K 文生图', desc: 'POST /v3/images/generations · size=1K', params: { size: '1K', response_format: 'url', output_format: 'png', watermark: false, seed: -1 } },
+    { name: '原生 2K 文生图', desc: 'POST /v3/images/generations · size=2K', params: { size: '2K', response_format: 'url', output_format: 'png', watermark: false, seed: -1 } },
+    { name: '原生精确 2048×2048', desc: '火山原生精确像素', params: { size: '2048x2048', response_format: 'url', output_format: 'png', watermark: false, seed: -1 } },
+    { name: '原生 2K 横版 2816×1584', desc: '火山原生精确 16:9', params: { size: '2816x1584', response_format: 'url', output_format: 'png', watermark: false, seed: -1 } },
+    { name: '原生 JPEG 输出', desc: 'output_format=jpeg', params: { size: '1K', response_format: 'url', output_format: 'jpeg', watermark: false, seed: -1 } },
+    { name: '原生固定 Seed', desc: 'seed=42 原样透传', params: { size: '1K', response_format: 'url', output_format: 'png', watermark: false, seed: 42 } },
+    { name: '原生参考图', desc: 'image 参数原样透传', params: { size: '2048x2048', response_format: 'url', output_format: 'png', watermark: false, seed: -1 }, needRef: true, prompt: '基于输入图生成写实风格头像' },
   ],
 }
 
@@ -378,7 +392,7 @@ function imgResolveTierKey(type: ImgApiType, body: any): string {
     const s = String(body?.generationConfig?.imageConfig?.imageSize || body.imageSize || '1K')
     return s === '512' ? '0.5K' : s
   }
-  if (type === 'seedream') {
+  if (type === 'seedream' || type === 'volcanoArk') {
     const s = String(body.size || '')
     if (/^\d+x\d+$/i.test(s)) {
       const [w, h] = s.toLowerCase().split('x').map(Number)
@@ -451,7 +465,13 @@ function imgBuildPlan(type: ImgApiType, model: string, prompt: string, params: I
     for (let i = 1; i <= refCount; i++) imgs.push(`__REF_${i}_URL_OR_DATAURI__`)
     body.image = imgs.length === 1 ? imgs[0] : imgs
   }
-  return { kind: 'json', endpoint: '/v1/images/generations', method: 'POST', headers: { Authorization: '{{APIKEY}}', 'Content-Type': 'application/json' }, body }
+  return {
+    kind: 'json',
+    endpoint: type === 'volcanoArk' ? '/v3/images/generations' : '/v1/images/generations',
+    method: 'POST',
+    headers: { Authorization: '{{APIKEY}}', 'Content-Type': 'application/json' },
+    body,
+  }
 }
 
 function imgPlanToPreview(plan: ImgPlan): string {
@@ -528,7 +548,7 @@ function imgSetResolutionTierTarget(targets: Record<string, any>, value: string 
 function imgDeriveTargets(type: ImgApiType, plan: ImgPlan): Record<string, any> {
   const t: Record<string, any> = {}
   const body = plan.kind === 'json' ? plan.body : (plan.multipart?.fields) || {}
-  if (type === 'openai' || type === 'seedream') {
+  if (type === 'openai' || type === 'seedream' || type === 'volcanoArk') {
     const s = body.size
     if (typeof s === 'string' && /^\d+x\d+$/i.test(s)) { const [w, h] = s.toLowerCase().split('x').map(Number); t.wReq = w; t.hReq = h; t.sizeReq = s }
     else if (s) { t.sizeReq = s; imgSetResolutionTierTarget(t, s) }
@@ -774,7 +794,9 @@ async function imgCaptureReportCanvas(rootEl: HTMLElement): Promise<HTMLCanvasEl
 async function imgExportAsImage(rootEl: HTMLElement, filename: string) {
   try {
     const canvas = await imgCaptureReportCanvas(rootEl)
-    canvas.toBlob(blob => { if (blob) imgDownloadBlob(filename, blob) }, 'image/png')
+    const blob = await new Promise<Blob | null>(resolve => canvas.toBlob(resolve, 'image/png'))
+    if (!blob) throw new Error('toBlob 返回空')
+    imgDownloadBlob(filename, blob)
   } catch (e) {
     console.error('[imgExportAsImage]', e)
     window.alert('导出图片失败，请稍后重试。')
@@ -792,10 +814,17 @@ async function imgExportAsHtml(rootEl: HTMLElement, filename: string) {
       for (const sheet of Array.from(document.styleSheets)) {
         try { for (const rule of Array.from(sheet.cssRules)) appCss += rule.cssText + '\n' } catch { /* 跨域样式表跳过 */ }
       }
-      const htmlContent = `<!doctype html><html><head><meta charset="utf-8"><title>图片接口测试报告</title><style>${varsCss}\nbody{margin:0;padding:24px;background:var(--bg);color:var(--text);font-family:Inter,system-ui,sans-serif}\n${appCss}</style></head><body>${clone.outerHTML}</body></html>`
+      const overrideCss = `
+html,body{height:auto!important;min-height:0!important;overflow:auto!important;margin:0!important}
+body{padding:24px;background:var(--bg);color:var(--text);font-family:Inter,system-ui,sans-serif}
+.overflow-hidden{overflow:visible!important}
+[data-export-scroll]{max-height:none!important;overflow:visible!important}
+`
+      const htmlContent = `<!doctype html><html><head><meta charset="utf-8"><title>图片接口测试报告</title><style>${varsCss}\n${appCss}\n${overrideCss}</style></head><body>${clone.outerHTML}</body></html>`
       imgDownloadText(filename, htmlContent, 'text/html;charset=utf-8')
     })
-  } catch {
+  } catch (e) {
+    console.error('[imgExportAsHtml]', e)
     window.alert('导出 HTML 失败，请稍后重试。')
   }
 }
@@ -819,10 +848,10 @@ type ImgPriceFormState = { model: string; tier: string; usd: string; note: strin
 
 const ImgChannelsPane = React.memo(function ImgChannelsPane({
   channels, activeChId, chForm, editingChId,
-  onSetActive, onEdit, onDelete, onSave, onChFormChange, onClearForm,
+  onSetActive, onEdit, onCopy, onDelete, onSave, onChFormChange, onClearForm,
 }: {
   channels: ImgChannel[]; activeChId: string | null; chForm: ImgChFormState; editingChId: string | null
-  onSetActive: (id: string) => void; onEdit: (c: ImgChannel) => void; onDelete: (id: string) => void
+  onSetActive: (id: string) => void; onEdit: (c: ImgChannel) => void; onCopy: (c: ImgChannel) => void; onDelete: (id: string) => void
   onSave: () => void; onChFormChange: React.Dispatch<React.SetStateAction<ImgChFormState>>; onClearForm: () => void
 }) {
   return (
@@ -837,9 +866,10 @@ const ImgChannelsPane = React.memo(function ImgChannelsPane({
               <div className="text-sm font-bold pr-16 truncate" style={{ color: 'var(--text)' }}>{c.name}</div>
               <div className="text-xs break-all mt-1" style={{ color: 'var(--t3)' }}>{c.baseUrl}</div>
               <div className="text-[11px] font-mono mt-1" style={{ color: 'var(--t3)' }}>{c.keyMask || '（未设置）'}</div>
-              <div className="flex gap-2 mt-3">
+              <div className="flex gap-2 mt-3 flex-wrap">
                 <Btn small variant="soft" onClick={() => onSetActive(c.id)}>设为当前</Btn>
                 <Btn small variant="soft" onClick={() => onEdit(c)}>编辑</Btn>
+                <Btn small variant="soft" onClick={() => onCopy(c)}>复制</Btn>
                 <Btn small variant="danger" onClick={() => onDelete(c.id)}>删除</Btn>
               </div>
             </div>
@@ -1038,10 +1068,10 @@ const ImgHistoryPane = React.memo(function ImgHistoryPane({
                     {thumb ? <img src={thumb} className="w-10 h-10 rounded-lg object-cover" style={{ border: '1px solid var(--border)' }} /> : <span style={{ color: 'var(--t3)' }}>—</span>}
                   </td>
                   <td className="px-3 py-2 whitespace-nowrap">{imgFmtTime(r.time)}</td>
-                  <td className="px-3 py-2">{r.channelName}</td>
+                  <td className="px-3 py-2 max-w-[160px] truncate" title={r.channelName}>{r.channelName}</td>
                   <td className="px-3 py-2">{IMG_API_LABEL[r.apiType] || r.apiType}{r.useRef ? ' 🖼️' : ''}</td>
-                  <td className="px-3 py-2 font-mono">{r.model}</td>
-                  <td className="px-3 py-2">{r.caseName}</td>
+                  <td className="px-3 py-2 font-mono max-w-[180px] truncate" title={r.model}>{r.model}</td>
+                  <td className="px-3 py-2 max-w-[160px] truncate" title={r.caseName}>{r.caseName}</td>
                   <td className="px-3 py-2 font-mono">{imgEsc(tgt)}</td>
                   <td className="px-3 py-2 font-mono">{imgEsc(act)}</td>
                   <td className="px-3 py-2">{badge}</td>
@@ -1119,7 +1149,12 @@ function ImgApiTestTool() {
   useEffect(() => { rateRef.current = parseFloat(rateStr) || IMG_DEFAULT_RATE }, [rateStr])
 
   useEffect(() => { try { kvSet(IMG_CH_KEY, JSON.stringify(channels)) } catch { /* ignore */ } }, [channels])
-  useEffect(() => { if (activeChId) { try { kvSet(IMG_ACTIVE_KEY, activeChId) } catch { /* ignore */ } } }, [activeChId])
+  useEffect(() => {
+    try {
+      if (activeChId) kvSet(IMG_ACTIVE_KEY, activeChId)
+      else kvRemove(IMG_ACTIVE_KEY)
+    } catch { /* ignore */ }
+  }, [activeChId])
   useEffect(() => { imgSavePrices(prices) }, [prices])
   useEffect(() => { imgSaveRate(rateStr) }, [rateStr])
   useEffect(() => { try { kvSet(IMG_HIDEPRICES_KEY, hidePrices ? '1' : '0') } catch { /* ignore */ } }, [hidePrices])
@@ -1212,6 +1247,14 @@ function ImgApiTestTool() {
     setEditingChId(c.id)
     setPane('channels')
   }, [])
+  const copyChannel = useCallback((c: ImgChannel) => {
+    const name = uniqueCopyName(c.name, channels.map(x => x.name))
+    const nc: ImgChannel = { ...c, id: imgUid(), name }
+    setChannels([...channels, nc])
+    toastShow(`已复制为 ${name}`)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [channels])
+
   const delChannel = useCallback((id: string) => {
     if (!window.confirm('删除该渠道？')) return
     setChannels(prev => prev.filter(x => x.id !== id))
@@ -1789,7 +1832,7 @@ function ImgApiTestTool() {
           {pane === 'channels' && (
             <ImgChannelsPane
               channels={channels} activeChId={activeChId} chForm={chForm} editingChId={editingChId}
-              onSetActive={setActiveChId} onEdit={editChannel} onDelete={delChannel}
+              onSetActive={setActiveChId} onEdit={editChannel} onCopy={copyChannel} onDelete={delChannel}
               onSave={saveChannel} onChFormChange={setChForm} onClearForm={clearChForm}
             />
           )}

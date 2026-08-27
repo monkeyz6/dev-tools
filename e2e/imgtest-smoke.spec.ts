@@ -1,5 +1,5 @@
 import { test, expect } from '@playwright/test'
-import { readHistoryStore } from './helpers'
+import { readHistoryStore, goto, channelCard, readKv } from './helpers'
 
 const CORS = { 'Access-Control-Allow-Origin': '*', 'Access-Control-Expose-Headers': '*' }
 
@@ -299,4 +299,22 @@ test('隐藏价格开关生效，且导出的 HTML 报告不含任何价格信�
   await expect(row.getByRole('cell').nth(11)).toHaveText('—')
   await page.getByRole('switch').click()
   await expect(row.getByRole('cell').nth(11)).toContainText('$')
+})
+
+test('渠道管理：复制渠道不切换当前使用', async ({ page }) => {
+  await goto(page, /图片接口测试/)
+  await page.getByRole('button', { name: '渠道管理', exact: true }).click()
+  await page.getByPlaceholder('例如：主线-oinone').fill('测试渠道')
+  await page.getByPlaceholder('https://api.oinone.top').fill('https://mock.example')
+  await page.getByPlaceholder('sk-xxxxxxxx').fill('sk-test-1234567890')
+  await page.getByRole('button', { name: '保存渠道' }).click()
+
+  await channelCard(page, '测试渠道').getByRole('button', { name: '复制' }).click()
+  await expect(channelCard(page, '测试渠道_copy')).toBeVisible()
+  await expect(channelCard(page, '测试渠道').getByText('✓ 当前使用')).toBeVisible()
+  await expect(channelCard(page, '测试渠道_copy').getByText('✓ 当前使用')).toHaveCount(0)
+  await expect.poll(async () => {
+    const raw = await readKv(page, 'imgtest-channels')
+    return raw ? JSON.parse(raw).map((c: { name: string }) => c.name) : []
+  }).toEqual(['测试渠道', '测试渠道_copy'])
 })

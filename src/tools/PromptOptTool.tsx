@@ -4,6 +4,7 @@ import { Btn, Label, Card, Badge, CustomInput, CustomSelect, CustomTextarea, Seg
 import { IconChevron } from '../shared/icons'
 import { encryptLlmApiKey, decryptLlmApiKey } from '../shared/api-key-crypto'
 import { useDebouncedPersist } from '../shared/use-debounced-persist'
+import { uniqueCopyName } from '../shared/channel-copy'
 import {
   FRAMEWORKS, SCENARIOS, frameworkOf, buildGenerateMessages, buildOptimizeMessages,
   parseOptimizeOutput, joinLlmUrl, type FrameworkId, type FrameworkFieldValues,
@@ -137,7 +138,10 @@ function PromptOptTool() {
 
   useEffect(() => { try { kvSet(CH_KEY, JSON.stringify(channels)) } catch { /* ignore */ } }, [channels])
   useEffect(() => {
-    if (activeChId) { try { kvSet(ACTIVE_KEY, activeChId) } catch { /* ignore */ } }
+    try {
+      if (activeChId) kvSet(ACTIVE_KEY, activeChId)
+      else kvRemove(ACTIVE_KEY)
+    } catch { /* ignore */ }
   }, [activeChId])
   // 工作台状态含长文本字段，每次击键整份 stringify 写盘会卡输入：防抖合并
   useDebouncedPersist(() => {
@@ -189,6 +193,13 @@ function PromptOptTool() {
   const editChannel = (c: PromptChannel) => {
     setChForm({ name: c.name, baseUrl: c.baseUrl, model: c.model, apiKey: '' })
     setEditingChId(c.id)
+  }
+
+  const copyChannel = (c: PromptChannel) => {
+    const name = uniqueCopyName(c.name, channels.map(x => x.name))
+    const nc: PromptChannel = { ...c, id: uid(), name }
+    setChannels([...channels, nc])
+    toastShow(`已复制为 ${name}`)
   }
 
   const delChannel = (id: string) => {
@@ -249,11 +260,12 @@ function PromptOptTool() {
               {c.id === activeChId && <span className="absolute top-3 right-4 text-[11px] font-bold" style={{ color: 'var(--accent)' }}>✓ 当前使用</span>}
               <div className="text-sm font-bold pr-16 truncate" style={{ color: 'var(--text)' }}>{c.name}</div>
               <div className="text-xs break-all mt-1" style={{ color: 'var(--t3)' }}>{c.baseUrl}</div>
-              <div className="text-xs mt-0.5 font-mono" style={{ color: 'var(--accent)' }}>{c.model}</div>
+              <div className="text-xs mt-0.5 font-mono truncate" style={{ color: 'var(--accent)' }} title={c.model}>{c.model}</div>
               <div className="text-[11px] font-mono mt-1" style={{ color: 'var(--t3)' }}>{c.keyMask || '（未设置）'}</div>
-              <div className="flex gap-2 mt-3">
+              <div className="flex gap-2 mt-3 flex-wrap">
                 <Btn small variant="soft" onClick={() => setActiveChId(c.id)}>设为当前</Btn>
                 <Btn small variant="soft" onClick={() => editChannel(c)}>编辑</Btn>
+                <Btn small variant="soft" onClick={() => copyChannel(c)}>复制</Btn>
                 <Btn small variant="danger" onClick={() => delChannel(c.id)}>删除</Btn>
               </div>
             </div>

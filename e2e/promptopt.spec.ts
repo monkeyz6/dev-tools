@@ -1,5 +1,5 @@
 import { test, expect } from '@playwright/test'
-import { goto, selectOption, inputByLabel, readKv } from './helpers'
+import { goto, selectOption, inputByLabel, readKv, channelCard } from './helpers'
 
 test.beforeEach(async ({ page }) => {
   // 仅首次加载清空；reload 保留，便于测试持久化
@@ -54,6 +54,38 @@ test.describe('提示词优化', () => {
     const stored = await readKv(page, 'promptopt-channels')
     expect(stored).not.toContain('sk-test-key-123')
     expect(stored).toContain('.')
+  })
+
+  test('渠道管理：复制渠道，撞名递增且不切换当前', async ({ page }) => {
+    await goto(page, /提示词优化/)
+    await page.getByRole('button', { name: /渠道管理/ }).click()
+    await inputByLabel(page, '渠道名称').fill('测试渠道')
+    await inputByLabel(page, 'Base URL').fill('https://api.example.com')
+    await inputByLabel(page, '模型编码').fill('gpt-4o-mini')
+    await inputByLabel(page, 'apiKey').fill('sk-test-key-123')
+    await page.getByRole('button', { name: '保存渠道' }).click()
+
+    await channelCard(page, '测试渠道').getByRole('button', { name: '复制' }).click()
+    await expect(channelCard(page, '测试渠道_copy')).toBeVisible()
+    await expect(page.getByText('已复制为 测试渠道_copy')).toBeVisible()
+    await expect(channelCard(page, '测试渠道').getByText('✓ 当前使用')).toBeVisible()
+    await expect(channelCard(page, '测试渠道_copy').getByText('✓ 当前使用')).toHaveCount(0)
+
+    await expect.poll(async () => {
+      const raw = await readKv(page, 'promptopt-channels')
+      return raw ? JSON.parse(raw).map((c: { name: string }) => c.name) : []
+    }).toEqual(['测试渠道', '测试渠道_copy'])
+    const stored = await readKv(page, 'promptopt-channels')
+    expect(stored).not.toContain('sk-test-key-123')
+    const arr = JSON.parse(stored!)
+    expect(arr[0].id).not.toBe(arr[1].id)
+    expect(arr[0].apiKeyEnc).toBe(arr[1].apiKeyEnc)
+    expect(arr[0].model).toBe('gpt-4o-mini')
+    expect(arr[1].model).toBe('gpt-4o-mini')
+
+    await channelCard(page, '测试渠道').getByRole('button', { name: '复制' }).click()
+    await expect(channelCard(page, '测试渠道_copy2')).toBeVisible()
+    await expect(channelCard(page, '测试渠道').getByText('✓ 当前使用')).toBeVisible()
   })
 
   test('未配置渠道时生成给出提示', async ({ page }) => {

@@ -94,6 +94,34 @@ test.describe('JSON 可视化 & Diff', () => {
     await expect(pane.locator('textarea')).toHaveValue('{"a":1}')
   })
 
+  test('括号匹配正确处理嵌套、转义引号和字符串内括号', async ({ page }) => {
+    await goto(page, /JSON 可视化/)
+    const pane = leftPane(page)
+    const ta = pane.getByTestId('json-content')
+    await ta.fill('{\n  "outer": [\n    {"text": "literal } and \\\" quote", "n": 1}\n  ]\n}')
+    // 光标停在外层右括号后，应同时高亮第一行与末行的外层括号。
+    await ta.press('End')
+
+    const syntaxLayer = pane.locator('pre').first()
+    await expect(syntaxLayer.locator('.json-bracket-match')).toHaveCount(2)
+    await expect(syntaxLayer.locator('.json-bracket-match').first()).toHaveText('{')
+    await expect(syntaxLayer.locator('.json-bracket-match').last()).toHaveText('}')
+    await expect(syntaxLayer).not.toContainText('json-bracket-match')
+
+    // 光标停在开括号前也能识别数组配对。
+    await ta.fill('[{"n":1}]')
+    await ta.press('Home')
+    await expect(syntaxLayer.locator('.json-bracket-match')).toHaveCount(2)
+    await expect(syntaxLayer.locator('.json-bracket-match').first()).toHaveText('[')
+    await expect(syntaxLayer.locator('.json-bracket-match').last()).toHaveText(']')
+
+    // 字符串里的 } 不是结构括号，光标移到其后不应触发任何配对高亮。
+    await ta.fill('{"text":"}"}')
+    await ta.press('ArrowLeft')
+    await ta.press('ArrowLeft')
+    await expect(syntaxLayer.locator('.json-bracket-match')).toHaveCount(0)
+  })
+
   test('A/B 对比高亮差异并显示 +n/−n 徽标', async ({ page }) => {
     await goto(page, /JSON 可视化/)
     const l = leftPane(page).getByTestId('json-content')

@@ -1,6 +1,6 @@
 import React, { useState, useCallback, useRef, useEffect, useLayoutEffect, useMemo, useDeferredValue } from 'react'
 import { Btn, Label, Card, Badge, CustomInput, CustomSelect, SearchableSelect, CustomTextarea, Toggle, SegmentedControl, SectionTitle, CopyBtn } from '../shared/ui'
-import { formatJson, highlightJson, computeDiff, findMatchingBracket, JSON_ROW, JSON_PAD_TB, JSON_PAD_L, JSON_LINE_NO_W, JSON_FOLD_W, JSON_GUTTER_W, JSON_CONTENT_X, JSON_EDITOR_STYLE, computeFoldRanges, getVisibleLines } from '../shared/json'
+import { formatJson, highlightJson, computeDiff, findBracketPair, JSON_ROW, JSON_PAD_TB, JSON_PAD_L, JSON_LINE_NO_W, JSON_FOLD_W, JSON_GUTTER_W, JSON_CONTENT_X, JSON_EDITOR_STYLE, computeFoldRanges, getVisibleLines } from '../shared/json'
 
 /**
  * 查看态：虚拟滚动 + 行号 + 折叠 + diff 高亮（只读）。
@@ -94,7 +94,7 @@ function DiffEditor({ value, onChange, placeholder, lineTypes, scrollRef, onFocu
   const backRef = useRef<HTMLPreElement>(null)
   const gutterRef = useRef<HTMLDivElement>(null)
   const lines = value.length ? value.split('\n') : ['']
-  const [matchPos, setMatchPos] = useState<{ line: number; col: number } | null>(null)
+  const [matchPositions, setMatchPositions] = useState<{ line: number; col: number }[]>([])
 
   const sync = () => {
     const ta = taRef.current, back = backRef.current, gutter = gutterRef.current
@@ -108,17 +108,23 @@ function DiffEditor({ value, onChange, placeholder, lineTypes, scrollRef, onFocu
   const updateCursor = () => {
     const ta = taRef.current
     if (!ta) return
+    if (ta.selectionStart !== ta.selectionEnd) {
+      setMatchPositions([])
+      return
+    }
     const pos = ta.selectionStart
     const text = ta.value
     // 括号匹配高亮
-    const matchIdx = findMatchingBracket(text, pos)
-    if (matchIdx != null) {
-      const beforeM = text.slice(0, matchIdx)
-      const mLines = beforeM.split('\n')
-      setMatchPos({ line: mLines.length - 1, col: mLines[mLines.length - 1].length })
-    } else {
-      setMatchPos(null)
+    const pair = findBracketPair(text, pos)
+    if (!pair) {
+      setMatchPositions([])
+      return
     }
+    setMatchPositions([pair.current, pair.match].map(index => {
+      const beforeBracket = text.slice(0, index)
+      const bracketLines = beforeBracket.split('\n')
+      return { line: bracketLines.length - 1, col: bracketLines[bracketLines.length - 1].length }
+    }))
   }
 
   /** 键盘事件：Tab 缩进/补全，智能删除空配对 */
@@ -257,16 +263,19 @@ function DiffEditor({ value, onChange, placeholder, lineTypes, scrollRef, onFocu
         ) : lines.map((ln, i) => {
           const t = lineTypes?.[i]
           const bg = t === 'add' ? 'var(--addBg)' : t === 'rm' ? 'var(--rmBg)' : 'transparent'
-          const mL = matchPos && matchPos.line === i ? matchPos.col : undefined
+          const matchingCols = matchPositions.filter(pos => pos.line === i).map(pos => pos.col)
           return (
             <div key={i} style={{ background: bg, position: 'relative' }}>
-              <span dangerouslySetInnerHTML={{ __html: highlightJson(ln, mL) || '​' }} />
+              <span dangerouslySetInnerHTML={{ __html: highlightJson(ln, matchingCols) || '​' }} />
             </div>
           )
         })}
       </pre>
       <textarea
-        ref={taRef} value={value} onChange={e => onChange(e.target.value)}
+        ref={taRef} value={value} onChange={e => {
+          setMatchPositions([])
+          onChange(e.target.value)
+        }}
         onKeyDown={handleKeyDown}
         onScroll={sync} onClick={updateCursor} onKeyUp={updateCursor}
         spellCheck={false} wrap="off" autoFocus={autoFocus}

@@ -1,5 +1,5 @@
 import { test, expect } from '@playwright/test'
-import { goto, inputByLabel, readKv, readHistoryStore } from './helpers'
+import { goto, inputByLabel, readKv, readHistoryStore, channelCard } from './helpers'
 import { readFileSync } from 'fs'
 
 test.beforeEach(async ({ page }) => {
@@ -41,6 +41,14 @@ async function startRun(page: import('@playwright/test').Page, name: string) {
   await page.getByRole('button', { name: '▶ 开始测试' }).click()
   await page.getByRole('dialog').locator('input').fill(name)
   await page.getByRole('button', { name: '确认并开始' }).click()
+}
+
+async function selectCases(page: import('@playwright/test').Page, ids: Array<'repeat' | 'multiturn' | 'suffix'>) {
+  for (const id of ['repeat', 'multiturn', 'suffix'] as const) {
+    const box = page.locator(`input[data-case="${id}"]`)
+    if (ids.includes(id)) await box.check()
+    else await box.uncheck()
+  }
 }
 
 test.describe('缓存命中率测试', () => {
@@ -98,7 +106,10 @@ test.describe('缓存命中率测试', () => {
     await expect.poll(async () => (await readHistoryStore(page, 'cachehit')).length).toBe(1)
     const rec = (await readHistoryStore(page, 'cachehit'))[0]
     expect(rec.results).toHaveLength(3)
+    expect(rec.caseResults).toHaveLength(1)
+    expect(rec.caseResults[0].caseId).toBe('suffix')
     expect(rec.target.model).toBe('cache-model')
+    await expect(main.locator('[data-case-report="suffix"]')).toContainText('尾部变化')
   })
 
   test('全部未命中：结论提示未命中并给出可能原因', async ({ page }) => {
@@ -134,6 +145,9 @@ test.describe('缓存命中率测试', () => {
     await page.reload()
     await expect(inputByLabel(page, '模型名称')).toHaveValue('persist-model')
     await expect(inputByLabel(page, '测量轮数')).toHaveValue('7')
+    await expect(page.locator('input[data-case="suffix"]')).toBeChecked()
+    await expect(page.locator('input[data-case="repeat"]')).not.toBeChecked()
+    await expect(page.locator('input[data-case="multiturn"]')).not.toBeChecked()
     await page.getByRole('button', { name: /渠道管理/ }).click()
     await expect(page.locator('main')).toContainText('测试渠道')
   })
@@ -177,7 +191,7 @@ test.describe('缓存命中率测试', () => {
         innerH: window.innerHeight,
       }
     })
-    expect(scroll.bodyOverflow).toBe('visible')
+    expect(scroll.bodyOverflow).toBe('auto')
     expect(scroll.docScrollH).toBeGreaterThan(scroll.innerH)
     expect(scroll.scrolledTo).toBeGreaterThan(0)
   })
@@ -223,5 +237,109 @@ test.describe('缓存命中率测试', () => {
     }, b64)
     // 之前的实现会截出一张纯 --bg 空白图（darkRatio 恒为 0）
     expect(darkRatio).toBeGreaterThan(0.02)
+  })
+
+  test('重复请求：各轮请求体完全一致', async ({ page }) => {
+    const bodies: any[] = []
+    await page.route('**/v1/chat/completions', route => {
+      bodies.push(route.request().postDataJSON())
+      const n = bodies.length
+      return route.fulfill({ status: 200, contentType: 'application/json', body: CHAT_BODY(n === 1 ? 0 : 2048) })
+    })
+
+    await goto(page, /缓存命中率/)
+    await page.locator('input[data-format="responses"]').uncheck()
+    await page.locator('input[data-format="anthropic"]').uncheck()
+    await selectCases(page, ['repeat'])
+    await addChannel(page)
+    await inputByLabel(page, '模型名称').fill('cache-model')
+    await inputByLabel(page, '重放轮数').fill('2')
+    await startRun(page, 'e2e-重复请求')
+
+    const main = page.locator('main')
+    await expect(main.locator('[data-case-report="repeat"]')).toContainText('重复请求', { timeout: 10000 })
+    await expect(main.locator('[data-case-report="repeat"] [data-format-report="chat"]')).toContainText('100.0%')
+    expect(bodies).toHaveLength(3)
+    expect(bodies[0].messages[1].content).toBe(bodies[1].messages[1].content)
+    expect(bodies[0].messages[1].content).toBe(bodies[2].messages[1].content)
+    expect(JSON.stringify(bodies[0].messages)).toBe(JSON.stringify(bodies[2].messages))
+  })
+
+  test('多轮对话：第 2 轮含上一轮 assistant，空回复只多打 1 次', async ({ page }) => {
+    const bodies: any[] = []
+    await page.route('**/v1/chat/completions', route => {
+      const n = bodies.length + 1
+      bodies.push(route.request().postDataJSON())
+      const content = n === 1 ? '' : 'OK-from-warmup'
+      return route.fulfill({
+        status: 200, contentType: 'application/json',
+        body: JSON.stringify({
+          id: 'chatcmpl-cache',
+          choices: [{ message: { role: 'assistant', content } }],
+          usage: { prompt_tokens: 2100, completion_tokens: 3, prompt_tokens_details: { cached_tokens: n === 1 ? 0 : 2048 } },
+        }),
+      })
+    })
+
+    await goto(page, /缓存命中率/)
+    await page.locator('input[data-format="responses"]').uncheck()
+    await page.locator('input[data-format="anthropic"]').uncheck()
+    await selectCases(page, ['multiturn'])
+    await addChannel(page)
+    await inputByLabel(page, '模型名称').fill('cache-model')
+    await inputByLabel(page, '对话轮数').fill('2')
+    await startRun(page, 'e2e-多轮对话')
+
+    const main = page.locator('main')
+    await expect(main.locator('[data-case-report="multiturn"]')).toContainText('多轮对话', { timeout: 10000 })
+    await expect(main.locator('[data-case-report="multiturn"]')).toContainText('前缀仍命中')
+    // 预热空回复重试 1 次 + 预热成功 + 2 轮测量 = 4
+    expect(bodies).toHaveLength(4)
+    expect(bodies[0].messages).toHaveLength(2) // system + user
+    expect(bodies[1].messages).toHaveLength(2) // 重试同一轮，仍未拼 assistant
+    const measure1 = bodies[2].messages
+    expect(measure1.some((m: any) => m.role === 'assistant' && m.content === 'OK-from-warmup')).toBe(true)
+    expect(measure1.filter((m: any) => m.role === 'user').length).toBe(2)
+  })
+
+  test('三个 case 全跑：历史仍是 1 条，报告含三个标题', async ({ page }) => {
+    await page.route('**/v1/chat/completions', route => {
+      return route.fulfill({ status: 200, contentType: 'application/json', body: CHAT_BODY(2048) })
+    })
+
+    await goto(page, /缓存命中率/)
+    await page.locator('input[data-format="responses"]').uncheck()
+    await page.locator('input[data-format="anthropic"]').uncheck()
+    await selectCases(page, ['repeat', 'multiturn', 'suffix'])
+    await addChannel(page)
+    await inputByLabel(page, '模型名称').fill('cache-model')
+    await inputByLabel(page, '重放轮数').fill('2')
+    await inputByLabel(page, '对话轮数').fill('2')
+    await inputByLabel(page, '测量轮数').fill('2')
+    await startRun(page, 'e2e-三场景全跑')
+
+    const main = page.locator('main')
+    await expect(main).toContainText('缓存命中率测试报告', { timeout: 15000 })
+    await expect(main.locator('[data-case-report="repeat"]')).toContainText('重复请求')
+    await expect(main.locator('[data-case-report="multiturn"]')).toContainText('多轮对话')
+    await expect(main.locator('[data-case-report="suffix"]')).toContainText('尾部变化')
+
+    await expect.poll(async () => (await readHistoryStore(page, 'cachehit')).length).toBe(1)
+    const rec = (await readHistoryStore(page, 'cachehit'))[0]
+    expect(rec.caseResults.map((c: { caseId: string }) => c.caseId)).toEqual(['repeat', 'multiturn', 'suffix'])
+  })
+
+  test('渠道管理：复制渠道不切换当前使用', async ({ page }) => {
+    await goto(page, /缓存命中率/)
+    await addChannel(page, { name: '测试渠道' })
+    await page.getByRole('button', { name: /渠道管理/ }).click()
+    await channelCard(page, '测试渠道').getByRole('button', { name: '复制' }).click()
+    await expect(channelCard(page, '测试渠道_copy')).toBeVisible()
+    await expect(channelCard(page, '测试渠道').getByText('✓ 当前使用')).toBeVisible()
+    await expect(channelCard(page, '测试渠道_copy').getByText('✓ 当前使用')).toHaveCount(0)
+    await expect.poll(async () => {
+      const raw = await readKv(page, 'cachehit-channels')
+      return raw ? JSON.parse(raw).map((c: { name: string }) => c.name) : []
+    }).toEqual(['测试渠道', '测试渠道_copy'])
   })
 })
