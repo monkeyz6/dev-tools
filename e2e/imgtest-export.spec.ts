@@ -41,21 +41,20 @@ test('导出图片和 HTML 报告：成功生成、离线可渲染，且不含�
   await expect(page.getByText('✓ 通过 3/3')).toBeVisible()
   await expect(page.getByText('参考价格', { exact: false })).toBeVisible() // 确认这条记录本身带价格
 
-  // 「历史记录」详情弹窗：已发送的请求体默认展开（不用点），响应头保持折叠
+  // 「历史记录」两级视图：一批一行，导出直接对整批，不用先勾选记录
   await page.getByRole('button', { name: /历史记录/ }).click()
+  await expect(page.getByTestId('imgtest-batch')).toHaveCount(1)
+  await expect(page.getByText('1 个用例')).toBeVisible()
+  await expect(page.getByText('通过 1/1')).toBeVisible()
+  await expect(page.getByRole('button', { name: '↺ 还原到工作台' })).toBeVisible()
+  await expect(page.locator('tbody input[type="checkbox"]')).toHaveCount(0)
   const histPng = page.getByRole('button', { name: '导出 PNG' })
   const histHtml = page.getByRole('button', { name: '导出 HTML' })
-  await expect(histPng).toBeVisible()
-  await expect(histHtml).toBeVisible()
-  await expect(histPng).toBeDisabled()
-  await expect(histHtml).toBeDisabled()
-  await expect(page.getByRole('button', { name: /导出选中|⬇/ })).toHaveCount(0)
-  await page.locator('tbody input[type="checkbox"]').first().check()
   await expect(histPng).toBeEnabled()
   await expect(histHtml).toBeEnabled()
-  await expect(histPng).toHaveText('导出 PNG')
-  await expect(histHtml).toHaveText('导出 HTML')
+  await expect(page.getByRole('button', { name: /导出选中|⬇/ })).toHaveCount(0)
 
+  // 详情弹窗：已发送的请求体默认展开（不用点），响应体保持折叠
   await page.getByRole('button', { name: '详情' }).click()
   await expect(page.getByText('测试记录详情')).toBeVisible()
   await expect(page.getByRole('button', { name: '导出 PNG' })).toHaveCount(2) // 历史工具条 + 详情
@@ -89,16 +88,34 @@ test('导出图片和 HTML 报告：成功生成、离线可渲染，且不含�
   await htmlDownload.saveAs(htmlPath)
   const htmlSource = fs.readFileSync(htmlPath, 'utf-8')
   expect(htmlSource).not.toContain('参考价格')
-  // 已发送的请求体那个 <details> 要带 open 属性，导出报告默认展开、不用点
-  expect(/<details open[^>]*>\s*<summary[^>]*>已发送的请求体/.test(htmlSource)).toBe(true)
+  // 导出报告里明细一律折叠：先给结论再给细节，多条记录才不会被 JSON 撑爆
+  expect(/<details[^>]*\sopen[^>]*>/.test(htmlSource)).toBe(false)
+  // 居中栏宽：报告根节点带 data-img-export-root，配套覆盖样式给出 max-width + margin auto
+  expect(htmlSource).toContain('data-img-export-root')
+  expect(htmlSource).toContain('max-width:1120px;margin:0 auto')
 
   // file:// 真实打开导出的 HTML，证明离线渲染出来的不是空白页
   await page.goto('file://' + htmlPath)
   await expect(page.getByText('图片接口测试报告').first()).toBeVisible({ timeout: 15000 })
+  // 总览层：结论、能力支持矩阵、用例结果表
+  await expect(page.getByText('全部通过').first()).toBeVisible()
+  await expect(page.getByText('能力支持一览')).toBeVisible()
+  await expect(page.getByText('精确像素尺寸')).toBeVisible()
+  await expect(page.getByText('用例结果', { exact: true })).toBeVisible()
   await expect(page.getByText('方形 1024×1024').first()).toBeVisible()
   await expect(page.getByText('req-export-test', { exact: false }).first()).toBeVisible()
   await expect(page.getByText('参考价格', { exact: false })).toHaveCount(0)
-  await expect(page.getByText('"model"', { exact: false }).first()).toBeVisible() // 请求体默认展开可见，不用点开
+  await expect(page.getByText('"model"', { exact: false }).first()).toBeHidden() // 明细折叠，请求体默认不可见
+
+  // 报告文档水平居中：左右留白基本对称（宽屏下不再是靠左的一条窄柱）
+  const centered = await page.evaluate(() => {
+    const el = document.querySelector('[data-img-export-root]') as HTMLElement | null
+    if (!el) return null
+    const r = el.getBoundingClientRect()
+    return { left: r.left, right: document.documentElement.clientWidth - r.right }
+  })
+  expect(centered).not.toBeNull()
+  expect(Math.abs(centered!.left - centered!.right)).toBeLessThan(2)
 
   expect(dialogs).toEqual([]) // 没有触发失败提示的 alert
 })

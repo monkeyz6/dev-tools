@@ -11,21 +11,95 @@ test.beforeEach(async ({ page }) => {
   })
 })
 
-const CHAT_OK = (promptTokens: number, cached = 0) => JSON.stringify({
+const CHAT_OK = (promptTokens: number, cached = 0, extra: { content?: string; finishReason?: string; toolName?: string } = {}) => JSON.stringify({
   id: 'chatcmpl-probe',
-  choices: [{ message: { role: 'assistant', content: 'OK' } }],
+  choices: [{
+    message: extra.toolName
+      ? { role: 'assistant', content: null, tool_calls: [{ id: 'call_1', type: 'function', function: { name: extra.toolName, arguments: '{"city":"Shanghai"}' } }] }
+      : { role: 'assistant', content: extra.content ?? 'OK' },
+    finish_reason: extra.finishReason ?? (extra.toolName ? 'tool_calls' : 'stop'),
+  }],
   usage: { prompt_tokens: promptTokens, completion_tokens: 5, prompt_tokens_details: { cached_tokens: cached } },
 })
-const RESPONSES_OK = JSON.stringify({
+const RESPONSES_OK = (extra: { text?: string; status?: string; reason?: string; toolName?: string } = {}) => JSON.stringify({
   id: 'resp-probe',
-  output: [{ type: 'message', content: [{ type: 'output_text', text: 'OK' }] }],
+  status: extra.status ?? (extra.reason ? 'incomplete' : 'completed'),
+  incomplete_details: extra.reason ? { reason: extra.reason } : undefined,
+  output: extra.toolName
+    ? [{ type: 'function_call', name: extra.toolName, arguments: '{"city":"Shanghai"}' }]
+    : [{ type: 'message', role: 'assistant', content: [{ type: 'output_text', text: extra.text ?? 'OK' }] }],
   usage: { input_tokens: 10, output_tokens: 4, input_tokens_details: { cached_tokens: 2 } },
 })
-const ANTHROPIC_OK = JSON.stringify({
+const ANTHROPIC_OK = (extra: { text?: string; stop?: string; toolName?: string } = {}) => JSON.stringify({
   id: 'msg-probe',
-  content: [{ type: 'text', text: 'OK' }],
+  stop_reason: extra.stop ?? (extra.toolName ? 'tool_use' : 'end_turn'),
+  content: extra.toolName
+    ? [{ type: 'tool_use', id: 'toolu_1', name: extra.toolName, input: { city: 'Shanghai' } }]
+    : [{ type: 'text', text: extra.text ?? 'OK' }],
   usage: { input_tokens: 8, output_tokens: 3, cache_read_input_tokens: 5, cache_creation_input_tokens: 0 },
 })
+
+function extractPrompt(body: any): string {
+  const parts: string[] = []
+  if (typeof body?.instructions === 'string') parts.push(body.instructions)
+  if (typeof body?.input === 'string') parts.push(body.input)
+  const msgs = body?.messages || (Array.isArray(body?.input) ? body.input : [])
+  for (const m of msgs) {
+    if (typeof m?.content === 'string') parts.push(m.content)
+    else if (Array.isArray(m?.content)) {
+      for (const c of m.content) {
+        if (typeof c === 'string') parts.push(c)
+        else if (c && typeof c === 'object') parts.push(c.text || c.input_text || c.output_text || '')
+      }
+    }
+  }
+  return parts.join('\n')
+}
+function capOf(body: any): number | undefined {
+  return body?.max_completion_tokens ?? body?.max_output_tokens ?? body?.max_tokens
+}
+function isForcedWeather(body: any): boolean {
+  const choice = body?.tool_choice
+  if (!choice || choice === 'auto' || choice?.type === 'auto') return false
+  const name = choice?.function?.name || choice?.name
+  return name === 'get_weather' || choice?.type === 'tool'
+}
+function hasImage(body: any): boolean {
+  return /image_url|"type":"image"|input_image/.test(JSON.stringify(body || {}))
+}
+function smartChat(body: any, promptTokens = 12): string {
+  const text = extractPrompt(body)
+  if (capOf(body) === 16 && text.includes('Count from 1 to 200')) return CHAT_OK(promptTokens, 0, { content: '1 2 3', finishReason: 'length' })
+  if (isForcedWeather(body)) return CHAT_OK(promptTokens, 0, { toolName: 'get_weather' })
+  if (body?.response_format || body?.text?.format || body?.output_config) return CHAT_OK(promptTokens, 0, { content: '{"ok":true}' })
+  if (text.includes('SYSTEM_OK')) return CHAT_OK(promptTokens, 0, { content: 'SYSTEM_OK' })
+  if (text.includes('only the codeword')) return CHAT_OK(promptTokens, 0, { content: 'ORBIT' })
+  if (text.includes('Remember the codeword')) return CHAT_OK(promptTokens, 0, { content: 'Acknowledged.' })
+  if (hasImage(body)) return CHAT_OK(promptTokens, 0, { content: 'red' })
+  return CHAT_OK(promptTokens)
+}
+function smartResponses(body: any): string {
+  const text = extractPrompt(body)
+  if (capOf(body) === 16 && text.includes('Count from 1 to 200')) return RESPONSES_OK({ text: '1 2 3', status: 'incomplete', reason: 'max_output_tokens' })
+  if (isForcedWeather(body)) return RESPONSES_OK({ toolName: 'get_weather' })
+  if (body?.response_format || body?.text?.format || body?.output_config) return RESPONSES_OK({ text: '{"ok":true}' })
+  if (text.includes('SYSTEM_OK')) return RESPONSES_OK({ text: 'SYSTEM_OK' })
+  if (text.includes('only the codeword')) return RESPONSES_OK({ text: 'ORBIT' })
+  if (text.includes('Remember the codeword')) return RESPONSES_OK({ text: 'Acknowledged.' })
+  if (hasImage(body)) return RESPONSES_OK({ text: 'red' })
+  return RESPONSES_OK()
+}
+function smartAnthropic(body: any): string {
+  const text = extractPrompt(body)
+  if (capOf(body) === 16 && text.includes('Count from 1 to 200')) return ANTHROPIC_OK({ text: '1 2 3', stop: 'max_tokens' })
+  if (isForcedWeather(body)) return ANTHROPIC_OK({ toolName: 'get_weather' })
+  if (body?.response_format || body?.text?.format || body?.output_config) return ANTHROPIC_OK({ text: '{"ok":true}' })
+  if (text.includes('SYSTEM_OK')) return ANTHROPIC_OK({ text: 'SYSTEM_OK' })
+  if (text.includes('only the codeword')) return ANTHROPIC_OK({ text: 'ORBIT' })
+  if (text.includes('Remember the codeword')) return ANTHROPIC_OK({ text: 'Acknowledged.' })
+  if (hasImage(body)) return ANTHROPIC_OK({ text: 'red' })
+  return ANTHROPIC_OK()
+}
 
 const check = (page: import('@playwright/test').Page, id: string) => page.locator(`input[data-id="${id}"]`).check()
 const uncheck = (page: import('@playwright/test').Page, id: string) => page.locator(`input[data-id="${id}"]`).uncheck()
@@ -55,9 +129,9 @@ test.describe('模型探测', () => {
     await page.route('**/v1/chat/completions', route =>
       route.fulfill({ status: 200, contentType: 'application/json', headers: { 'x-oneapi-request-id': 'req-chat-0001', 'access-control-expose-headers': '*' }, body: CHAT_OK(12, 3) }))
     await page.route('**/v1/responses', route =>
-      route.fulfill({ status: 200, contentType: 'application/json', headers: { 'x-request-id': 'req-resp-0002', 'access-control-expose-headers': '*' }, body: RESPONSES_OK }))
+      route.fulfill({ status: 200, contentType: 'application/json', headers: { 'x-request-id': 'req-resp-0002', 'access-control-expose-headers': '*' }, body: RESPONSES_OK() }))
     await page.route('**/v1/messages', route =>
-      route.fulfill({ status: 200, contentType: 'application/json', headers: { 'x-oneapi-request-id': 'req-anth-0003', 'access-control-expose-headers': '*' }, body: ANTHROPIC_OK }))
+      route.fulfill({ status: 200, contentType: 'application/json', headers: { 'x-oneapi-request-id': 'req-anth-0003', 'access-control-expose-headers': '*' }, body: ANTHROPIC_OK() }))
 
     await goto(page, /模型探测/)
     // 勾选控件在「实时进度」面板（默认面板），需在切去「渠道管理」之前完成
@@ -114,35 +188,35 @@ test.describe('模型探测', () => {
     await expect(page.getByRole('dialog')).toContainText('组合请求通过')
   })
 
-  test('工具调用：三协议原生 tools 形状（双工具 + tool_choice，非流式）', async ({ page }) => {
+  test('工具调用：combo auto 后再发强制 get_weather', async ({ page }) => {
     const chatBodies: any[] = []
     const responsesBodies: any[] = []
     const anthropicBodies: any[] = []
     await page.route('**/v1/chat/completions', async route => {
       const body = route.request().postDataJSON()
       if (body?.tools) chatBodies.push(body)
-      await route.fulfill({ status: 200, contentType: 'application/json', body: CHAT_OK(12) })
+      await route.fulfill({ status: 200, contentType: 'application/json', body: smartChat(body) })
     })
     await page.route('**/v1/responses', async route => {
       const body = route.request().postDataJSON()
       if (body?.tools) responsesBodies.push(body)
-      await route.fulfill({ status: 200, contentType: 'application/json', body: RESPONSES_OK })
+      await route.fulfill({ status: 200, contentType: 'application/json', body: smartResponses(body) })
     })
     await page.route('**/v1/messages', async route => {
       const body = route.request().postDataJSON()
       if (body?.tools) anthropicBodies.push(body)
-      await route.fulfill({ status: 200, contentType: 'application/json', body: ANTHROPIC_OK })
+      await route.fulfill({ status: 200, contentType: 'application/json', body: smartAnthropic(body) })
     })
 
     await goto(page, /模型探测/)
     await page.getByRole('button', { name: '全不选' }).click()
     for (const id of ['chat-basic', 'responses-basic', 'anthropic-basic', 'tool_calling']) await check(page, id)
-    await expect(page.locator('main')).toContainText('get_weather + query_order / tool_choice=auto')
+    await expect(page.locator('main')).toContainText('接受 tools，并强制调用 get_weather')
     await setupRun(page, 'e2e-工具调用形状')
 
     const main = page.locator('main')
     await expect(main.getByRole('button', { name: /工具调用/ })).toHaveCount(3, { timeout: 10000 })
-    await expect(main).toContainText('组合请求通过')
+    await expect(main).toContainText('已调用 get_weather')
 
     await page.getByRole('button', { name: /请求日志/ }).click()
     await page.getByRole('combobox').selectOption('tool_calling')
@@ -150,46 +224,43 @@ test.describe('模型探测', () => {
     await expect(main).toContainText('"name": "get_weather"')
     await expect(main).toContainText('"tool_choice": "auto"')
     await expect(main).toContainText('SN20260705888')
-    await main.getByText('工具调用（Responses）', { exact: true }).click()
-    await expect(main).toContainText('"type": "input_text"')
-    await main.getByText('工具调用（Anthropic Messages）', { exact: true }).click()
-    await expect(main).toContainText('"input_schema"')
-    await expect(main).toContainText('"type": "auto"')
+    await main.getByText('工具调用 语义（Chat Completions）', { exact: true }).click()
+    await expect(main).toContainText('"function": {')
 
-    expect(chatBodies).toHaveLength(1)
-    expect(responsesBodies).toHaveLength(1)
-    expect(anthropicBodies).toHaveLength(1)
+    expect(chatBodies).toHaveLength(2)
+    expect(responsesBodies).toHaveLength(2)
+    expect(anthropicBodies).toHaveLength(2)
 
-    const chat = chatBodies[0]
+    const chat = chatBodies.find(b => b.tool_choice === 'auto')
     expect(chat.tools[0].function.name).toBe('get_weather')
     expect(chat.tools[0].function.parameters.required).toEqual(['city'])
     expect(chat.tools[1].function.name).toBe('query_order')
-    expect(chat.tool_choice).toBe('auto')
     expect(chat.stream).toBeUndefined()
     expect(String(chat.messages?.[0]?.content)).toContain('上海')
     expect(String(chat.messages?.[0]?.content)).toContain('SN20260705888')
+    const chatForced = chatBodies.find(b => b.tool_choice?.function?.name === 'get_weather')
+    expect(chatForced.tools).toHaveLength(1)
+    expect(chatForced.tool_choice).toEqual({ type: 'function', function: { name: 'get_weather' } })
 
-    const responses = responsesBodies[0]
+    const responses = responsesBodies.find(b => b.tool_choice === 'auto')
     expect(responses.tools[0].name).toBe('get_weather')
     expect(responses.tools[0].type).toBe('function')
     expect(responses.tools[0].function).toBeUndefined()
     expect(responses.tools[1].name).toBe('query_order')
-    expect(responses.tool_choice).toBe('auto')
     expect(responses.stream).toBeUndefined()
     expect(responses.max_output_tokens).toBeUndefined()
     expect(responses.input[0].type).toBe('message')
-    expect(responses.input[0].content[0].type).toBe('input_text')
     expect(responses.input[0].content[0].text).toContain('上海')
-    expect(responses.input[0].content[0].text).toContain('SN20260705888')
+    const responsesForced = responsesBodies.find(b => b.tool_choice?.name === 'get_weather')
+    expect(responsesForced.tool_choice).toEqual({ type: 'function', name: 'get_weather' })
 
-    const anthropic = anthropicBodies[0]
+    const anthropic = anthropicBodies.find(b => b.tool_choice?.type === 'auto')
     expect(anthropic.tools[0].name).toBe('get_weather')
     expect(anthropic.tools[0].input_schema.required).toEqual(['city'])
-    expect(anthropic.tools[0].function).toBeUndefined()
     expect(anthropic.tools[1].name).toBe('query_order')
-    expect(anthropic.tool_choice).toEqual({ type: 'auto' })
-    expect(anthropic.stream).toBeUndefined()
     expect(String(anthropic.messages?.[0]?.content)).toContain('上海')
+    const anthropicForced = anthropicBodies.find(b => b.tool_choice?.type === 'tool')
+    expect(anthropicForced.tool_choice).toEqual({ type: 'tool', name: 'get_weather' })
   })
 
   test('缓存未命中：连续 3 次未报告缓存命中即停止，不再重试', async ({ page }) => {
@@ -386,7 +457,7 @@ test.describe('模型探测', () => {
     await page.route('**/v1/chat/completions', route =>
       route.fulfill({ status: 200, contentType: 'application/json', body: CHAT_OK(5) }))
     await page.route('**/v1/responses', route =>
-      route.fulfill({ status: 200, contentType: 'application/json', body: RESPONSES_OK }))
+      route.fulfill({ status: 200, contentType: 'application/json', body: RESPONSES_OK() }))
     await page.route('**/v1/messages', route =>
       route.fulfill({ status: 401, contentType: 'application/json', body: JSON.stringify({ error: { message: 'Invalid API key' } }) }))
 
@@ -410,7 +481,7 @@ test.describe('模型探测', () => {
     })
     await page.route('**/v1/responses', async route => {
       responsesCalls++
-      await route.fulfill({ status: 200, contentType: 'application/json', body: RESPONSES_OK })
+      await route.fulfill({ status: 200, contentType: 'application/json', body: RESPONSES_OK() })
     })
     await page.route('**/v1/messages', route =>
       route.fulfill({ status: 401, contentType: 'application/json', body: JSON.stringify({ error: { message: 'Invalid API key' } }) }))
@@ -491,7 +562,7 @@ test.describe('模型探测', () => {
         await route.fulfill({ status: 200, contentType: 'text/event-stream', body: sse })
         return
       }
-      await route.fulfill({ status: 200, contentType: 'application/json', body: RESPONSES_OK })
+      await route.fulfill({ status: 200, contentType: 'application/json', body: smartResponses(body) })
     })
 
     await goto(page, /模型探测/)
@@ -501,7 +572,7 @@ test.describe('模型探测', () => {
 
     await expect(page.locator('main')).toContainText('通过 7', { timeout: 10000 })
     expect(chatCalls).toBe(0)
-    expect(responsesCalls).toBe(9) // basic 1 + stream-false 1 + stream-true 1 + system 1 + multi-turn 1 + error-shape 1 + concurrency 3
+    expect(responsesCalls).toBe(10) // basic 1 + stream-false 1 + stream-true 1 + system 1 + multi-turn 2 + error-shape 1 + concurrency 3
   })
 
   test('取消勾选 Anthropic 基础测试后，缓存测试自动跳过、不再发请求', async ({ page }) => {
@@ -609,7 +680,7 @@ test.describe('模型探测', () => {
         await route.fulfill({ status: 200, contentType: 'text/event-stream', body: sse })
         return
       }
-      await route.fulfill({ status: 200, contentType: 'application/json', body: RESPONSES_OK })
+      await route.fulfill({ status: 200, contentType: 'application/json', body: RESPONSES_OK() })
     })
 
     await goto(page, /模型探测/)
@@ -721,7 +792,7 @@ test.describe('模型探测', () => {
     let chatCalls = 0
     await page.route('**/v1/chat/completions', async () => { chatCalls++ })
     await page.route('**/v1/responses', route =>
-      route.fulfill({ status: 200, contentType: 'application/json', body: RESPONSES_OK }))
+      route.fulfill({ status: 200, contentType: 'application/json', body: RESPONSES_OK() }))
 
     await goto(page, /模型探测/)
     await page.getByRole('button', { name: '全不选' }).click()
@@ -767,7 +838,7 @@ test.describe('模型探测', () => {
         })
         return
       }
-      await route.fulfill({ status: 200, contentType: 'application/json', body: ANTHROPIC_OK })
+      await route.fulfill({ status: 200, contentType: 'application/json', body: ANTHROPIC_OK() })
     })
 
     await goto(page, /模型探测/)
@@ -793,7 +864,7 @@ test.describe('模型探测', () => {
         })
         return
       }
-      await route.fulfill({ status: 200, contentType: 'application/json', body: ANTHROPIC_OK })
+      await route.fulfill({ status: 200, contentType: 'application/json', body: ANTHROPIC_OK() })
     })
 
     await goto(page, /模型探测/)
@@ -808,13 +879,16 @@ test.describe('模型探测', () => {
     await expect(tile).toContainText('↑8 ↓—')
   })
 
-  test('结构化输出：Anthropic 不出现在报告里', async ({ page }) => {
+  test('结构化输出：Anthropic 走 output_config，并校验 JSON', async ({ page }) => {
     const anthropicBodies: any[] = []
-    await page.route('**/v1/chat/completions', route =>
-      route.fulfill({ status: 200, contentType: 'application/json', body: CHAT_OK(12) }))
+    await page.route('**/v1/chat/completions', async route => {
+      const body = route.request().postDataJSON()
+      await route.fulfill({ status: 200, contentType: 'application/json', body: smartChat(body) })
+    })
     await page.route('**/v1/messages', async route => {
-      anthropicBodies.push(route.request().postDataJSON())
-      await route.fulfill({ status: 200, contentType: 'application/json', body: ANTHROPIC_OK })
+      const body = route.request().postDataJSON()
+      anthropicBodies.push(body)
+      await route.fulfill({ status: 200, contentType: 'application/json', body: smartAnthropic(body) })
     })
 
     await goto(page, /模型探测/)
@@ -822,25 +896,26 @@ test.describe('模型探测', () => {
     await check(page, 'chat-basic')
     await check(page, 'anthropic-basic')
     await check(page, 'structured_output')
-    await setupRun(page, 'e2e-结构化输出不含Anthropic')
+    await setupRun(page, 'e2e-结构化输出含Anthropic')
 
     const main = page.locator('main')
-    await expect(main).toContainText('通过 3', { timeout: 10000 })
-    await expect(main).not.toContainText('不支持 1')
+    await expect(main).toContainText('通过 4', { timeout: 10000 })
     await expect(main).not.toContainText('无原生 response_format')
     const soTiles = main.getByRole('button', { name: /结构化输出/ })
-    await expect(soTiles).toHaveCount(1)
-    await expect(soTiles).toContainText('Chat Completions')
-    await expect(soTiles).not.toContainText('Anthropic')
-    expect(anthropicBodies).toHaveLength(1)
-    expect(anthropicBodies[0].response_format).toBeUndefined()
+    await expect(soTiles).toHaveCount(2)
+    await expect(soTiles.filter({ hasText: 'Chat Completions' })).toContainText('JSON 符合 Schema')
+    await expect(soTiles.filter({ hasText: 'Anthropic' })).toContainText('JSON 符合 Schema')
+    const withConfig = anthropicBodies.filter(b => b.output_config)
+    expect(withConfig.length).toBeGreaterThanOrEqual(1)
+    expect(withConfig[0].output_config).toEqual({ format: { type: 'json_schema', schema: { type: 'object', properties: { ok: { type: 'boolean' } }, required: ['ok'], additionalProperties: false } } })
+    expect(anthropicBodies.every(b => b.response_format === undefined)).toBeTruthy()
 
     const [download] = await Promise.all([
       page.waitForEvent('download'),
       page.getByRole('button', { name: '导出 JSON' }).click(),
     ])
     const raw = readFileSync(await download.path(), 'utf8')
-    expect(raw).not.toContain('structured_output@anthropic')
+    expect(raw).toContain('structured_output@anthropic')
     expect(raw).not.toContain('无原生 response_format')
   })
 
@@ -1021,5 +1096,422 @@ test.describe('模型探测', () => {
 
     await expect(page.locator('[data-conn="chat"]')).toContainText('✗ 429')
     expect(chatCalls).toBe(1)
+  })
+
+  test('Token 上限语义：三协议核验截断原因', async ({ page }) => {
+    const chatBodies: any[] = []
+    const responsesBodies: any[] = []
+    const anthropicBodies: any[] = []
+    await page.route('**/v1/chat/completions', async route => {
+      const body = route.request().postDataJSON()
+      chatBodies.push(body)
+      await route.fulfill({ status: 200, contentType: 'application/json', body: smartChat(body) })
+    })
+    await page.route('**/v1/responses', async route => {
+      const body = route.request().postDataJSON()
+      responsesBodies.push(body)
+      await route.fulfill({ status: 200, contentType: 'application/json', body: smartResponses(body) })
+    })
+    await page.route('**/v1/messages', async route => {
+      const body = route.request().postDataJSON()
+      anthropicBodies.push(body)
+      await route.fulfill({ status: 200, contentType: 'application/json', body: smartAnthropic(body) })
+    })
+
+    await goto(page, /模型探测/)
+    await page.getByRole('button', { name: '全不选' }).click()
+    for (const id of ['chat-basic', 'responses-basic', 'anthropic-basic', 'max_tokens']) await check(page, id)
+    await setupRun(page, 'e2e-截断原因')
+
+    const main = page.locator('main')
+    const tiles = main.getByRole('button', { name: /Token 上限参数/ })
+    await expect(tiles).toHaveCount(3, { timeout: 10000 })
+    await expect(tiles.filter({ hasText: 'Chat Completions' })).toContainText('length')
+    await expect(tiles.filter({ hasText: 'Responses' })).toContainText('max_output_tokens')
+    await expect(tiles.filter({ hasText: 'Anthropic' })).toContainText('max_tokens')
+    const chatCap = chatBodies.find(b => b.max_completion_tokens === 16 || b.max_tokens === 16)
+    expect(chatCap.max_completion_tokens).toBe(16)
+    expect(chatCap.max_tokens).toBe(16)
+    expect(chatBodies.some(b => b.max_completion_tokens === 32 && b.max_tokens === 32)).toBeTruthy()
+    expect(responsesBodies.some(b => b.max_output_tokens === 16)).toBeTruthy()
+    expect(anthropicBodies.some(b => b.max_tokens === 16)).toBeTruthy()
+  })
+
+  test('System 未遵循 SYSTEM_OK 则失败', async ({ page }) => {
+    await page.route('**/v1/chat/completions', async route => {
+      const body = route.request().postDataJSON()
+      const text = extractPrompt(body)
+      const content = text.includes('SYSTEM_OK') ? 'hello' : 'OK'
+      await route.fulfill({ status: 200, contentType: 'application/json', body: CHAT_OK(10, 0, { content }) })
+    })
+
+    await goto(page, /模型探测/)
+    await page.getByRole('button', { name: '全不选' }).click()
+    await check(page, 'chat-basic')
+    await check(page, 'system-prompt')
+    await setupRun(page, 'e2e-system未遵循')
+
+    const tile = page.locator('main').getByRole('button', { name: /System 提示词/ })
+    await expect(tile).toContainText('失败', { timeout: 10000 })
+    await expect(tile).toContainText('未遵循')
+  })
+
+  test('多轮对话两跳：回传真实 assistant 后再问口令', async ({ page }) => {
+    const bodies: any[] = []
+    await page.route('**/v1/chat/completions', async route => {
+      const body = route.request().postDataJSON()
+      bodies.push(body)
+      await route.fulfill({ status: 200, contentType: 'application/json', body: smartChat(body) })
+    })
+
+    await goto(page, /模型探测/)
+    await page.getByRole('button', { name: '全不选' }).click()
+    await check(page, 'chat-basic')
+    await check(page, 'multi-turn')
+    await setupRun(page, 'e2e-多轮两跳')
+
+    const tile = page.locator('main').getByRole('button', { name: /多轮对话/ })
+    await expect(tile).toContainText('ORBIT', { timeout: 10000 })
+    const turns = bodies.filter(b => Array.isArray(b.messages) && b.messages.length >= 2)
+    expect(turns.length).toBeGreaterThanOrEqual(1)
+    const second = bodies.find(b => (b.messages || []).some((m: any) => m.role === 'assistant'))
+    expect(second.messages.some((m: any) => m.role === 'assistant' && m.content === 'Acknowledged.')).toBeTruthy()
+    expect(JSON.stringify(second.messages)).toContain('only the codeword')
+  })
+
+  test('图片输入默认不勾选；全选后勾上；识别红色通过', async ({ page }) => {
+    const chatBodies: any[] = []
+    await page.route('**/v1/chat/completions', async route => {
+      const body = route.request().postDataJSON()
+      chatBodies.push(body)
+      await route.fulfill({ status: 200, contentType: 'application/json', body: smartChat(body) })
+    })
+
+    await goto(page, /模型探测/)
+    await expect(page.locator('input[data-id="image-input"]')).not.toBeChecked()
+    await page.getByRole('button', { name: '全选' }).click()
+    await expect(page.locator('input[data-id="image-input"]')).toBeChecked()
+    await page.getByRole('button', { name: '全不选' }).click()
+    await check(page, 'chat-basic')
+    await check(page, 'image-input')
+    await setupRun(page, 'e2e-图片输入')
+
+    const tile = page.locator('main').getByRole('button', { name: /图片输入/ })
+    await expect(tile).toContainText('识别为主色红', { timeout: 10000 })
+    const img = chatBodies.find(b => hasImage(b))
+    expect(img).toBeTruthy()
+    expect(JSON.stringify(img)).toContain('image_url')
+    expect(JSON.stringify(img)).toContain('data:image/png;base64,')
+  })
+
+  test('图片输入 4xx 且错误含 vision 记不支持', async ({ page }) => {
+    await page.route('**/v1/chat/completions', async route => {
+      const body = route.request().postDataJSON()
+      if (hasImage(body)) {
+        await route.fulfill({
+          status: 400, contentType: 'application/json',
+          body: JSON.stringify({ error: { message: 'this model does not support vision / image_url' } }),
+        })
+        return
+      }
+      await route.fulfill({ status: 200, contentType: 'application/json', body: CHAT_OK(10) })
+    })
+
+    await goto(page, /模型探测/)
+    await page.getByRole('button', { name: '全不选' }).click()
+    await check(page, 'chat-basic')
+    await check(page, 'image-input')
+    await setupRun(page, 'e2e-图片不支持')
+
+    const tile = page.locator('main').getByRole('button', { name: /图片输入/ })
+    await expect(tile).toContainText('不支持', { timeout: 10000 })
+  })
+
+  test('图片输入 4xx 仅 generic not supported 记失败', async ({ page }) => {
+    await page.route('**/v1/chat/completions', async route => {
+      const body = route.request().postDataJSON()
+      if (hasImage(body)) {
+        await route.fulfill({
+          status: 400, contentType: 'application/json',
+          body: JSON.stringify({ error: { message: 'this model is not supported on this endpoint' } }),
+        })
+        return
+      }
+      await route.fulfill({ status: 200, contentType: 'application/json', body: CHAT_OK(10) })
+    })
+
+    await goto(page, /模型探测/)
+    await page.getByRole('button', { name: '全不选' }).click()
+    await check(page, 'chat-basic')
+    await check(page, 'image-input')
+    await setupRun(page, 'e2e-图片泛化不支持')
+
+    const tile = page.locator('main').getByRole('button', { name: /图片输入/ })
+    await expect(tile).toContainText('失败', { timeout: 10000 })
+    await expect(tile).not.toContainText('不支持')
+  })
+
+  test('图片输入 already 不含 red 单词则失败', async ({ page }) => {
+    await page.route('**/v1/chat/completions', async route => {
+      const body = route.request().postDataJSON()
+      if (hasImage(body)) {
+        await route.fulfill({
+          status: 200, contentType: 'application/json',
+          body: CHAT_OK(10, 0, { content: 'already processed, cannot determine' }),
+        })
+        return
+      }
+      await route.fulfill({ status: 200, contentType: 'application/json', body: CHAT_OK(10) })
+    })
+
+    await goto(page, /模型探测/)
+    await page.getByRole('button', { name: '全不选' }).click()
+    await check(page, 'chat-basic')
+    await check(page, 'image-input')
+    await setupRun(page, 'e2e-图片already误判')
+
+    const tile = page.locator('main').getByRole('button', { name: /图片输入/ })
+    await expect(tile).toContainText('失败', { timeout: 10000 })
+    await expect(tile).toContainText('未识别出红色')
+  })
+
+  test('语义请求 4xx 且 error.type=invalid_request_error 记失败', async ({ page }) => {
+    await page.route('**/v1/chat/completions', async route => {
+      const body = route.request().postDataJSON()
+      if (capOf(body) === 16 && extractPrompt(body).includes('Count from 1 to 200')) {
+        await route.fulfill({
+          status: 400, contentType: 'application/json',
+          body: JSON.stringify({ error: { type: 'invalid_request_error', message: 'context length exceeded' } }),
+        })
+        return
+      }
+      await route.fulfill({ status: 200, contentType: 'application/json', body: CHAT_OK(12) })
+    })
+
+    await goto(page, /模型探测/)
+    await page.getByRole('button', { name: '全不选' }).click()
+    await check(page, 'chat-basic')
+    await check(page, 'max_tokens')
+    await setupRun(page, 'e2e-语义invalid信封')
+
+    const tile = page.locator('main').getByRole('button', { name: /Token 上限参数/ })
+    await expect(tile).toContainText('失败', { timeout: 10000 })
+    await expect(tile).not.toContainText('不支持')
+  })
+
+  test('结构化输出语义：非法 JSON 判失败', async ({ page }) => {
+    await page.route('**/v1/chat/completions', async route => {
+      const body = route.request().postDataJSON()
+      const cap = capOf(body)
+      if (body?.response_format && cap === 256) {
+        await route.fulfill({ status: 200, contentType: 'application/json', body: CHAT_OK(12, 0, { content: 'not-json' }) })
+        return
+      }
+      await route.fulfill({ status: 200, contentType: 'application/json', body: CHAT_OK(12) })
+    })
+
+    await goto(page, /模型探测/)
+    await page.getByRole('button', { name: '全不选' }).click()
+    await check(page, 'chat-basic')
+    await check(page, 'structured_output')
+    await setupRun(page, 'e2e-schema非法JSON')
+
+    const tile = page.locator('main').getByRole('button', { name: /结构化输出/ })
+    await expect(tile).toContainText('失败', { timeout: 10000 })
+    await expect(tile).toContainText('不是可解析的 JSON')
+  })
+
+  test('System 遵循 SYSTEM_OK 则通过', async ({ page }) => {
+    await page.route('**/v1/chat/completions', async route => {
+      const body = route.request().postDataJSON()
+      await route.fulfill({ status: 200, contentType: 'application/json', body: smartChat(body) })
+    })
+
+    await goto(page, /模型探测/)
+    await page.getByRole('button', { name: '全不选' }).click()
+    await check(page, 'chat-basic')
+    await check(page, 'system-prompt')
+    await setupRun(page, 'e2e-system遵循')
+
+    const tile = page.locator('main').getByRole('button', { name: /System 提示词/ })
+    await expect(tile).toContainText('通过', { timeout: 10000 })
+    await expect(tile).toContainText('SYSTEM_OK')
+  })
+
+  test('Token 上限：max_tokens 被拒后仍测 max_completion_tokens', async ({ page }) => {
+    const bodies: any[] = []
+    await page.route('**/v1/chat/completions', async route => {
+      const body = route.request().postDataJSON()
+      bodies.push(body)
+      if (body?.max_tokens != null && body?.max_completion_tokens != null) {
+        await route.fulfill({
+          status: 400, contentType: 'application/json',
+          body: JSON.stringify({ error: { message: 'unknown parameter: max_tokens' } }),
+        })
+        return
+      }
+      await route.fulfill({ status: 200, contentType: 'application/json', body: smartChat(body) })
+    })
+
+    await goto(page, /模型探测/)
+    await page.getByRole('button', { name: '全不选' }).click()
+    await check(page, 'chat-basic')
+    await check(page, 'max_tokens')
+    await setupRun(page, 'e2e-max_tokens被拒')
+
+    const tile = page.locator('main').getByRole('button', { name: /Token 上限参数/ })
+    await expect(tile).toContainText('通过', { timeout: 10000 })
+    await expect(tile).toContainText('max_completion_tokens')
+    await expect(tile).toContainText('已排除 max_tokens')
+    expect(bodies.some(b => b.max_tokens != null && b.max_completion_tokens != null)).toBeTruthy()
+    const retried = bodies.find(b => b.max_completion_tokens != null && b.max_tokens == null)
+    expect(retried).toBeTruthy()
+    const semantic = bodies.find(b => b.max_completion_tokens === 16)
+    expect(semantic.max_tokens).toBeUndefined()
+  })
+
+  test('Token 上限：max_completion_tokens 被拒后仍测 max_tokens', async ({ page }) => {
+    const bodies: any[] = []
+    await page.route('**/v1/chat/completions', async route => {
+      const body = route.request().postDataJSON()
+      bodies.push(body)
+      if (body?.max_completion_tokens != null) {
+        await route.fulfill({
+          status: 400, contentType: 'application/json',
+          body: JSON.stringify({ error: { message: 'unknown parameter: max_completion_tokens. use max_tokens' } }),
+        })
+        return
+      }
+      await route.fulfill({ status: 200, contentType: 'application/json', body: smartChat(body) })
+    })
+
+    await goto(page, /模型探测/)
+    await page.getByRole('button', { name: '全不选' }).click()
+    await check(page, 'chat-basic')
+    await check(page, 'max_tokens')
+    await setupRun(page, 'e2e-max_completion被拒')
+
+    const tile = page.locator('main').getByRole('button', { name: /Token 上限参数/ })
+    await expect(tile).toContainText('通过', { timeout: 10000 })
+    await expect(tile).toContainText('接受 max_tokens')
+    await expect(tile).toContainText('已排除 max_completion_tokens')
+    const retried = bodies.find(b => b.max_tokens != null && b.max_completion_tokens == null)
+    expect(retried).toBeTruthy()
+    const semantic = bodies.find(b => b.max_tokens === 16 && b.max_completion_tokens == null)
+    expect(semantic).toBeTruthy()
+  })
+
+  test('Token 上限：两个字段互斥时拆开再测', async ({ page }) => {
+    const bodies: any[] = []
+    await page.route('**/v1/chat/completions', async route => {
+      const body = route.request().postDataJSON()
+      bodies.push(body)
+      if (body?.max_tokens != null && body?.max_completion_tokens != null) {
+        await route.fulfill({
+          status: 400, contentType: 'application/json',
+          body: JSON.stringify({ error: { message: 'Cannot specify both max_tokens and max_completion_tokens' } }),
+        })
+        return
+      }
+      await route.fulfill({ status: 200, contentType: 'application/json', body: smartChat(body) })
+    })
+
+    await goto(page, /模型探测/)
+    await page.getByRole('button', { name: '全不选' }).click()
+    await check(page, 'chat-basic')
+    await check(page, 'max_tokens')
+    await setupRun(page, 'e2e-max字段互斥')
+
+    const tile = page.locator('main').getByRole('button', { name: /Token 上限参数/ })
+    await expect(tile).toContainText('通过', { timeout: 10000 })
+    await expect(tile).toContainText('max_completion_tokens')
+    await expect(tile).toContainText('max_tokens')
+    expect(bodies.filter(b => b.max_completion_tokens != null && b.max_tokens == null).length).toBeGreaterThan(0)
+    expect(bodies.filter(b => b.max_tokens != null && b.max_completion_tokens == null).length).toBeGreaterThan(0)
+  })
+
+  test('Token 上限语义：2xx 但 finish_reason=stop 判失败', async ({ page }) => {
+    await page.route('**/v1/chat/completions', async route => {
+      const body = route.request().postDataJSON()
+      if (capOf(body) === 16) {
+        await route.fulfill({ status: 200, contentType: 'application/json', body: CHAT_OK(12, 0, { content: '1 2 3', finishReason: 'stop' }) })
+        return
+      }
+      await route.fulfill({ status: 200, contentType: 'application/json', body: CHAT_OK(12) })
+    })
+
+    await goto(page, /模型探测/)
+    await page.getByRole('button', { name: '全不选' }).click()
+    await check(page, 'chat-basic')
+    await check(page, 'max_tokens')
+    await setupRun(page, 'e2e-截断未生效')
+
+    const tile = page.locator('main').getByRole('button', { name: /Token 上限参数/ })
+    await expect(tile).toContainText('失败', { timeout: 10000 })
+    await expect(tile).toContainText('不是截断')
+  })
+
+  test('工具调用语义：2xx 但没有 tool_calls 判失败', async ({ page }) => {
+    await page.route('**/v1/chat/completions', async route => {
+      await route.fulfill({ status: 200, contentType: 'application/json', body: CHAT_OK(12, 0, { content: '明天上海晴' }) })
+    })
+
+    await goto(page, /模型探测/)
+    await page.getByRole('button', { name: '全不选' }).click()
+    await check(page, 'chat-basic')
+    await check(page, 'tool_calling')
+    await setupRun(page, 'e2e-工具未真正调用')
+
+    const tile = page.locator('main').getByRole('button', { name: /工具调用/ })
+    await expect(tile).toContainText('失败', { timeout: 10000 })
+    await expect(tile).toContainText('没有工具调用')
+  })
+
+  test('图片输入：三协议原生图片字段', async ({ page }) => {
+    const chatBodies: any[] = []
+    const responsesBodies: any[] = []
+    const anthropicBodies: any[] = []
+    await page.route('**/v1/chat/completions', async route => {
+      const body = route.request().postDataJSON()
+      chatBodies.push(body)
+      await route.fulfill({ status: 200, contentType: 'application/json', body: smartChat(body) })
+    })
+    await page.route('**/v1/responses', async route => {
+      const body = route.request().postDataJSON()
+      responsesBodies.push(body)
+      await route.fulfill({ status: 200, contentType: 'application/json', body: smartResponses(body) })
+    })
+    await page.route('**/v1/messages', async route => {
+      const body = route.request().postDataJSON()
+      anthropicBodies.push(body)
+      await route.fulfill({ status: 200, contentType: 'application/json', body: smartAnthropic(body) })
+    })
+
+    await goto(page, /模型探测/)
+    await page.getByRole('button', { name: '全不选' }).click()
+    for (const id of ['chat-basic', 'responses-basic', 'anthropic-basic', 'image-input']) await check(page, id)
+    await setupRun(page, 'e2e-三协议图片')
+
+    const tiles = page.locator('main').getByRole('button', { name: /图片输入/ })
+    await expect(tiles).toHaveCount(3, { timeout: 10000 })
+    await expect(tiles.filter({ hasText: 'Chat Completions' })).toContainText('识别为主色红')
+    await expect(tiles.filter({ hasText: 'Responses' })).toContainText('识别为主色红')
+    await expect(tiles.filter({ hasText: 'Anthropic' })).toContainText('识别为主色红')
+
+    const chatImg = chatBodies.find(b => hasImage(b))
+    expect(chatImg.messages[0].content[1].type).toBe('image_url')
+    expect(chatImg.messages[0].content[1].image_url.url).toMatch(/^data:image\/png;base64,/)
+
+    const respImg = responsesBodies.find(b => hasImage(b))
+    const part = respImg.input[0].content.find((c: any) => c.type === 'input_image')
+    expect(typeof part.image_url).toBe('string')
+    expect(part.image_url).toMatch(/^data:image\/png;base64,/)
+
+    const anthImg = anthropicBodies.find(b => hasImage(b))
+    const block = anthImg.messages[0].content.find((c: any) => c.type === 'image')
+    expect(block.source.type).toBe('base64')
+    expect(block.source.media_type).toBe('image/png')
+    expect(typeof block.source.data).toBe('string')
+    expect(block.source.data).not.toMatch(/^data:/)
   })
 })

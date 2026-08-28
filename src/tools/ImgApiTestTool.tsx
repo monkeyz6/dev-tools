@@ -4,6 +4,12 @@ import { Btn, Label, Card, Badge, CustomInput, CustomSelect, SearchableSelect, C
 import { historyDbGetAll, historyDbPutOne, historyDbDeleteOne, historyDbDeleteMany, historyDbClear, historyDbMigrateFromLocalStorage } from '../shared/history-db'
 import { useDebouncedPersist } from '../shared/use-debounced-persist'
 import { uniqueCopyName } from '../shared/channel-copy'
+import { IMG_API_LABEL, imgFmtTime } from './img-report/types'
+import type { ImgApiType, ImgCheck, ImgRecImage, ImgRecord } from './img-report/types'
+import { imgClassify, imgVerdict } from './img-report/summary'
+import { imgGroupBatches, imgTrimByBatch } from './img-report/batches'
+import type { ImgBatch } from './img-report/batches'
+import ImgReportView from './img-report/ImgReportView'
 
 // ─── Tool: 图片接口测试 ─────────────────────────────────────────────────────────
 
@@ -14,7 +20,6 @@ const IMG_RATE_KEY = 'imgtest-rate'
 const IMG_HIST_KEY = 'imgtest-history'
 const IMG_UI_KEY = 'imgtest-ui'
 const IMG_HIDEPRICES_KEY = 'imgtest-hideprices'
-const IMG_HIST_MAX = 30
 const IMG_DEFAULT_RATE = 7
 const IMG_VALIDATION_VERSION = 2
 const IMG_RESOLUTION_TIER_MIN_SCALE = 0.88
@@ -122,8 +127,6 @@ function imgLoadHidePrices(): boolean {
   return false
 }
 
-type ImgApiType = 'openai' | 'grok' | 'gemini' | 'seedream' | 'volcanoArk'
-const IMG_API_LABEL: Record<ImgApiType, string> = { openai: 'OpenAI', grok: 'Grok', gemini: 'Gemini', seedream: 'Seedream', volcanoArk: 'ZeroFA /ark' }
 const IMG_PLACEHOLDER_MODEL: Record<ImgApiType, string> = {
   openai: 'gpt-image-2', grok: 'grok-imagine-image-quality', gemini: 'gemini-3-pro-image', seedream: 'doubao-seedream-5-0-pro', volcanoArk: 'doubao-seedream-5-0-pro',
 }
@@ -204,11 +207,6 @@ interface ImgPlan {
 
 function imgUid() { return Date.now().toString(36) + Math.random().toString(36).slice(2, 7) }
 function imgEsc(s: any) { return String(s ?? '') }
-function imgFmtTime(ts: number) {
-  const d = new Date(ts)
-  const p = (n: number) => String(n).padStart(2, '0')
-  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}`
-}
 function imgProbeImage(src: string): Promise<{ w: number; h: number }> {
   if (!src) return Promise.resolve({ w: 0, h: 0 })
   return new Promise(resolve => {
@@ -367,9 +365,11 @@ async function imgLoadHistory(): Promise<ImgRecord[]> {
   const list = await historyDbGetAll<ImgRecord>('imgtest')
   return list.map(imgMigrateHistoryRecord).sort((a, b) => b.time - a.time)
 }
-async function imgHistTrim(maxCount: number): Promise<void> {
+// 按批裁剪而不是按条：整批剔掉，不会出现历史里躺着半批记录
+async function imgHistTrim(): Promise<void> {
   const list = await imgLoadHistory()
-  const overflow = list.slice(maxCount)
+  const keep = new Set(imgTrimByBatch(list).map(r => r.id))
+  const overflow = list.filter(r => !keep.has(r.id))
   if (overflow.length) await historyDbDeleteMany('imgtest', overflow.map(r => r.id))
 }
 function imgLoadUi(): { apiType?: ImgApiType; model?: string; prompt?: string } {
@@ -641,35 +641,6 @@ function imgParseResponse(type: ImgApiType, text: string, headers: Record<string
   return out
 }
 
-interface ImgRecImage { dataUri: string | null; thumb: string | null; url: string | null; w: number; h: number; format: string }
-interface ImgCheck { name: string; target: string | number; actual: string | number; pass: boolean; info?: boolean }
-interface ImgRecord {
-  id: string
-  time: number
-  caseName: string
-  caseDesc: string
-  channelName: string
-  apiType: ImgApiType
-  model: string
-  prompt: string
-  targets: Record<string, any>
-  useRef: boolean
-  refThumbs: (string | null)[]
-  price: { usd: number; cny: number; tier: string; note: string; count: number } | null
-  status: number
-  respHeaders: Record<string, string>
-  reqId: string
-  sentPreview: string
-  ok: boolean
-  error: string | null
-  rawSnippet: string
-  responseBodyComplete?: boolean
-  images: ImgRecImage[]
-  returnedN: number
-  durationMs: number
-  checks: ImgCheck[]
-  validationVersion?: number
-}
 interface ImgCase {
   id: string
   name: string
@@ -683,6 +654,15 @@ interface ImgCase {
   editedPreview: string | null
   plan: ImgPlan | null
   result: ImgRecord | null
+}
+
+function imgBuildCases(t: ImgApiType): ImgCase[] {
+  return (IMG_TEST_SETS[t] || []).map((c, i) => ({
+    id: 'c' + i, name: c.name, desc: c.desc, params: JSON.parse(JSON.stringify(c.params)),
+    needRef: !!c.needRef, prompt: c.prompt || null,
+    selected: true, expanded: false, status: 'idle' as const,
+    editedPreview: null, plan: null, result: null,
+  }))
 }
 
 function imgBuildChecks(rec: ImgRecord): ImgCheck[] {
@@ -735,13 +715,6 @@ function imgMigrateHistoryRecord(record: ImgRecord): ImgRecord {
   }
   const migrated: ImgRecord = { ...record, targets, validationVersion: IMG_VALIDATION_VERSION }
   return { ...migrated, checks: imgBuildChecks(migrated) }
-}
-function imgVerdict(checks: ImgCheck[]): { level: 'ok' | 'fail' | 'warn'; text: string } {
-  const real = checks.filter(x => !x.info)
-  const fail = real.filter(x => !x.pass).length
-  if (!real.length) return { level: 'warn', text: '无校验项' }
-  if (!fail) return { level: 'ok', text: `通过 ${real.length}/${real.length}` }
-  return { level: 'fail', text: `${real.length - fail}/${real.length} 通过` }
 }
 function imgMakeSentPreview(plan: ImgPlan): string {
   const truncate = (o: any): any => {
@@ -814,13 +787,29 @@ async function imgExportAsHtml(rootEl: HTMLElement, filename: string) {
       for (const sheet of Array.from(document.styleSheets)) {
         try { for (const rule of Array.from(sheet.cssRules)) appCss += rule.cssText + '\n' } catch { /* 跨域样式表跳过 */ }
       }
+      // 覆盖样式必须排在 appCss 之后：应用样式里的 body{overflow:hidden;height:100%}
+      // 会让离线报告整页无法滚动
       const overrideCss = `
 html,body{height:auto!important;min-height:0!important;overflow:auto!important;margin:0!important}
-body{padding:24px;background:var(--bg);color:var(--text);font-family:Inter,system-ui,sans-serif}
+html{-webkit-font-smoothing:antialiased;-moz-osx-font-smoothing:grayscale;text-size-adjust:100%}
+body{
+  padding:clamp(28px,6vw,72px) clamp(20px,5vw,56px) clamp(48px,8vw,96px);
+  background:var(--bg);
+  color:var(--text);
+  font:15px/1.55 -apple-system,BlinkMacSystemFont,"SF Pro Text","Inter","PingFang SC","Hiragino Sans GB",system-ui,sans-serif;
+}
+[data-img-export-root]{width:100%!important;max-width:1120px;margin:0 auto;padding:0!important;border-radius:0!important}
+[data-img-export-root] *{backdrop-filter:none!important;-webkit-backdrop-filter:none!important;box-shadow:none!important;animation:none!important;transition:none!important}
+[data-img-export-root] img{max-width:100%;height:auto}
 .overflow-hidden{overflow:visible!important}
 [data-export-scroll]{max-height:none!important;overflow:visible!important}
+@media print{
+  body{padding:0;background:#fff}
+  [data-img-export-root]{max-width:none}
+  [data-img-export-root]>*{break-inside:avoid}
+}
 `
-      const htmlContent = `<!doctype html><html><head><meta charset="utf-8"><title>图片接口测试报告</title><style>${varsCss}\n${appCss}\n${overrideCss}</style></head><body>${clone.outerHTML}</body></html>`
+      const htmlContent = `<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>图片接口测试报告</title><style>${varsCss}\n${appCss}\n${overrideCss}</style></head><body>${clone.outerHTML}</body></html>`
       imgDownloadText(filename, htmlContent, 'text/html;charset=utf-8')
     })
   } catch (e) {
@@ -833,10 +822,6 @@ function imgExportFilename(apiType: ImgApiType, ext: 'png' | 'html'): string {
   const pad = (n: number) => String(n).padStart(2, '0')
   const stamp = `${t.getFullYear()}${pad(t.getMonth() + 1)}${pad(t.getDate())}${pad(t.getHours())}${pad(t.getMinutes())}${pad(t.getSeconds())}`
   return `imgtest-report-${apiType}-${stamp}.${ext}`
-}
-
-function imgClassify(r: ImgRecord): 'pass' | 'fail' | 'error' {
-  return !r.ok ? 'error' : (imgVerdict(r.checks || []).level === 'ok' ? 'pass' : 'fail')
 }
 
 // ─── Panes：按区域拆分的 memo 子组件 ─────────────────────────────────────────
@@ -986,17 +971,78 @@ const ImgPricesPane = React.memo(function ImgPricesPane({
   )
 })
 
+function ImgBatchRecordTable({ records, hidePrices, onDetail, onDeleteOne }: {
+  records: ImgRecord[]; hidePrices: boolean
+  onDetail: (r: ImgRecord) => void; onDeleteOne: (id: string) => void
+}) {
+  return (
+    <table className="w-full text-xs">
+      <thead>
+        <tr className="text-left" style={{ color: 'var(--t3)' }}>
+          <th className="px-3 py-2 font-semibold">图</th>
+          <th className="px-3 py-2 font-semibold">时间</th>
+          <th className="px-3 py-2 font-semibold">渠道</th>
+          <th className="px-3 py-2 font-semibold">接口</th>
+          <th className="px-3 py-2 font-semibold">模型</th>
+          <th className="px-3 py-2 font-semibold">用例</th>
+          <th className="px-3 py-2 font-semibold">目标</th>
+          <th className="px-3 py-2 font-semibold">实际</th>
+          <th className="px-3 py-2 font-semibold">结果</th>
+          <th className="px-3 py-2 font-semibold">耗时</th>
+          <th className="px-3 py-2 font-semibold">价格</th>
+          <th className="px-3 py-2 font-semibold">操作</th>
+        </tr>
+      </thead>
+      <tbody>
+        {records.map(r => {
+          const cls = imgClassify(r)
+          const badge = cls === 'pass' ? <Badge color="ok">✓ {imgVerdict(r.checks || []).text}</Badge> : cls === 'fail' ? <Badge color="err">✕ {imgVerdict(r.checks || []).text}</Badge> : <Badge color="warn">! 失败</Badge>
+          const t = r.targets || {}
+          const tierLabel = t.resolutionTierBaseReq ? `${t.resolutionTierLabelReq || imgResolutionTierLabel(null, t.resolutionTierBaseReq)} 档` : ''
+          const tgt = (t.wReq ? `${t.wReq}×${t.hReq}` : (tierLabel || t.sizeReq || '—')) + (t.ratioReq ? ' ' + t.ratioReq : '') + (t.nReq > 1 ? ' ×' + t.nReq : '')
+          const act = r.ok && r.images && r.images[0] ? `${r.images[0].w}×${r.images[0].h}${r.returnedN > 1 ? ' ×' + r.returnedN : ''}` : '—'
+          const thumb = r.images?.[0]?.thumb || r.images?.[0]?.url || ''
+          return (
+            <tr key={r.id} style={{ borderTop: '1px solid var(--border)' }} className="transition-colors duration-100 row-hover">
+              <td className="px-3 py-2">
+                {thumb ? <img src={thumb} className="w-10 h-10 rounded-lg object-cover" style={{ border: '1px solid var(--border)' }} /> : <span style={{ color: 'var(--t3)' }}>—</span>}
+              </td>
+              <td className="px-3 py-2 whitespace-nowrap">{imgFmtTime(r.time)}</td>
+              <td className="px-3 py-2 max-w-[160px] truncate" title={r.channelName}>{r.channelName}</td>
+              <td className="px-3 py-2">{IMG_API_LABEL[r.apiType] || r.apiType}{r.useRef ? ' 🖼️' : ''}</td>
+              <td className="px-3 py-2 font-mono max-w-[180px] truncate" title={r.model}>{r.model}</td>
+              <td className="px-3 py-2 max-w-[160px] truncate" title={r.caseName}>{r.caseName}</td>
+              <td className="px-3 py-2 font-mono">{imgEsc(tgt)}</td>
+              <td className="px-3 py-2 font-mono">{imgEsc(act)}</td>
+              <td className="px-3 py-2">{badge}</td>
+              <td className="px-3 py-2">{r.durationMs}ms</td>
+              <td className="px-3 py-2 font-mono whitespace-nowrap" style={{ color: 'var(--warn)' }}>
+                {hidePrices || !r.price ? '—' : `$${(r.price.usd * (r.price.count || 1)).toFixed(3)}\n¥${(r.price.cny * (r.price.count || 1)).toFixed(3)}`}
+              </td>
+              <td className="px-3 py-2 whitespace-nowrap">
+                <Btn small variant="soft" onClick={() => onDetail(r)}>详情</Btn>
+                <span className="inline-block w-1" />
+                <Btn small variant="danger" onClick={() => onDeleteOne(r.id)}>删</Btn>
+              </td>
+            </tr>
+          )
+        })}
+      </tbody>
+    </table>
+  )
+}
+
 const ImgHistoryPane = React.memo(function ImgHistoryPane({
-  history, channels, hidePrices, exportBusy, selHistIds,
+  history, channels, hidePrices, exportBusy,
   fChannel, fApiType, fModel, fResult, onFChannel, onFApiType, onFModel, onFResult,
-  onStartExport, onToggleSel, onSetSelIds, onClearAll, onDetail, onDeleteOne,
+  onStartExport, onClearAll, onDetail, onDeleteOne, onRestore, onDeleteBatch,
 }: {
-  history: ImgRecord[]; channels: ImgChannel[]; hidePrices: boolean; exportBusy: boolean; selHistIds: Set<string>
+  history: ImgRecord[]; channels: ImgChannel[]; hidePrices: boolean; exportBusy: boolean
   fChannel: string; fApiType: string; fModel: string; fResult: string
   onFChannel: (v: string) => void; onFApiType: (v: string) => void; onFModel: (v: string) => void; onFResult: (v: string) => void
   onStartExport: (records: ImgRecord[], format: 'png' | 'html') => void
-  onToggleSel: (id: string, v: boolean) => void; onSetSelIds: (ids: Set<string>) => void
   onClearAll: () => void; onDetail: (r: ImgRecord) => void; onDeleteOne: (id: string) => void
+  onRestore: (batch: ImgBatch) => void; onDeleteBatch: (batch: ImgBatch) => void
 }) {
   const histModels = useMemo(() => [...new Set(history.map(r => r.model))], [history])
   const filteredHistory = useMemo(() => history.filter(r =>
@@ -1004,16 +1050,24 @@ const ImgHistoryPane = React.memo(function ImgHistoryPane({
     (!fApiType || r.apiType === fApiType) &&
     (!fModel || r.model === fModel) &&
     (!fResult || imgClassify(r) === fResult)), [history, fChannel, fApiType, fModel, fResult])
+  // 筛选器先过滤记录，再对过滤结果重新分组，这样筛完看到的批次统计与列表一致
+  const batches = useMemo(() => imgGroupBatches(filteredHistory), [filteredHistory])
+
+  // 默认展开最新一批；这个 Set 存的是「与默认相反」的批次，新跑出来的批次仍会自动展开
+  const [flipped, setFlipped] = useState<Set<string>>(new Set())
+  const newestId = batches[0]?.id ?? ''
+  const isOpen = (id: string) => (id === newestId) !== flipped.has(id)
+  const toggleBatch = (id: string) => setFlipped(prev => {
+    const next = new Set(prev)
+    if (next.has(id)) next.delete(id); else next.add(id)
+    return next
+  })
 
   return (
     <Card>
       <div className="flex items-center justify-between flex-wrap gap-2 mb-3">
         <p className="text-sm font-bold" style={{ color: 'var(--text)' }}>历史测试记录 <span className="inline-flex items-center justify-center rounded-full px-2 py-0.5 text-xs font-bold ml-1" style={{ background: 'var(--accentSub)', color: 'var(--accent)' }}>{history.length}</span></p>
         <div className="flex items-center gap-2">
-          <Btn small variant="soft" disabled={exportBusy || selHistIds.size === 0}
-            onClick={() => onStartExport(filteredHistory.filter(r => selHistIds.has(r.id)), 'png')}>导出 PNG</Btn>
-          <Btn small variant="soft" disabled={exportBusy || selHistIds.size === 0}
-            onClick={() => onStartExport(filteredHistory.filter(r => selHistIds.has(r.id)), 'html')}>导出 HTML</Btn>
           <Btn small variant="danger" onClick={onClearAll}>清空全部</Btn>
         </div>
       </div>
@@ -1023,72 +1077,39 @@ const ImgHistoryPane = React.memo(function ImgHistoryPane({
         <div className="w-48"><CustomSelect value={fModel} onChange={onFModel} options={[{ value: '', label: '全部模型' }, ...histModels.map(m => ({ value: m, label: m }))]} /></div>
         <div className="w-36"><CustomSelect value={fResult} onChange={onFResult} options={[{ value: '', label: '全部结果' }, { value: 'pass', label: '✓ 通过' }, { value: 'fail', label: '✕ 未通过' }, { value: 'error', label: '! 请求失败' }]} /></div>
       </div>
-      <div className="overflow-auto" style={{ maxHeight: 'calc(100vh - 260px)' }}>
-        <table className="w-full text-xs">
-          <thead>
-            <tr className="text-left sticky top-0" style={{ background: 'var(--s1)', color: 'var(--t3)' }}>
-              <th className="px-3 py-2 font-semibold">
-                <input type="checkbox" className="w-4 h-4 cursor-pointer" style={{ accentColor: 'var(--accent)' }}
-                  checked={filteredHistory.length > 0 && filteredHistory.every(r => selHistIds.has(r.id))}
-                  onChange={e => onSetSelIds(e.target.checked ? new Set(filteredHistory.map(r => r.id)) : new Set())} />
-              </th>
-              <th className="px-3 py-2 font-semibold">图</th>
-              <th className="px-3 py-2 font-semibold">时间</th>
-              <th className="px-3 py-2 font-semibold">渠道</th>
-              <th className="px-3 py-2 font-semibold">接口</th>
-              <th className="px-3 py-2 font-semibold">模型</th>
-              <th className="px-3 py-2 font-semibold">用例</th>
-              <th className="px-3 py-2 font-semibold">目标</th>
-              <th className="px-3 py-2 font-semibold">实际</th>
-              <th className="px-3 py-2 font-semibold">结果</th>
-              <th className="px-3 py-2 font-semibold">耗时</th>
-              <th className="px-3 py-2 font-semibold">价格</th>
-              <th className="px-3 py-2 font-semibold">操作</th>
-            </tr>
-          </thead>
-          <tbody>
-            {filteredHistory.length === 0 && (
-              <tr><td colSpan={13} className="px-3 py-8 text-center" style={{ color: 'var(--t3)' }}>暂无记录</td></tr>
-            )}
-            {filteredHistory.map(r => {
-              const cls = imgClassify(r)
-              const badge = cls === 'pass' ? <Badge color="ok">✓ {imgVerdict(r.checks || []).text}</Badge> : cls === 'fail' ? <Badge color="err">✕ {imgVerdict(r.checks || []).text}</Badge> : <Badge color="warn">! 失败</Badge>
-              const t = r.targets || {}
-              const tierLabel = t.resolutionTierBaseReq ? `${t.resolutionTierLabelReq || imgResolutionTierLabel(null, t.resolutionTierBaseReq)} 档` : ''
-              const tgt = (t.wReq ? `${t.wReq}×${t.hReq}` : (tierLabel || t.sizeReq || '—')) + (t.ratioReq ? ' ' + t.ratioReq : '') + (t.nReq > 1 ? ' ×' + t.nReq : '')
-              const act = r.ok && r.images && r.images[0] ? `${r.images[0].w}×${r.images[0].h}${r.returnedN > 1 ? ' ×' + r.returnedN : ''}` : '—'
-              const thumb = r.images?.[0]?.thumb || r.images?.[0]?.url || ''
-              return (
-                <tr key={r.id} style={{ borderTop: '1px solid var(--border)' }} className="transition-colors duration-100 row-hover">
-                  <td className="px-3 py-2">
-                    <input type="checkbox" className="w-4 h-4 cursor-pointer" style={{ accentColor: 'var(--accent)' }}
-                      checked={selHistIds.has(r.id)} onChange={e => onToggleSel(r.id, e.target.checked)} />
-                  </td>
-                  <td className="px-3 py-2">
-                    {thumb ? <img src={thumb} className="w-10 h-10 rounded-lg object-cover" style={{ border: '1px solid var(--border)' }} /> : <span style={{ color: 'var(--t3)' }}>—</span>}
-                  </td>
-                  <td className="px-3 py-2 whitespace-nowrap">{imgFmtTime(r.time)}</td>
-                  <td className="px-3 py-2 max-w-[160px] truncate" title={r.channelName}>{r.channelName}</td>
-                  <td className="px-3 py-2">{IMG_API_LABEL[r.apiType] || r.apiType}{r.useRef ? ' 🖼️' : ''}</td>
-                  <td className="px-3 py-2 font-mono max-w-[180px] truncate" title={r.model}>{r.model}</td>
-                  <td className="px-3 py-2 max-w-[160px] truncate" title={r.caseName}>{r.caseName}</td>
-                  <td className="px-3 py-2 font-mono">{imgEsc(tgt)}</td>
-                  <td className="px-3 py-2 font-mono">{imgEsc(act)}</td>
-                  <td className="px-3 py-2">{badge}</td>
-                  <td className="px-3 py-2">{r.durationMs}ms</td>
-                  <td className="px-3 py-2 font-mono whitespace-nowrap" style={{ color: 'var(--warn)' }}>
-                    {hidePrices || !r.price ? '—' : `$${(r.price.usd * (r.price.count || 1)).toFixed(3)}\n¥${(r.price.cny * (r.price.count || 1)).toFixed(3)}`}
-                  </td>
-                  <td className="px-3 py-2 whitespace-nowrap">
-                    <Btn small variant="soft" onClick={() => onDetail(r)}>详情</Btn>
-                    <span className="inline-block w-1" />
-                    <Btn small variant="danger" onClick={() => onDeleteOne(r.id)}>删</Btn>
-                  </td>
-                </tr>
-              )
-            })}
-          </tbody>
-        </table>
+      <div className="overflow-auto flex flex-col gap-2" style={{ maxHeight: 'calc(100vh - 260px)' }}>
+        {batches.length === 0 && (
+          <p className="px-3 py-8 text-center text-xs" style={{ color: 'var(--t3)' }}>暂无记录</p>
+        )}
+        {batches.map(b => {
+          const open = isOpen(b.id)
+          return (
+            <div key={b.id} data-testid="imgtest-batch" className="rounded-xl overflow-hidden" style={{ border: '1px solid var(--border)' }}>
+              <div className="flex items-center gap-3 flex-wrap px-3 py-2.5 cursor-pointer transition-colors duration-100 row-hover"
+                style={{ background: 'var(--s1)' }} onClick={() => toggleBatch(b.id)}>
+                <span className="text-xs w-3 inline-block" style={{ color: 'var(--t3)' }}>{open ? '▾' : '▸'}</span>
+                <span className="text-xs font-semibold whitespace-nowrap" style={{ color: 'var(--text)' }}>{imgFmtTime(b.startAt)}</span>
+                <span className="text-xs max-w-[160px] truncate" style={{ color: 'var(--t2)' }} title={b.channelName}>{b.channelName || '—'}</span>
+                <span className="text-xs" style={{ color: 'var(--t2)' }}>{IMG_API_LABEL[b.apiType] || b.apiType}</span>
+                <span className="text-xs font-mono max-w-[220px] truncate" style={{ color: 'var(--t2)' }} title={b.models.join(' / ')}>{b.models.join(' / ') || '—'}</span>
+                <span className="text-xs" style={{ color: 'var(--t3)' }}>{b.records.length} 个用例</span>
+                <Badge color={b.passed === b.records.length ? 'ok' : b.passed === 0 ? 'err' : 'warn'}>通过 {b.passed}/{b.records.length}</Badge>
+                {b.legacy && <Badge>旧记录</Badge>}
+                <div className="ml-auto flex items-center gap-1.5" onClick={e => e.stopPropagation()}>
+                  <Btn small variant="primary" onClick={() => onRestore(b)}>↺ 还原到工作台</Btn>
+                  <Btn small variant="soft" disabled={exportBusy} onClick={() => onStartExport(b.records, 'png')}>导出 PNG</Btn>
+                  <Btn small variant="soft" disabled={exportBusy} onClick={() => onStartExport(b.records, 'html')}>导出 HTML</Btn>
+                  <Btn small variant="danger" onClick={() => onDeleteBatch(b)}>删除本批</Btn>
+                </div>
+              </div>
+              {open && (
+                <div style={{ borderTop: '1px solid var(--border)' }}>
+                  <ImgBatchRecordTable records={b.records} hidePrices={hidePrices} onDetail={onDetail} onDeleteOne={onDeleteOne} />
+                </div>
+              )}
+            </div>
+          )
+        })}
       </div>
     </Card>
   )
@@ -1115,13 +1136,7 @@ function ImgApiTestTool() {
   const [editingChId, setEditingChId] = useState<string | null>(null)
   const [priceForm, setPriceForm] = useState({ model: '', tier: '', usd: '', note: '' })
 
-  const [cases, setCases] = useState<ImgCase[]>(() =>
-    (IMG_TEST_SETS[ui0.apiType ?? 'openai'] || []).map((c, i) => ({
-      id: 'c' + i, name: c.name, desc: c.desc, params: JSON.parse(JSON.stringify(c.params)),
-      needRef: !!c.needRef, prompt: c.prompt || null,
-      selected: true, expanded: false, status: 'idle' as const,
-      editedPreview: null, plan: null, result: null,
-    })))
+  const [cases, setCases] = useState<ImgCase[]>(() => imgBuildCases(ui0.apiType ?? 'openai'))
   const [selAll, setSelAll] = useState(true)
   const [running, setRunning] = useState(false)
   const [toast, setToast] = useState('')
@@ -1130,7 +1145,7 @@ function ImgApiTestTool() {
   const [fApiType, setFApiType] = useState('')
   const [fModel, setFModel] = useState('')
   const [fResult, setFResult] = useState('')
-  const [selHistIds, setSelHistIds] = useState<Set<string>>(new Set())
+  const [restoredFrom, setRestoredFrom] = useState<{ time: number; count: number } | null>(null)
   const [exportJob, setExportJob] = useState<{ records: ImgRecord[]; format: 'png' | 'html' } | null>(null)
   const [exportBusy, setExportBusy] = useState(false)
   const reportRootRef = useRef<HTMLDivElement>(null)
@@ -1141,11 +1156,16 @@ function ImgApiTestTool() {
   const refImagesRef = useRef(refImages)
   const channelsRef = useRef(channels)
   const casesRef = useRef(cases)
+  const historyRef = useRef(history)
   const rateRef = useRef(parseFloat(rateStr) || IMG_DEFAULT_RATE)
+  // 当前批次：一次「全部运行 / 运行选中」开一批，之后单条补跑沿用它
+  const currentRunIdRef = useRef<string | null>(null)
+  const setCurrentRunId = (v: string | null) => { currentRunIdRef.current = v }
 
   useEffect(() => { refImagesRef.current = refImages }, [refImages])
   useEffect(() => { channelsRef.current = channels }, [channels])
   useEffect(() => { casesRef.current = cases }, [cases])
+  useEffect(() => { historyRef.current = history }, [history])
   useEffect(() => { rateRef.current = parseFloat(rateStr) || IMG_DEFAULT_RATE }, [rateStr])
 
   useEffect(() => { try { kvSet(IMG_CH_KEY, JSON.stringify(channels)) } catch { /* ignore */ } }, [channels])
@@ -1200,13 +1220,11 @@ function ImgApiTestTool() {
 
   const switchApiType = (t: ImgApiType) => {
     setApiType(t)
-    setCases((IMG_TEST_SETS[t] || []).map((c, i) => ({
-      id: 'c' + i, name: c.name, desc: c.desc, params: JSON.parse(JSON.stringify(c.params)),
-      needRef: !!c.needRef, prompt: c.prompt || null,
-      selected: true, expanded: false, status: 'idle' as const,
-      editedPreview: null, plan: null, result: null,
-    })))
+    setCases(imgBuildCases(t))
     setSelAll(true)
+    // 用例集整套换掉，之前那一批到此为止，下次运行开新批
+    setCurrentRunId(null)
+    setRestoredFrom(null)
   }
 
   const planOf = (c: ImgCase): ImgPlan => c.plan ?? imgBuildPlan(apiType, model.trim() || IMG_PLACEHOLDER_MODEL[apiType], c.prompt ?? prompt, c.params, c.needRef ? refImages.length : 0)
@@ -1331,7 +1349,7 @@ function ImgApiTestTool() {
   }
 
   const emptyRecord = (c: ImgCase, chName: string, m: string, err: string): ImgRecord => ({
-    id: imgUid(), time: Date.now(), caseName: c.name, caseDesc: c.desc,
+    id: imgUid(), runId: currentRunIdRef.current ?? undefined, time: Date.now(), caseName: c.name, caseDesc: c.desc,
     channelName: chName, apiType, model: m, prompt: c.prompt ?? prompt,
     targets: {}, useRef: c.needRef, refThumbs: [], price: null,
     status: 0, respHeaders: {}, reqId: '', sentPreview: '',
@@ -1347,6 +1365,9 @@ function ImgApiTestTool() {
     if (c.needRef && refImagesRef.current.length === 0) { toastShow('该用例需要参考图'); return }
     const apiKey = await imgDecryptApiKey(ch.apiKeyEnc)
     if (!apiKey) { toastShow('渠道 API Key 无效，请重新编辑保存'); return }
+
+    if (!currentRunIdRef.current) currentRunIdRef.current = imgUid()
+    const runId = currentRunIdRef.current
 
     c.status = 'running'
     c.expanded = true
@@ -1372,7 +1393,7 @@ function ImgApiTestTool() {
 
     const t0 = performance.now()
     const rec: ImgRecord = {
-      id: imgUid(), time: Date.now(), caseName: c.name, caseDesc: c.desc,
+      id: imgUid(), runId, time: Date.now(), caseName: c.name, caseDesc: c.desc,
       channelName: ch.name, apiType, model: m, prompt: usePrompt,
       targets, useRef: c.needRef,
       price: priceHit ? { ...priceHit, cny: +(priceHit.usd * rateRef.current).toFixed(4), count: priceCount } : null,
@@ -1442,17 +1463,31 @@ function ImgApiTestTool() {
         responseBodyComplete: storedResponse.complete,
         images: rec.images.map(im => ({ ...im, dataUri: null })),
       }
-      setHistory(h => [histRec, ...h].slice(0, IMG_HIST_MAX))
+      // 同批同用例重复运行只留最新：内存与 IndexedDB 里的旧记录一起剔掉
+      const stale = historyRef.current.filter(r => r.runId === histRec.runId && r.caseName === histRec.caseName)
+      const staleIds = new Set(stale.map(r => r.id))
+      const next = imgTrimByBatch([histRec, ...historyRef.current.filter(r => !staleIds.has(r.id))])
+      historyRef.current = next
+      setHistory(next)
       historyDbPutOne('imgtest', histRec)
-        .then(() => imgHistTrim(IMG_HIST_MAX))
+        .then(() => staleIds.size ? historyDbDeleteMany('imgtest', [...staleIds]) : undefined)
+        .then(() => imgHistTrim())
         .catch(() => toastShow('历史记录写入失败'))
     } catch { /* 收尾失败不阻塞状态更新 */ }
     setCases([...casesRef.current])
   }
 
+  const resetRun = () => {
+    setCases(cs => cs.map(c => ({ ...c, status: 'idle' as const, result: null })))
+    setCurrentRunId(null)
+    setRestoredFrom(null)
+  }
+
   const runList = async (list: ImgCase[]) => {
     if (running) { toastShow('已有运行中'); return }
     setRunning(true)
+    setCurrentRunId(imgUid())
+    setRestoredFrom(null)
     stopRef.current = false
     try {
       for (const c of list) {
@@ -1623,7 +1658,7 @@ function ImgApiTestTool() {
     const nMult = parseInt(bodyOf(plan).n) || 1
     const statusColor = c.status === 'running' ? 'var(--accent)' : c.status === 'pass' ? 'var(--ok)' : c.status === 'fail' ? 'var(--err)' : c.status === 'error' ? 'var(--warn)' : 'transparent'
     return (
-      <div key={c.id} className="rounded-2xl overflow-hidden transition-all duration-150"
+      <div key={c.id} data-case-name={c.name} className="rounded-2xl overflow-hidden transition-all duration-150"
         style={{ border: '1px solid var(--border)', borderLeft: `3px solid ${statusColor}`, background: 'var(--bg)', marginBottom: 10, boxShadow: c.status === 'running' ? '0 0 0 3px var(--accentSub)' : 'none' }}>
         <div className="flex items-center gap-3 px-4 py-3 cursor-pointer select-none hover:opacity-90" onClick={() => toggleExpand(c)}>
           <input type="checkbox" className="w-4 h-4 cursor-pointer flex-shrink-0" style={{ accentColor: 'var(--accent)' }} checked={c.selected}
@@ -1677,12 +1712,9 @@ function ImgApiTestTool() {
     setExportJob({ records, format })
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [exportBusy])
-  const toggleHistSel = useCallback((id: string, v: boolean) => {
-    setSelHistIds(prev => { const next = new Set(prev); if (v) next.add(id); else next.delete(id); return next })
-  }, [])
   const clearAllHistory = useCallback(() => {
     if (window.confirm('清空所有历史记录？')) {
-      setHistory([]); setSelHistIds(new Set()); historyDbClear('imgtest').catch(() => {}); toastShow('已清空')
+      setHistory([]); historyDbClear('imgtest').catch(() => {}); toastShow('已清空')
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
@@ -1692,17 +1724,53 @@ function ImgApiTestTool() {
       historyDbDeleteOne('imgtest', id).catch(() => {})
     }
   }, [])
+  const deleteHistBatch = useCallback((batch: ImgBatch) => {
+    if (!window.confirm(`删除这一批 ${batch.records.length} 条记录？`)) return
+    const ids = new Set(batch.records.map(r => r.id))
+    setHistory(h => h.filter(x => !ids.has(x.id)))
+    historyDbDeleteMany('imgtest', [...ids]).catch(() => {})
+  }, [])
 
-  const renderExportRecHeader = (r: ImgRecord) => (
-    <div className="flex flex-wrap gap-x-5 gap-y-1 text-xs mb-3" style={{ color: 'var(--t2)' }}>
-      <span>用例 <b style={{ color: 'var(--text)' }}>{imgEsc(r.caseName || '')}</b></span>
-      <span>模型 <b style={{ color: 'var(--text)' }}>{imgEsc(r.model)}</b></span>
-      {/* 只用渠道名标识来源，绝不展示 apiKey/baseUrl */}
-      <span>渠道 <b style={{ color: 'var(--text)' }}>{imgEsc(r.channelName)}</b></span>
-      <span>接口 <b style={{ color: 'var(--text)' }}>{IMG_API_LABEL[r.apiType] || r.apiType}</b></span>
-      <span>时间 <b style={{ color: 'var(--text)' }}>{imgFmtTime(r.time)}</b></span>
-    </div>
-  )
+  // 把某一批历史搬回「批量测试」页：连同接口类型 / 模型 / 提示词 / 渠道一起切过去，
+  // 之后就能照常用页面上的导出按钮出整批报告，或者补跑其中几条（会归入同一批）
+  const restoreBatch = useCallback((batch: ImgBatch) => {
+    if (casesRef.current.some(c => c.result) && !window.confirm('当前批量测试页已有结果，还原会覆盖，确定吗？')) return
+
+    const nextCases = imgBuildCases(batch.apiType)
+    const byName = new Map<string, ImgRecord>()
+    // 同名用例取这批里最新的那条
+    for (const r of [...batch.records].sort((a, b) => a.time - b.time)) byName.set(r.caseName, r)
+    let restored = 0
+    for (const c of nextCases) {
+      const r = byName.get(c.name)
+      if (!r) continue
+      c.result = r
+      c.status = imgClassify(r)
+      byName.delete(c.name)
+      restored++
+    }
+
+    setApiType(batch.apiType)
+    setCases(nextCases)
+    casesRef.current = nextCases
+    setSelAll(true)
+    if (batch.models[0]) setModel(batch.models[0])
+    // 参考图类用例自带 prompt，拿它当全局提示词会串味，只从「没带自己 prompt」的记录里取
+    const generic = batch.records.find(r => !nextCases.some(c => c.name === r.caseName && c.prompt))
+    if (generic?.prompt) setPrompt(generic.prompt)
+
+    const ch = channelsRef.current.find(x => x.name === batch.channelName)
+    if (ch) setActiveChId(ch.id)
+
+    setCurrentRunId(batch.id.startsWith('legacy:') ? null : batch.id)
+    setRestoredFrom({ time: batch.endAt, count: restored })
+    setPane('test')
+    const skipped = byName.size
+    toastShow(`已还原 ${imgFmtTime(batch.endAt).slice(11, 16)} 那一轮（${restored} 条）` +
+      (skipped ? ` · ${skipped} 条对不上当前用例集，已跳过` : '') +
+      (ch ? '' : ' · 未找到同名渠道，请手动选择'))
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [])
 
   const leftPanel = (
     <div className="w-[340px] flex-shrink-0 overflow-y-auto p-5 flex flex-col gap-4">
@@ -1773,6 +1841,13 @@ function ImgApiTestTool() {
           <span className="inline-flex items-center justify-center rounded-full px-2 py-0.5 text-xs font-bold" style={{ background: 'var(--accentSub)', color: 'var(--accent)' }}>{cases.length}</span>
           <span className="text-xs" style={{ color: 'var(--t3)' }}>· {IMG_API_LABEL[apiType]} 相关用例</span>
         </div>
+        {restoredFrom && (
+          <div className="flex items-center gap-2 flex-wrap rounded-xl px-3 py-2.5 mb-3 text-xs" data-testid="imgtest-restored-note"
+            style={{ background: 'var(--accentSub)', border: '1px solid var(--border)', color: 'var(--t2)' }}>
+            <span>当前是 <b style={{ color: 'var(--text)' }}>{imgFmtTime(restoredFrom.time)}</b> 那一轮的历史结果（{restoredFrom.count} 条）· 生成图为缩略图，参考图未保存</span>
+            <div className="ml-auto"><Btn small variant="ghost" onClick={resetRun}>清除</Btn></div>
+          </div>
+        )}
         <div className="flex items-center gap-2.5 flex-wrap rounded-xl px-3 py-2.5 mb-3" style={{ background: 'var(--s1)', border: '1px solid var(--border)' }}>
           <label className="flex items-center gap-1.5 text-xs cursor-pointer select-none" style={{ color: 'var(--t2)' }}>
             <input type="checkbox" className="w-4 h-4 cursor-pointer" style={{ accentColor: 'var(--accent)' }} checked={selAll} onChange={e => toggleSelAll(e.target.checked)} />
@@ -1785,10 +1860,7 @@ function ImgApiTestTool() {
             if (!next) { toastShow('没有更多待运行的选中用例'); return }
             await runCase(next)
           }}>→ 逐个：运行下一个</Btn>
-          <Btn small variant="ghost" disabled={running} onClick={() => {
-            const arr = cases.map(c => ({ ...c, status: 'idle' as const, result: null }))
-            setCases(arr)
-          }}>↺ 重置状态</Btn>
+          <Btn small variant="ghost" disabled={running} onClick={resetRun}>↺ 重置状态</Btn>
           <Btn small variant="danger" disabled={!running} onClick={() => { stopRef.current = true; toastShow('将在当前用例结束后停止') }}>■ 停止</Btn>
           <Btn small variant="soft" disabled={exportBusy || !cases.some(c => c.result)} onClick={() => startExport(cases.filter(c => c.result).map(c => c.result!), 'png')}>导出 PNG</Btn>
           <Btn small variant="soft" disabled={exportBusy || !cases.some(c => c.result)} onClick={() => startExport(cases.filter(c => c.result).map(c => c.result!), 'html')}>导出 HTML</Btn>
@@ -1846,11 +1918,12 @@ function ImgApiTestTool() {
           )}
           {pane === 'history' && (
             <ImgHistoryPane
-              history={history} channels={channels} hidePrices={hidePrices} exportBusy={exportBusy} selHistIds={selHistIds}
+              history={history} channels={channels} hidePrices={hidePrices} exportBusy={exportBusy}
               fChannel={fChannel} fApiType={fApiType} fModel={fModel} fResult={fResult}
               onFChannel={setFChannel} onFApiType={setFApiType} onFModel={setFModel} onFResult={setFResult}
-              onStartExport={startExport} onToggleSel={toggleHistSel} onSetSelIds={setSelHistIds}
+              onStartExport={startExport}
               onClearAll={clearAllHistory} onDetail={setDetailRec} onDeleteOne={deleteHistOne}
+              onRestore={restoreBatch} onDeleteBatch={deleteHistBatch}
             />
           )}
         </div>
@@ -1893,19 +1966,11 @@ function ImgApiTestTool() {
               {exportBusy ? '⏳ 正在生成导出文件…' : '导出预览'}
             </span>
           </div>
-          <div ref={reportRootRef} style={{ width: 900, maxWidth: '100%', background: 'var(--bg)', color: 'var(--text)', padding: 24, borderRadius: 16 }}>
-            <div style={{ marginBottom: 16 }}>
-              <p className="text-lg font-bold" style={{ color: 'var(--text)' }}>图片接口测试报告</p>
-              <p className="text-xs mt-1" style={{ color: 'var(--t3)' }}>生成时间 {imgFmtTime(Date.now())} · 共 {exportJob.records.length} 条记录</p>
-            </div>
-            <div className="flex flex-col gap-6">
-              {exportJob.records.map(r => (
-                <div key={r.id} className="rounded-2xl p-4" style={{ border: '1px solid var(--border)' }}>
-                  {renderExportRecHeader(r)}
-                  {renderResultBody(r, { hidePrice: true, defaultOpenReq: true })}
-                </div>
-              ))}
-            </div>
+          {/* 报告文档自己就是截图根节点：宽度 100% + 栏宽上限 1120px 居中，
+              明细一律折叠（defaultOpenReq 不传），先给结论再给细节 */}
+          <div className="w-full flex justify-center" style={{ minWidth: 960 }}>
+            <ImgReportView rootRef={reportRootRef} records={exportJob.records}
+              renderDetail={r => renderResultBody(r, { hidePrice: true })} />
           </div>
         </div>
       )}

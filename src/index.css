@@ -431,6 +431,14 @@ input[type='number'] { -moz-appearance: textfield; appearance: textfield; }
     0 1px 3px color-mix(in srgb, var(--accent) 30%, transparent);
 }
 
+/* 图片接口测试导出报告的明细区：给生成图限高。
+   一张 1024² 原图按栏宽铺开会自己占掉一整页，读者要滚很久才能翻到下一条记录。
+   规则写在全局样式里，导出 HTML（内联整份 appCss）与 PNG 截图（截活节点）才会一致。 */
+.img-report-detail img {
+  max-height: 260px;
+  object-fit: contain;
+}
+
 .sb-menu-item {
   transition: transform 0.24s var(--ease-fluid), opacity 0.18s ease-out;
 }

@@ -293,12 +293,80 @@ test('隐藏价格开关生效，且导出的 HTML 报告不含任何价格信�
   expect(content).not.toContain('¥')
   expect(content).not.toContain('$0.')
 
-  // 历史记录的价格列同样被隐藏
+  // 历史记录的价格列同样被隐藏（两级视图去掉勾选列后，价格是第 11 列）
   await page.getByRole('button', { name: /^历史记录/ }).click()
   const row = page.getByRole('row').filter({ hasText: '隐藏价格渠道' })
-  await expect(row.getByRole('cell').nth(11)).toHaveText('—')
+  await expect(row.getByRole('cell').nth(10)).toHaveText('—')
   await page.getByRole('switch').click()
-  await expect(row.getByRole('cell').nth(11)).toContainText('$')
+  await expect(row.getByRole('cell').nth(10)).toContainText('$')
+})
+
+test('历史批次：两轮两批、补跑只留最新、一键还原到工作台', async ({ page }) => {
+  await page.route('**/v1/images/generations', async route => {
+    const b64 = await page.evaluate(() => {
+      const c = document.createElement('canvas')
+      c.width = 1024; c.height = 1024
+      const ctx = c.getContext('2d')!
+      ctx.fillStyle = '#22c55e'
+      ctx.fillRect(0, 0, 1024, 1024)
+      return c.toDataURL('image/png').split(',')[1]
+    })
+    await route.fulfill({ status: 200, contentType: 'application/json', headers: CORS, body: JSON.stringify({ data: [{ b64_json: b64 }] }) })
+  })
+  page.on('dialog', d => d.accept())
+
+  await page.goto('/')
+  await page.getByText('图片接口测试').click()
+  await page.getByRole('button', { name: '渠道管理', exact: true }).click()
+  await page.getByPlaceholder('例如：主线-oinone').fill('批次渠道')
+  await page.getByPlaceholder('https://api.oinone.top').fill('https://mock.example')
+  await page.getByPlaceholder('sk-xxxxxxxx').fill('sk-test-1234567890')
+  await page.getByRole('button', { name: '保存渠道' }).click()
+  await page.getByRole('button', { name: '批量测试', exact: true }).click()
+  const modelInput = page.getByPlaceholder('gpt-image-2')
+  await modelInput.fill('gpt-image-batch')
+
+  // 只留一个用例，跑两轮「运行选中」——每轮各开一批
+  await page.getByLabel('全选').uncheck()
+  await page.locator('[data-case-name="方形 1024×1024"] input[type="checkbox"]').check()
+  const runSelected = page.getByRole('button', { name: '▶ 运行选中' })
+  const snapshot = async () => {
+    const list = await readHistoryStore(page, 'imgtest')
+    return { ids: list.map(r => r.id as string), runIds: new Set(list.map(r => r.runId as string)).size }
+  }
+
+  await runSelected.click()
+  await expect.poll(() => snapshot().then(s => s.runIds)).toBe(1)
+  await runSelected.click()
+  await expect.poll(() => snapshot().then(s => s.runIds)).toBe(2)
+
+  // 补跑单条：归入当前这一批，并顶掉同名用例的旧记录（总数仍是 2，其中 1 条是新写的）
+  const before = new Set((await snapshot()).ids)
+  await page.getByRole('button', { name: '▶ 运行此用例' }).click()
+  await expect.poll(async () => {
+    const { ids, runIds } = await snapshot()
+    return `${ids.length}/${ids.filter(id => !before.has(id)).length}/${runIds}`
+  }).toBe('2/1/2')
+
+  // 历史页：两批，每批一条
+  await page.getByRole('button', { name: /^历史记录/ }).click()
+  await expect(page.getByTestId('imgtest-batch')).toHaveCount(2)
+  const older = page.getByTestId('imgtest-batch').nth(1)
+  await expect(older.getByText('1 个用例')).toBeVisible()
+
+  // 改掉模型，验证还原确实把配置切了回去
+  await modelInput.fill('模型被改过了')
+  await older.getByRole('button', { name: '↺ 还原到工作台' }).click()
+  await expect(page.getByTestId('imgtest-restored-note')).toBeVisible()
+  await expect(page.getByTestId('imgtest-restored-note')).toContainText('缩略图')
+  await expect(page.getByText('✓ 通过 3/3')).toBeVisible()
+  await expect(modelInput).toHaveValue('gpt-image-batch')
+  await expect(page.getByRole('button', { name: '导出 HTML' })).toBeEnabled()
+
+  // 「清除」把结果与批次一起清掉
+  await page.getByTestId('imgtest-restored-note').getByRole('button', { name: '清除' }).click()
+  await expect(page.getByTestId('imgtest-restored-note')).toHaveCount(0)
+  await expect(page.getByText('✓ 通过 3/3')).toHaveCount(0)
 })
 
 test('渠道管理：复制渠道不切换当前使用', async ({ page }) => {

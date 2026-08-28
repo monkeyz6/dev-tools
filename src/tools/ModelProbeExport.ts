@@ -10,6 +10,7 @@ export interface ProbeHtmlResult {
   usage?: { input: number | null; output: number | null; cacheRead: number | null; cacheWrite: number | null }
   cache?: { hits: number; total: number; reads: number[] }
   tokenValues?: number[]
+  checks?: { id: string; passed: boolean; detail: string }[]
   repro: {
     url: string
     headers: Record<string, string>
@@ -56,6 +57,7 @@ interface ProbeHtmlItem {
   usage?: ProbeHtmlResult['usage']
   cache?: ProbeHtmlResult['cache']
   tokenValues?: number[]
+  checks?: { id: string; passed: boolean; detail: string }[]
   url: string
   http: number | null
   requestId: string | null
@@ -258,6 +260,10 @@ h1{margin:10px 0 0;font-size:26px;font-weight:700;letter-spacing:-.021em;line-he
 }
 .explain{margin:8px 0 0;font-size:12px;color:var(--t3);line-height:1.55}
 .detail{margin:12px 0 0;font-size:14px;color:var(--text);line-height:1.55}
+.checks{display:flex;flex-wrap:wrap;gap:6px;margin-top:10px}
+.check{font-size:11px;padding:3px 8px;border-radius:999px}
+.check.ok{background:var(--okBg);color:var(--ok)}
+.check.err{background:var(--errBg);color:var(--err)}
 .facts{display:flex;flex-wrap:wrap;gap:8px 14px;margin-top:14px;font-size:12px;color:var(--t2)}
 .facts em{font-style:normal;color:var(--t3);margin-right:4px}
 .repro-line{display:flex;flex-wrap:wrap;gap:8px;margin:16px 0 12px}
@@ -334,19 +340,19 @@ function formatOfKey(key: string): string | null {
   return at > 0 ? key.slice(at + 1) : null
 }
 
-function isHiddenResultKey(key: string): boolean {
-  return key === 'structured_output@anthropic'
+function isHiddenResult(key: string, r?: ProbeHtmlResult): boolean {
+  return key === 'structured_output@anthropic' && !!r?.detail?.includes('无原生 response_format')
 }
 
 function resultKeysOf(id: string, results: Record<string, ProbeHtmlResult>): string[] {
   const prefix = id + '@'
-  return Object.keys(results).filter(k => (k === id || k.startsWith(prefix)) && !isHiddenResultKey(k)).sort((a, b) => a.localeCompare(b))
+  return Object.keys(results).filter(k => (k === id || k.startsWith(prefix)) && !isHiddenResult(k, results[k])).sort((a, b) => a.localeCompare(b))
 }
 
 function sanitizeHtmlReport(report: ProbeHtmlReport): ProbeHtmlReport {
   const results: Record<string, ProbeHtmlResult> = {}
   for (const [k, v] of Object.entries(report.results || {})) {
-    if (!isHiddenResultKey(k)) results[k] = v
+    if (!isHiddenResult(k, v)) results[k] = v
   }
   const summary: Record<ProbeHtmlStatus, number> = { passed: 0, failed: 0, unsupported: 0, skipped: 0 }
   for (const r of Object.values(results)) summary[r.status]++
@@ -377,6 +383,7 @@ function buildGroups(report: ProbeHtmlReport, tests: ProbeHtmlTestMeta[], format
         usage: r.usage,
         cache: r.cache,
         tokenValues: r.tokenValues,
+        checks: r.checks,
         url: r.repro?.url || '',
         http: r.repro?.status ?? null,
         requestId: r.repro?.requestId ?? null,
@@ -410,6 +417,7 @@ function renderTile(item: ProbeHtmlItem, index: number): string {
     <h2>${esc(item.name)}</h2>
     ${item.formatLabel ? `<span class="chip">${esc(item.formatLabel)}</span>` : ''}
     <p class="clip">${esc(item.detail)}</p>
+    ${item.checks?.length ? `<div class="checks">${item.checks.map(c => `<span class="check ${c.passed ? 'ok' : 'err'}">${c.passed ? '✓' : '✗'} ${esc(c.id)}</span>`).join('')}</div>` : ''}
     <div class="usage mono"><span class="${io.innEmpty ? 'empty' : ''}">↑${esc(io.inn)}</span> <span class="${io.outEmpty ? 'empty' : ''}">↓${esc(io.out)}</span></div>
   </button>`
 }
@@ -471,6 +479,7 @@ export function buildProbeReportHtml(
     usage: item.usage || null,
     cache: item.cache || null,
     tokenValues: item.tokenValues || null,
+    checks: item.checks || null,
     url: item.url,
     http: item.http,
     requestId: item.requestId,
@@ -548,6 +557,7 @@ export function buildProbeReportHtml(
       <button type="button" class="close" id="sheetClose">关闭</button>
     </div>
     <p class="detail" id="sheetDetail"></p>
+    <div class="checks" id="sheetChecks"></div>
     <div class="facts" id="sheetFacts"></div>
     <div class="repro-line" id="sheetMeta"></div>
     <div class="block" id="sheetBodyWrap" hidden>
@@ -602,6 +612,14 @@ export function buildProbeReportHtml(
     document.getElementById('sheetTitle').textContent = item.name;
     document.getElementById('sheetExplain').textContent = item.explain || '';
     document.getElementById('sheetDetail').textContent = item.detail || '';
+    var checksEl = document.getElementById('sheetChecks');
+    checksEl.textContent = '';
+    (item.checks || []).forEach(function (c) {
+      var s = document.createElement('span');
+      s.className = 'check ' + (c.passed ? 'ok' : 'err');
+      s.textContent = (c.passed ? '✓ ' : '✗ ') + c.detail;
+      checksEl.appendChild(s);
+    });
     var pill = document.getElementById('sheetPill');
     pill.className = 'pill ' + item.status;
     pill.textContent = item.statusLabel;
