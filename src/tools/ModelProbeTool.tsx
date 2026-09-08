@@ -12,8 +12,8 @@ import {
   type ProbeFormat, type ProbeSseEvent, type ProbeUsage,
   probeEmptyUsage, probeUsageOf, probeUsageFromSse, probeParseSseBlock,
   probeProtocolOf, probeParamComboBody, probeParamMatched,
-  probeChatMaxTokenBlame, probeChatMaxAcceptLabel, CHAT_MAX_TOKEN_KEYS,
-  PROBE_ENDPOINTS, PROBE_RED_PNG_B64, PROBE_TRUNCATION_PROMPT, PROBE_TRUNCATION_CAP,
+  probeChatMaxTokenBlame, probeChatMaxAcceptLabel, probeToolChoiceForcedBlocked, CHAT_MAX_TOKEN_KEYS,
+  PROBE_ENDPOINTS, PROBE_RED_PNG_B64, PROBE_TRUNCATION_PROMPT, PROBE_TRUNCATION_CAP, PROBE_DEFAULT_CAP,
   PROBE_SCHEMA_PROMPT, PROBE_SCHEMA_CAP, PROBE_TOOL_FORCE_PROMPT, PROBE_WEATHER_TOOL,
   PROBE_SYSTEM_INSTRUCTION, PROBE_SYSTEM_USER, PROBE_MULTITURN_TURN1, PROBE_MULTITURN_TURN2,
   PROBE_IMAGE_PROMPT,
@@ -136,7 +136,7 @@ const PROBE_TESTS: ProbeTestDef[] = [
   { id: 'reasoning_effort', group: '参数与特性', name: 'reasoning_effort', desc: '推理强度参数支持情况', explain: 'reasoning_effort（low/medium/high）仅推理模型支持，普通模型通常会报参数错误。', kind: 'parameter' },
   { id: 'max_tokens', group: '参数与特性', name: 'Token 上限参数', desc: 'Chat 同时试 max_tokens 与 max_completion_tokens，并核验截断原因', explain: 'Chat Completions 在同一发里带 max_tokens 与 max_completion_tokens；其中一个被拒就丢掉该字段再试，互斥则拆开各测一次。Responses 用 max_output_tokens，Anthropic 用 max_tokens。接受后再发长输出 + 很小 cap 核验截断原因。', kind: 'parameter' },
   { id: 'structured_output', group: '参数与特性', name: '结构化输出', desc: '接受 Schema 约束并校验返回 JSON', explain: 'combo 先验证 json_schema / text.format / output_config 是否被接受。接受后再发充足 cap 的 Schema 请求，解析 JSON 并校验 ok 为布尔值。Anthropic 走 output_config.format。', kind: 'parameter' },
-  { id: 'tool_calling', group: '参数与特性', name: '工具调用', desc: '接受 tools，并强制调用 get_weather', explain: 'combo 用双工具 + tool_choice=auto 验证请求被接受。接受后再发强制指定 get_weather，核验响应里真有该调用。无调用但 HTTP 成功记失败。', kind: 'parameter' },
+  { id: 'tool_calling', group: '参数与特性', name: '工具调用', desc: '接受 tools，并强制调用 get_weather', explain: 'combo 用双工具 + tool_choice=auto 验证请求被接受。接受后再发强制指定 get_weather，核验响应里真有该调用。thinking 模式拒绝 required/object 的 tool_choice 时降级为 auto 再核验。无调用但 HTTP 成功记失败。', kind: 'parameter' },
   { id: 'stream-false', group: '传输与稳定性', name: '非流式响应', desc: '验证 stream=false 的完整 JSON 响应与 usage', explain: '非流式是计费与解析最简单的路径。HTTP 成功时必须带回 input 与 output Token，否则视为计费无法落地。', kind: 'stream' },
   { id: 'stream-true', group: '传输与稳定性', name: 'SSE 流式响应', desc: '验证 stream=true、SSE 格式与带 Token 上限时的 usage', explain: '流式响应按 SSE 分块返回。Chat 带 max_completion_tokens、Responses 带 max_output_tokens、Anthropic 带 max_tokens。通过条件：SSE 可解析且能读到 input + output Token。结束标记（[DONE] / response.completed / message_stop）写入说明，不作为通过条件。', kind: 'stream' },
   { id: 'stream-pure', group: '传输与稳定性', name: '纯流式（无 Token 上限）', desc: 'Chat 最小体：model + messages + stream，提示「讲个笑话」', explain: '不带 max_tokens / max_completion_tokens。用于检出「加上限才回 usage、不加就不回」的渠道。只跑 Chat Completions；Anthropic 强制要 max_tokens，无法做此对照。通过条件：SSE 可解析且能读到 input + output Token。', kind: 'stream', format: 'chat' },
@@ -223,7 +223,7 @@ const probeReproOf = (log: ProbeLog): ProbeResult['repro'] => ({
   url: log.url, headers: log.requestHeaders, body: log.requestBody, status: log.status, requestId: log.requestId,
 })
 const probeMultiFormatKinds: ProbeTestDef['kind'][] = ['parameter', 'token', 'stream', 'extra']
-const PROBE_STREAM_MAX_TOKENS = 32
+const PROBE_STREAM_MAX_TOKENS = PROBE_DEFAULT_CAP
 const PROBE_PURE_STREAM_PROMPT = '讲个笑话'
 const PROBE_429_RETRY_MAX = 2
 const PROBE_429_RETRY_WAIT_MS = 6000
@@ -1255,13 +1255,25 @@ function ModelProbeTool() {
           if (r.ok) break
         }
       }
+      let toolChoiceFallback = false
+      if (!r.ok && id === 'tool_calling' && probeToolChoiceForcedBlocked(probeExtractError(r.data))) {
+        if (stopRef.current) return probeResult('skipped', PROBE_STOP_DETAIL, { format, repro: accepted.repro })
+        const retryBody = proto.baseBody(cfg.model, PROBE_TOOL_FORCE_PROMPT)
+        proto.applyTools(retryBody, [PROBE_WEATHER_TOOL], 'auto')
+        const retryLog = probeNewLog(probeKey(id, format), `${probeParamLabel(id)} 语义 auto 降级（${PROBE_FORMAT_LABELS[format]}）`, format)
+        r = await probeRequest(retryLog, format, retryBody)
+        toolChoiceFallback = true
+      }
       if (!r.ok) return failSemantic(r, probeExtractError(r.data))
       const check = id === 'max_tokens' ? oracleTruncation(proto.stopOf(r.data))
         : id === 'tool_calling' ? oracleToolNamed(proto.toolCallsOf(r.data), 'get_weather')
         : oracleSchemaOk(proto.textOf(r.data))
-      return mergeAcceptedSemantic(accepted, acceptedLabel, probeResult(check.passed ? 'passed' : 'failed', check.detail, {
+      const noted = toolChoiceFallback
+        ? { ...check, detail: `thinking 模式不支持强制 tool_choice，已用 auto 核验；${check.detail}` }
+        : check
+      return mergeAcceptedSemantic(accepted, acceptedLabel, probeResult(noted.passed ? 'passed' : 'failed', noted.detail, {
         format, duration: r.log.duration, usage: r.log.usage, repro: probeReproOf(r.log),
-      }), check)
+      }), noted)
     } catch (e: any) {
       return probeCatchResult(e, format, log)
     }
@@ -1309,7 +1321,7 @@ function ModelProbeTool() {
         if (soloAlias && format === 'chat' && pending.has('max_tokens')) {
           const proto = probeProtocolOf(format)
           const soloBody = proto.baseBody(cfgRef.current!.model, 'Reply with exactly: OK')
-          proto.applyMaxTokens(soloBody, 32, [soloAlias])
+          proto.applyMaxTokens(soloBody, PROBE_DEFAULT_CAP, [soloAlias])
           const soloLog = probeNewLog(probeKey('max_tokens', format), `Token 上限 ${soloAlias}（${PROBE_FORMAT_LABELS[format]}）`, format)
           try {
             const solo = await probeRequest(soloLog, format, soloBody)
@@ -1366,7 +1378,7 @@ function ModelProbeTool() {
             let last = one
             for (const key of [...chatMaxKeys]) {
               const aliasBody = proto.baseBody(cfgRef.current!.model, 'Reply with exactly: OK')
-              proto.applyMaxTokens(aliasBody, 32, [key])
+              proto.applyMaxTokens(aliasBody, PROBE_DEFAULT_CAP, [key])
               const aliasLog = probeNewLog(probeKey('max_tokens', format), `Token 上限 ${key}（${PROBE_FORMAT_LABELS[format]}）`, format)
               last = await probeRequest(aliasLog, format, aliasBody)
               if (last.ok) {

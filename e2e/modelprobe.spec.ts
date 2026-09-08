@@ -263,6 +263,129 @@ test.describe('模型探测', () => {
     expect(anthropicForced.tool_choice).toEqual({ type: 'tool', name: 'get_weather' })
   })
 
+  test('工具调用：thinking 模式拒绝强制 tool_choice 时降级 auto', async ({ page }) => {
+    const thinkingErr = JSON.stringify({
+      error: {
+        message: 'The tool_choice parameter does not support being set to required or object in thinking mode',
+        type: 'invalid_request_error',
+        code: 'invalid_parameter_error',
+      },
+    })
+    const chatBodies: any[] = []
+    const responsesBodies: any[] = []
+    const anthropicBodies: any[] = []
+    const fulfillTools = async (
+      route: import('@playwright/test').Route,
+      bag: any[],
+      ok: (body: any) => string,
+    ) => {
+      const body = route.request().postDataJSON()
+      if (body?.tools) bag.push(body)
+      if (isForcedWeather(body)) {
+        await route.fulfill({ status: 400, contentType: 'application/json', body: thinkingErr })
+        return
+      }
+      await route.fulfill({ status: 200, contentType: 'application/json', body: ok(body) })
+    }
+    const forceTool = (body: any) => extractPrompt(body).includes('must call the get_weather')
+    await page.route('**/v1/chat/completions', route => fulfillTools(route, chatBodies, b => CHAT_OK(12, 0, forceTool(b) ? { toolName: 'get_weather' } : {})))
+    await page.route('**/v1/responses', route => fulfillTools(route, responsesBodies, b => forceTool(b) ? RESPONSES_OK({ toolName: 'get_weather' }) : RESPONSES_OK()))
+    await page.route('**/v1/messages', route => fulfillTools(route, anthropicBodies, b => forceTool(b) ? ANTHROPIC_OK({ toolName: 'get_weather' }) : ANTHROPIC_OK()))
+
+    await goto(page, /模型探测/)
+    await page.getByRole('button', { name: '全不选' }).click()
+    for (const id of ['chat-basic', 'responses-basic', 'anthropic-basic', 'tool_calling']) await check(page, id)
+    await setupRun(page, 'e2e-thinking强制tool_choice降级')
+
+    const tiles = page.locator('main').getByRole('button', { name: /工具调用/ })
+    await expect(tiles).toHaveCount(3, { timeout: 10000 })
+    await expect(tiles.filter({ hasText: 'Chat Completions' })).toContainText('通过')
+    await expect(tiles.filter({ hasText: 'Responses' })).toContainText('通过')
+    await expect(tiles.filter({ hasText: 'Anthropic' })).toContainText('通过')
+    await expect(page.locator('main')).toContainText('已用 auto 核验')
+    await expect(page.locator('main')).toContainText('已调用 get_weather')
+
+    const chatForced = chatBodies.find(b => b.tool_choice?.function?.name === 'get_weather')
+    const chatAuto = chatBodies.find(b => b.tool_choice === 'auto' && extractPrompt(b).includes('must call the get_weather'))
+    expect(chatForced).toBeTruthy()
+    expect(chatAuto).toBeTruthy()
+    expect(chatAuto.tools).toHaveLength(1)
+
+    const respForced = responsesBodies.find(b => b.tool_choice?.name === 'get_weather')
+    const respAuto = responsesBodies.find(b => b.tool_choice === 'auto' && extractPrompt(b).includes('must call the get_weather'))
+    expect(respForced).toBeTruthy()
+    expect(respAuto).toBeTruthy()
+
+    const anthForced = anthropicBodies.find(b => b.tool_choice?.type === 'tool')
+    const anthAuto = anthropicBodies.find(b => b.tool_choice?.type === 'auto' && extractPrompt(b).includes('must call the get_weather'))
+    expect(anthForced).toBeTruthy()
+    expect(anthAuto).toBeTruthy()
+    expect(anthAuto.max_tokens).toBe(120)
+  })
+
+  test('工具调用：非思考模式的 tool_choice 不支持不降级', async ({ page }) => {
+    const genericErr = JSON.stringify({
+      error: {
+        message: 'tool_choice object is not supported, use auto',
+        model: 'vendor-thinking-v1',
+        type: 'invalid_request_error',
+      },
+    })
+    const chatBodies: any[] = []
+    await page.route('**/v1/chat/completions', async route => {
+      const body = route.request().postDataJSON()
+      if (body?.tools) chatBodies.push(body)
+      if (isForcedWeather(body)) {
+        await route.fulfill({ status: 400, contentType: 'application/json', body: genericErr })
+        return
+      }
+      await route.fulfill({ status: 200, contentType: 'application/json', body: CHAT_OK(12) })
+    })
+
+    await goto(page, /模型探测/)
+    await page.getByRole('button', { name: '全不选' }).click()
+    await check(page, 'chat-basic')
+    await check(page, 'tool_calling')
+    await setupRun(page, 'e2e-tool_choice不支持不降级')
+
+    const tile = page.locator('main').getByRole('button', { name: /工具调用/ })
+    await expect(tile).toContainText('失败', { timeout: 10000 })
+    await expect(page.locator('main')).not.toContainText('已用 auto 核验')
+    expect(chatBodies.filter(b => extractPrompt(b).includes('must call the get_weather'))).toHaveLength(1)
+  })
+
+  test('工具调用：中文思考模式拒绝强制 tool_choice 时降级 auto', async ({ page }) => {
+    const thinkingErr = JSON.stringify({
+      error: { message: '思考模式下不支持将 tool_choice 设为 required 或 object' },
+    })
+    const chatBodies: any[] = []
+    await page.route('**/v1/chat/completions', async route => {
+      const body = route.request().postDataJSON()
+      if (body?.tools) chatBodies.push(body)
+      if (isForcedWeather(body)) {
+        await route.fulfill({ status: 400, contentType: 'application/json', body: thinkingErr })
+        return
+      }
+      await route.fulfill({
+        status: 200, contentType: 'application/json',
+        body: extractPrompt(body).includes('must call the get_weather')
+          ? CHAT_OK(12, 0, { toolName: 'get_weather' })
+          : CHAT_OK(12),
+      })
+    })
+
+    await goto(page, /模型探测/)
+    await page.getByRole('button', { name: '全不选' }).click()
+    await check(page, 'chat-basic')
+    await check(page, 'tool_calling')
+    await setupRun(page, 'e2e-中文思考模式tool_choice降级')
+
+    const tile = page.locator('main').getByRole('button', { name: /工具调用/ })
+    await expect(tile).toContainText('通过', { timeout: 10000 })
+    await expect(page.locator('main')).toContainText('已用 auto 核验')
+    expect(chatBodies.find(b => b.tool_choice === 'auto' && extractPrompt(b).includes('must call the get_weather'))).toBeTruthy()
+  })
+
   test('缓存未命中：连续 3 次未报告缓存命中即停止，不再重试', async ({ page }) => {
     let cacheReqs = 0
     await page.route('**/v1/chat/completions', async route => {
@@ -700,13 +823,13 @@ test.describe('模型探测', () => {
     await expect(sseTiles.filter({ hasText: 'Chat Completions' })).toContainText('通过')
     await expect(sseTiles.filter({ hasText: 'Chat Completions' })).toContainText('↑11 ↓6')
 
-    const limited = chatBodies.find(b => b.stream === true && b.max_completion_tokens === 32)
+    const limited = chatBodies.find(b => b.stream === true && b.max_completion_tokens === 120)
     const pure = chatBodies.find(b => b.stream === true && b.max_completion_tokens == null)
     expect(limited).toBeTruthy()
     expect(pure).toBeTruthy()
     expect(pure.messages?.[0]?.content).toBe('讲个笑话')
     const respStream = responsesBodies.find(b => b.stream === true)
-    expect(respStream?.max_output_tokens).toBe(32)
+    expect(respStream?.max_output_tokens).toBe(120)
   })
 
   test('流式只回 output token 仍判失败', async ({ page }) => {
@@ -851,7 +974,7 @@ test.describe('模型探测', () => {
     await expect(tile).toContainText('通过', { timeout: 10000 })
     await expect(tile).toContainText('↑8 ↓3')
     const streamed = bodies.find(b => b.stream === true)
-    expect(streamed?.max_tokens).toBe(32)
+    expect(streamed?.max_tokens).toBe(120)
   })
 
   test('Anthropic SSE：只有 message_start 的 output=0 时判失败', async ({ page }) => {
@@ -1132,7 +1255,7 @@ test.describe('模型探测', () => {
     const chatCap = chatBodies.find(b => b.max_completion_tokens === 16 || b.max_tokens === 16)
     expect(chatCap.max_completion_tokens).toBe(16)
     expect(chatCap.max_tokens).toBe(16)
-    expect(chatBodies.some(b => b.max_completion_tokens === 32 && b.max_tokens === 32)).toBeTruthy()
+    expect(chatBodies.some(b => b.max_completion_tokens === 120 && b.max_tokens === 120)).toBeTruthy()
     expect(responsesBodies.some(b => b.max_output_tokens === 16)).toBeTruthy()
     expect(anthropicBodies.some(b => b.max_tokens === 16)).toBeTruthy()
   })
@@ -1177,6 +1300,42 @@ test.describe('模型探测', () => {
     const second = bodies.find(b => (b.messages || []).some((m: any) => m.role === 'assistant'))
     expect(second.messages.some((m: any) => m.role === 'assistant' && m.content === 'Acknowledged.')).toBeTruthy()
     expect(JSON.stringify(second.messages)).toContain('only the codeword')
+    expect(second.max_tokens).toBeUndefined()
+    expect(second.max_completion_tokens).toBeUndefined()
+  })
+
+  test('Anthropic System/多轮默认 max_tokens=120；Chat 不带上限', async ({ page }) => {
+    const chatBodies: any[] = []
+    const anthropicBodies: any[] = []
+    await page.route('**/v1/chat/completions', async route => {
+      const body = route.request().postDataJSON()
+      chatBodies.push(body)
+      await route.fulfill({ status: 200, contentType: 'application/json', body: smartChat(body) })
+    })
+    await page.route('**/v1/messages', async route => {
+      const body = route.request().postDataJSON()
+      anthropicBodies.push(body)
+      await route.fulfill({ status: 200, contentType: 'application/json', body: smartAnthropic(body) })
+    })
+
+    await goto(page, /模型探测/)
+    await page.getByRole('button', { name: '全不选' }).click()
+    for (const id of ['chat-basic', 'anthropic-basic', 'system-prompt', 'multi-turn']) await check(page, id)
+    await setupRun(page, 'e2e-默认cap120')
+
+    const main = page.locator('main')
+    await expect(main.getByRole('button', { name: /System 提示词/ })).toHaveCount(2, { timeout: 10000 })
+    await expect(main.getByRole('button', { name: /多轮对话/ })).toHaveCount(2)
+
+    const anthSystem = anthropicBodies.find(b => typeof b.system === 'string' && b.system.includes('SYSTEM_OK'))
+    expect(anthSystem?.max_tokens).toBe(120)
+    const anthTurn2 = anthropicBodies.find(b => (b.messages || []).some((m: any) => m.role === 'assistant'))
+    expect(anthTurn2?.max_tokens).toBe(120)
+    expect(JSON.stringify(anthTurn2.messages)).toContain('only the codeword')
+
+    const chatSystem = chatBodies.find(b => (b.messages || []).some((m: any) => m.role === 'system'))
+    expect(chatSystem?.max_tokens).toBeUndefined()
+    expect(chatSystem?.max_completion_tokens).toBeUndefined()
   })
 
   test('图片输入默认不勾选；全选后勾上；识别红色通过', async ({ page }) => {

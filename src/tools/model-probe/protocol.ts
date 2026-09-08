@@ -64,6 +64,8 @@ export const PROBE_PARAM_COMBO_PROMPT = 'Return a JSON object with ok=true. If a
 export const PROBE_TOOL_CALL_PROMPT = '帮我看看明天上海的天气怎么样，另外查下订单 SN20260705888 到哪了'
 export const PROBE_TRUNCATION_PROMPT = 'Count from 1 to 200, writing each integer on its own line. Do not stop until you reach 200.'
 export const PROBE_TRUNCATION_CAP = 16
+/** 短可见回复的默认输出额度。思考模型会先吃思考链，32 经常写不出 SYSTEM_OK / 口令 / tool_use。截断语义仍用 PROBE_TRUNCATION_CAP。 */
+export const PROBE_DEFAULT_CAP = 120
 export const PROBE_SCHEMA_PROMPT = 'Return a JSON object with ok=true.'
 export const PROBE_SCHEMA_CAP = 256
 export const PROBE_TOOL_FORCE_PROMPT = 'What is the weather in Shanghai tomorrow? You must call the get_weather tool.'
@@ -248,7 +250,7 @@ const chatProtocol: ProbeProtocol = {
       case 'temperature': return { temperature: 0.2 }
       case 'top_p': return { top_p: 0.9 }
       case 'reasoning_effort': return { reasoning_effort: 'low' }
-      case 'max_tokens': return { max_completion_tokens: 32, max_tokens: 32 }
+      case 'max_tokens': return { max_completion_tokens: PROBE_DEFAULT_CAP, max_tokens: PROBE_DEFAULT_CAP }
       case 'structured_output':
         return { response_format: { type: 'json_schema', json_schema: { name: 'probe', strict: true, schema: PROBE_JSON_SCHEMA } } }
       case 'tool_calling': return weatherAndOrder('chat')
@@ -387,7 +389,7 @@ const responsesProtocol: ProbeProtocol = {
       case 'temperature': return { temperature: 0.2 }
       case 'top_p': return { top_p: 0.9 }
       case 'reasoning_effort': return { reasoning_effort: 'low' }
-      case 'max_tokens': return { max_output_tokens: 32 }
+      case 'max_tokens': return { max_output_tokens: PROBE_DEFAULT_CAP }
       case 'structured_output':
         return { text: { format: { type: 'json_schema', name: 'probe', strict: true, schema: PROBE_JSON_SCHEMA } } }
       case 'tool_calling': return weatherAndOrder('responses')
@@ -474,7 +476,7 @@ const anthropicProtocol: ProbeProtocol = {
     }
   },
   baseBody(model, prompt) {
-    return { model, max_tokens: 32, messages: [{ role: 'user', content: prompt }] }
+    return { model, max_tokens: PROBE_DEFAULT_CAP, messages: [{ role: 'user', content: prompt }] }
   },
   applyMaxTokens(body, n) {
     body.max_tokens = n
@@ -521,7 +523,7 @@ const anthropicProtocol: ProbeProtocol = {
       case 'temperature': return { temperature: 0.2 }
       case 'top_p': return { top_p: 0.9 }
       case 'reasoning_effort': return { reasoning_effort: 'low' }
-      case 'max_tokens': return { max_tokens: 32 }
+      case 'max_tokens': return { max_tokens: PROBE_DEFAULT_CAP }
       case 'structured_output':
         return { output_config: { format: { type: 'json_schema', schema: PROBE_JSON_SCHEMA } } }
       case 'tool_calling': return weatherAndOrder('anthropic')
@@ -615,6 +617,28 @@ export const probeChatMaxTokenBlame = (err: string): ChatMaxTokenKey | 'conflict
   return null
 }
 
+/** pretty JSON 只取 message。sibling 字段（如 model=xxx-thinking）不能当判定。 */
+const probeErrorText = (err: string): string => {
+  const t = String(err || '').trim()
+  if (!t.startsWith('{')) return err
+  try {
+    const o = JSON.parse(t)
+    if (o && typeof o === 'object' && !Array.isArray(o)) {
+      if (typeof o.message === 'string' && o.message) return o.message
+      const inner = o.error
+      if (inner && typeof inner === 'object' && typeof inner.message === 'string' && inner.message) return inner.message
+    }
+  } catch { /* 保持原文 */ }
+  return err
+}
+
+/** thinking / 思考模式拒绝 required、object 等强制 tool_choice 时才降级。须同时命中 tool_choice 与思考相关词，避免「not support」单独误触发。 */
+export const probeToolChoiceForcedBlocked = (err: string): boolean => {
+  const e = probeErrorText(err).toLowerCase()
+  if (!/tool[_ -]?choice/.test(e)) return false
+  return /thinking|reasoning|思考|推理/.test(e)
+}
+
 export const probeChatMaxAcceptLabel = (accepted: Iterable<string>, rejected: Iterable<string> = []): string => {
   const acc = [...accepted]
   const rej = [...rejected]
@@ -635,7 +659,7 @@ export const probeParamComboBody = (model: string, format: ProbeFormat, pending:
     delete body.max_tokens
     delete body.max_completion_tokens
     const keys = chatMaxKeys?.length ? chatMaxKeys : [...CHAT_MAX_TOKEN_KEYS]
-    for (const k of keys) body[k] = 32
+    for (const k of keys) body[k] = PROBE_DEFAULT_CAP
   }
   return body
 }

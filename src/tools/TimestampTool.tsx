@@ -3,44 +3,96 @@ import { Btn, Label, Card, Badge, CustomInput, CustomSelect, SearchableSelect, C
 
 // ─── Tool: 时间戳转换 ─────────────────────────────────────────────────────────
 
+type DetectedUnit = 'ms' | 's' | 'ns' | 'iso'
+type UnitChoice = 'auto' | 'ms' | 's' | 'ns'
+
+// ISO 8601 / RFC 3339：2026-09-04T05:35:00Z、带小数、±HH:MM / ±HHMM、空格分隔
+const ISO_RE = /^(\d{4})-(\d{2})-(\d{2})[T ](\d{2}):(\d{2}):(\d{2})(\.\d+)?(Z|[+-]\d{2}:?\d{2})?$/i
+
+function parseIsoDateTime(raw: string): Date | null {
+  const m = raw.trim().match(ISO_RE)
+  if (!m) return null
+  const [, y, mo, d, h, mi, se, frac, tz] = m
+  const ms = frac ? Math.round(Number(`0${frac}`) * 1000) : 0
+  if (!tz) {
+    const date = new Date(Number(y), Number(mo) - 1, Number(d), Number(h), Number(mi), Number(se), ms)
+    return Number.isNaN(date.getTime()) ? null : date
+  }
+  const tzNorm = tz.toUpperCase() === 'Z' ? 'Z' : tz.length === 5 ? `${tz.slice(0, 3)}:${tz.slice(3)}` : tz
+  const iso = `${y}-${mo}-${d}T${h}:${mi}:${se}${frac ?? ''}${tzNorm}`
+  const date = new Date(iso)
+  return Number.isNaN(date.getTime()) ? null : date
+}
+
+function formatRelative(now: number, ms: number): string {
+  const diff = now - ms
+  const abs = Math.abs(diff)
+  if (abs < 60000) return '刚刚'
+  if (abs < 3600000) return `${Math.round(abs / 60000)} 分钟${diff > 0 ? '前' : '后'}`
+  if (abs < 86400000) return `${Math.round(abs / 3600000)} 小时${diff > 0 ? '前' : '后'}`
+  return `${Math.round(abs / 86400000)} 天${diff > 0 ? '前' : '后'}`
+}
+
+function parseTimestampInput(raw: string, unit: UnitChoice):
+  | { ok: true; detectedUnit: DetectedUnit; ms: number; date: Date }
+  | { ok: false; error: string } {
+  const trimmed = raw.trim()
+  const isoDate = parseIsoDateTime(trimmed)
+  if (isoDate) return { ok: true, detectedUnit: 'iso', ms: isoDate.getTime(), date: isoDate }
+
+  const cleaned = trimmed.replace(/[^0-9]/g, '')
+  const n = parseInt(cleaned, 10)
+  if (Number.isNaN(n)) return { ok: false, error: '无法解析数字' }
+  const detectedUnit: DetectedUnit = cleaned.length >= 19 ? 'ns' : cleaned.length >= 13 ? 'ms' : 's'
+  const effectiveUnit = unit === 'auto' ? detectedUnit : unit
+  const ms = effectiveUnit === 'ms' ? n : effectiveUnit === 'ns' ? n / 1e6 : n * 1000
+  const date = new Date(ms)
+  if (Number.isNaN(date.getTime())) return { ok: false, error: '无效时间戳' }
+  return { ok: true, detectedUnit, ms, date }
+}
+
+function parseDatetimeInput(raw: string):
+  | { ok: true; ms: number }
+  | { ok: false; error: string } {
+  const trimmed = raw.trim()
+  const isoDate = parseIsoDateTime(trimmed)
+  if (isoDate) return { ok: true, ms: isoDate.getTime() }
+  const d = new Date(trimmed)
+  if (Number.isNaN(d.getTime())) {
+    return { ok: false, error: '无法解析日期时间，尝试格式：2024-01-15 14:30:00 或 2026-09-04T05:35:00Z' }
+  }
+  return { ok: true, ms: d.getTime() }
+}
+
 function TimestampTool() {
   const [tsInput, setTsInput] = useState('')
   const [dtInput, setDtInput] = useState('')
-  const [unit, setUnit] = useState<'auto' | 'ms' | 's' | 'ns'>('auto')
+  const [unit, setUnit] = useState<UnitChoice>('auto')
   const now = Date.now()
 
   const tsResult = useMemo(() => {
     if (!tsInput.trim()) return null
-    const cleaned = tsInput.replace(/[^0-9]/g, '')
-    const n = parseInt(cleaned, 10)
-    if (isNaN(n)) return { ok: false, error: '无法解析数字' }
-    const detectedUnit = cleaned.length >= 19 ? 'ns' : cleaned.length >= 13 ? 'ms' : 's'
-    const effectiveUnit = unit === 'auto' ? detectedUnit : unit
-    const ms = effectiveUnit === 'ms' ? n : effectiveUnit === 'ns' ? n / 1e6 : n * 1000
-    const date = new Date(ms)
-    if (isNaN(date.getTime())) return { ok: false, error: '无效时间戳' }
+    const parsed = parseTimestampInput(tsInput, unit)
+    if (!parsed.ok) return parsed
+    const { detectedUnit, ms, date } = parsed
     return {
-      ok: true, detectedUnit, ms, s: Math.floor(ms / 1000),
+      ok: true as const,
+      detectedUnit,
+      ms,
+      s: Math.floor(ms / 1000),
       ns: Math.round(ms * 1e6),
       local: date.toLocaleString('zh-CN', { timeZoneName: 'short' }),
       utc: date.toUTCString(),
       iso: date.toISOString(),
-      relative: (() => {
-        const diff = now - ms
-        const abs = Math.abs(diff)
-        if (abs < 60000) return '刚刚'
-        if (abs < 3600000) return `${Math.round(abs / 60000)} 分钟${diff > 0 ? '前' : '后'}`
-        if (abs < 86400000) return `${Math.round(abs / 3600000)} 小时${diff > 0 ? '前' : '后'}`
-        return `${Math.round(abs / 86400000)} 天${diff > 0 ? '前' : '后'}`
-      })(),
+      relative: formatRelative(now, ms),
     }
   }, [tsInput, unit, now])
 
   const dtResult = useMemo(() => {
     if (!dtInput.trim()) return null
-    const d = new Date(dtInput)
-    if (isNaN(d.getTime())) return { ok: false, error: '无法解析日期时间，尝试格式：2024-01-15 14:30:00' }
-    return { ok: true, ms: d.getTime(), s: Math.floor(d.getTime() / 1000) }
+    const parsed = parseDatetimeInput(dtInput)
+    if (!parsed.ok) return parsed
+    return { ok: true as const, ms: parsed.ms, s: Math.floor(parsed.ms / 1000) }
   }, [dtInput])
 
   const nowTs = Math.floor(now / 1000)
@@ -73,14 +125,16 @@ function TimestampTool() {
               />
             </div>
           </div>
-          <CustomInput value={tsInput} onChange={setTsInput} placeholder="输入时间戳，如 1705289400000" mono />
+          <CustomInput value={tsInput} onChange={setTsInput} placeholder="输入时间戳，如 1705289400000 或 2026-09-04T05:35:00Z" mono />
           {tsResult && (
             <div className="mt-4">
               {tsResult.ok ? (
                 <div className="grid gap-2">
                   <div className="flex items-center gap-2 mb-1">
-                    <Badge color="ok">自动识别为 {tsResult.detectedUnit?.toUpperCase()}</Badge>
-                    {unit !== 'auto' && unit !== tsResult.detectedUnit && (
+                    <Badge color="ok">
+                      {tsResult.detectedUnit === 'iso' ? '自动识别为 ISO 8601' : `自动识别为 ${tsResult.detectedUnit.toUpperCase()}`}
+                    </Badge>
+                    {tsResult.detectedUnit !== 'iso' && unit !== 'auto' && unit !== tsResult.detectedUnit && (
                       <Badge color="warn">已强制为 {unit.toUpperCase()}</Badge>
                     )}
                     <Badge>{tsResult.relative}</Badge>
@@ -91,7 +145,7 @@ function TimestampTool() {
                     ['ISO 8601', tsResult.iso],
                     ['毫秒时间戳', String(tsResult.ms)],
                     ['秒时间戳', String(tsResult.s)],
-                    ...((tsResult.detectedUnit === 'ns' || unit === 'ns') ? [['纳秒时间戳', String(tsResult.ns)] as [string, string]] : []),
+                    ...((tsResult.detectedUnit === 'ns' || (unit === 'ns' && tsResult.detectedUnit !== 'iso')) ? [['纳秒时间戳', String(tsResult.ns)] as [string, string]] : []),
                   ].map(([label, val]) => (
                     <div key={label} className="flex items-center gap-3 px-3 py-2 rounded-xl" style={{ background: 'var(--s1)', border: '1px solid var(--border)' }}>
                       <span className="text-xs w-24 flex-shrink-0" style={{ color: 'var(--t2)' }}>{label}</span>
@@ -113,7 +167,7 @@ function TimestampTool() {
         {/* Date → TS */}
         <Card>
           <h3 className="font-semibold text-sm mb-4" style={{ color: 'var(--text)' }}>日期时间 → 时间戳</h3>
-          <CustomInput value={dtInput} onChange={setDtInput} placeholder="如 2024-01-15 14:30:00 或 ISO 格式" />
+          <CustomInput value={dtInput} onChange={setDtInput} placeholder="如 2024-01-15 14:30:00 或 2026-09-04T05:35:00Z" />
           {dtResult && (
             <div className="mt-4">
               {dtResult.ok ? (
