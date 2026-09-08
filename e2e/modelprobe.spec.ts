@@ -1673,4 +1673,100 @@ test.describe('模型探测', () => {
     expect(typeof block.source.data).toBe('string')
     expect(block.source.data).not.toMatch(/^data:/)
   })
+
+  test('原生工具：gpt-4o 追加用例且默认不勾；embedding 不出现', async ({ page }) => {
+    await goto(page, /模型探测/)
+    await inputByLabel(page, '模型名称').fill('gpt-4o')
+    const nativeGroup = page.locator('div.uppercase.tracking-wide', { hasText: '原生工具调用' })
+    await expect(page.locator('input[data-id="native-openai-web_search"]')).toBeVisible()
+    await expect(page.locator('input[data-id="native-openai-web_search"]')).not.toBeChecked()
+    await expect(nativeGroup).toBeVisible()
+    await inputByLabel(page, '模型名称').fill('text-embedding-3-small')
+    await expect(page.locator('input[data-id="native-openai-web_search"]')).toHaveCount(0)
+    await expect(nativeGroup).toHaveCount(0)
+  })
+
+  test('原生工具：kimi-k2 只出现 $web_search', async ({ page }) => {
+    await goto(page, /模型探测/)
+    await inputByLabel(page, '模型名称').fill('kimi-k2')
+    await expect(page.locator('input[data-id="native-kimi-web_search"]')).toBeVisible()
+    await expect(page.locator('input[data-id="native-openai-web_search"]')).toHaveCount(0)
+    await expect(page.locator('main')).toContainText('Kimi 内置 $web_search')
+  })
+
+  test('原生工具：独立请求强制 web_search，不并入参数 combo', async ({ page }) => {
+    const chatBodies: any[] = []
+    const responsesBodies: any[] = []
+    await page.route('**/v1/chat/completions', async route => {
+      const body = route.request().postDataJSON()
+      chatBodies.push(body)
+      await route.fulfill({ status: 200, contentType: 'application/json', body: smartChat(body) })
+    })
+    await page.route('**/v1/responses', async route => {
+      const body = route.request().postDataJSON()
+      responsesBodies.push(body)
+      const native = extractPrompt(body).includes('hosted web search tool')
+      const payload = native
+        ? JSON.stringify({
+          id: 'resp-probe',
+          status: 'completed',
+          output: [
+            { type: 'web_search_call', id: 'ws_1', status: 'completed' },
+            { type: 'message', role: 'assistant', content: [{ type: 'output_text', text: 'OK' }] },
+          ],
+          usage: { input_tokens: 10, output_tokens: 4 },
+        })
+        : smartResponses(body)
+      await route.fulfill({ status: 200, contentType: 'application/json', body: payload })
+    })
+
+    await goto(page, /模型探测/)
+    await inputByLabel(page, '模型名称').fill('gpt-4o')
+    await page.getByRole('button', { name: '全不选' }).click()
+    await check(page, 'chat-basic')
+    await check(page, 'responses-basic')
+    await check(page, 'temperature')
+    await check(page, 'native-openai-web_search')
+    await addChannel(page, { apiKey: 'sk-test-probe' })
+    await page.getByRole('button', { name: '▶ 开始测试' }).click()
+    await page.getByRole('dialog').locator('input').fill('e2e-原生联网')
+    await page.getByRole('button', { name: '确认并开始' }).click()
+
+    const tile = page.locator('main').getByRole('button', { name: /OpenAI 联网搜索/ })
+    await expect(tile).toContainText('已调用 web_search', { timeout: 10000 })
+
+    const nativeReq = responsesBodies.find(b => extractPrompt(b).includes('hosted web search tool'))
+    expect(nativeReq).toBeTruthy()
+    expect(nativeReq.tools).toEqual([{ type: 'web_search' }])
+    expect(nativeReq.tool_choice).toEqual({ type: 'web_search' })
+    expect(nativeReq.temperature).toBeUndefined()
+
+    const combo = responsesBodies.find(b => b.temperature !== undefined)
+    expect(combo).toBeTruthy()
+    expect(JSON.stringify(combo.tools || [])).not.toContain('"web_search"')
+    expect(chatBodies.some(b => JSON.stringify(b.tools || []).includes('"type":"web_search"'))).toBe(false)
+  })
+
+  test('原生工具：2xx 无调用证据判失败', async ({ page }) => {
+    await page.route('**/v1/chat/completions', async route => {
+      await route.fulfill({ status: 200, contentType: 'application/json', body: CHAT_OK(12) })
+    })
+    await page.route('**/v1/responses', async route => {
+      const body = route.request().postDataJSON()
+      await route.fulfill({ status: 200, contentType: 'application/json', body: smartResponses(body) })
+    })
+
+    await goto(page, /模型探测/)
+    await inputByLabel(page, '模型名称').fill('gpt-4o')
+    await page.getByRole('button', { name: '全不选' }).click()
+    await check(page, 'responses-basic')
+    await check(page, 'native-openai-web_search')
+    await addChannel(page, { apiKey: 'sk-test-probe' })
+    await page.getByRole('button', { name: '▶ 开始测试' }).click()
+    await page.getByRole('dialog').locator('input').fill('e2e-原生无证据')
+    await page.getByRole('button', { name: '确认并开始' }).click()
+
+    const tile = page.locator('main').getByRole('button', { name: /OpenAI 联网搜索/ })
+    await expect(tile).toContainText('没有 web_search 的调用或结果证据', { timeout: 10000 })
+  })
 })

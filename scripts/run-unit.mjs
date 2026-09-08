@@ -1,0 +1,37 @@
+import { mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { dirname, join } from 'node:path'
+import { fileURLToPath } from 'node:url'
+import { spawnSync } from 'node:child_process'
+import ts from 'typescript'
+
+const root = join(dirname(fileURLToPath(import.meta.url)), '..')
+const files = [
+  'src/tools/model-probe/protocol.ts',
+  'src/tools/model-probe/oracles.ts',
+  'src/tools/model-probe/builtin-tools.ts',
+  'src/tools/model-probe/builtin-tools.test.ts',
+]
+const outDir = join(root, '.tmp-unit')
+rmSync(outDir, { recursive: true, force: true })
+
+for (const rel of files) {
+  const src = readFileSync(join(root, rel), 'utf8')
+  let { outputText } = ts.transpileModule(src, {
+    compilerOptions: {
+      module: ts.ModuleKind.ESNext,
+      target: ts.ScriptTarget.ES2022,
+    },
+    fileName: rel,
+  })
+  outputText = outputText.replace(/from ['"]\.\/([^'"]+?)(?:\.ts)?['"]/g, "from './$1.js'")
+  const dest = join(outDir, rel.replace(/\.ts$/, '.js'))
+  mkdirSync(dirname(dest), { recursive: true })
+  writeFileSync(dest, outputText)
+}
+
+const r = spawnSync(
+  process.execPath,
+  ['--test', join(outDir, 'src/tools/model-probe/builtin-tools.test.js')],
+  { stdio: 'inherit' },
+)
+process.exit(r.status ?? 1)

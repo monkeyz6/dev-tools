@@ -23,12 +23,18 @@ import {
   oracleTruncation, oracleToolNamed, oracleSchemaOk, oracleSystemOk, oracleCodeword,
   oracleDominantRed, oracleUnsupportedVision, probeCheck,
 } from './model-probe/oracles'
+import {
+  type BuiltinProbeCase,
+  ALL_BUILTIN_PROBE_CASES, applyBuiltinTool, builtinCaseById, matchBuiltinToolCases,
+  oracleNativeToolEvidence, oracleUnsupportedNativeTool,
+} from './model-probe/builtin-tools'
 
 // ─── Tool: 模型探测 ─────────────────────────────────────────────────────────────
 // 定位：API 渠道兼容性实验台 —— 三种协议格式 × 参数/流式/缓存/Token 计数稳定性，
 // 智能降级定位不支持的参数；HTTP 2xx 必须带回 input+output Token（否则失败）；
 // 参数 combo 只验接受；上限/工具/结构化输出在接受后再发语义请求；
 // System / 多轮核验指令；图片输入默认不勾选。
+// 厂商内置工具（kind=native）按模型名命中后追加，默认不勾，单独发请求。
 
 type ProbeStatus = 'passed' | 'failed' | 'unsupported' | 'skipped'
 
@@ -38,7 +44,7 @@ interface ProbeTestDef {
   name: string
   desc: string
   explain: string
-  kind: 'basic' | 'parameter' | 'stream' | 'token' | 'cache' | 'extra'
+  kind: 'basic' | 'parameter' | 'stream' | 'token' | 'cache' | 'extra' | 'native'
   format?: ProbeFormat
   subtype?: string
   defaultSelected?: boolean
@@ -151,7 +157,13 @@ const PROBE_TESTS: ProbeTestDef[] = [
   { id: 'concurrency', group: '补充场景', name: '并发请求稳定性', desc: '并行发起 3 个低消耗请求', explain: '并发请求检验渠道的连接池与限流策略。', kind: 'extra', subtype: 'concurrency' },
 ]
 
-const probeTestById = (id: string): ProbeTestDef | undefined => PROBE_TESTS.find(t => t.id === id)
+const toNativeProbeTest = (c: BuiltinProbeCase): ProbeTestDef => ({
+  id: c.id, group: c.group, name: c.name, desc: c.desc, explain: c.explain,
+  kind: 'native', format: c.format, defaultSelected: false,
+})
+const PROBE_BUILTIN_TESTS: ProbeTestDef[] = ALL_BUILTIN_PROBE_CASES.map(toNativeProbeTest)
+const probeCatalog = (): ProbeTestDef[] => [...PROBE_TESTS, ...PROBE_BUILTIN_TESTS]
+const probeTestById = (id: string): ProbeTestDef | undefined => probeCatalog().find(t => t.id === id)
 const probeKey = (id: string, format?: ProbeFormat): string => format ? `${id}@${format}` : id
 const probeFormatOfKey = (key: string): ProbeFormat | null => {
   const at = key.indexOf('@')
@@ -222,7 +234,7 @@ const probeResult = (status: ProbeStatus, detail: string, extra: Partial<ProbeRe
 const probeReproOf = (log: ProbeLog): ProbeResult['repro'] => ({
   url: log.url, headers: log.requestHeaders, body: log.requestBody, status: log.status, requestId: log.requestId,
 })
-const probeMultiFormatKinds: ProbeTestDef['kind'][] = ['parameter', 'token', 'stream', 'extra']
+const probeMultiFormatKinds: ProbeTestDef['kind'][] = ['parameter', 'token', 'stream', 'extra', 'native']
 const PROBE_STREAM_MAX_TOKENS = PROBE_DEFAULT_CAP
 const PROBE_PURE_STREAM_PROMPT = '讲个笑话'
 const PROBE_429_RETRY_MAX = 2
@@ -507,7 +519,7 @@ function ProbeReportTiles({ report }: { report: ProbeReport }) {
 
   const groups: { title: string; items: { test: ProbeTestDef; key: string; result: ProbeResult }[] }[] = []
   let skipped = 0
-  for (const t of PROBE_TESTS) {
+  for (const t of probeCatalog()) {
     const keys = probeResultKeysOf(t, report.results)
     const items = keys.map(key => ({ test: t, key, result: report.results[key] })).filter(x => x.result)
     skipped += items.filter(x => x.result.status === 'skipped').length
@@ -917,10 +929,30 @@ function ModelProbeTool() {
   const [selected, setSelected] = useState<Record<string, boolean>>(() => {
     const all: Record<string, boolean> = {}
     PROBE_TESTS.forEach(t => { all[t.id] = cfg0.selected?.[t.id] ?? (t.defaultSelected !== false) })
+    for (const t of PROBE_BUILTIN_TESTS) {
+      if (cfg0.selected?.[t.id] !== undefined) all[t.id] = !!cfg0.selected[t.id]
+    }
     return all
   })
   const selectedRef = useRef(selected)
   useEffect(() => { selectedRef.current = selected }, [selected])
+  const nativeTests = useMemo(() => matchBuiltinToolCases(model).map(toNativeProbeTest), [model])
+  const visibleTests = useMemo(() => [...PROBE_TESTS, ...nativeTests], [nativeTests])
+  useEffect(() => {
+    const visibleIds = new Set(nativeTests.map(t => t.id))
+    setSelected(prev => {
+      let changed = false
+      const next = { ...prev }
+      for (const t of PROBE_BUILTIN_TESTS) {
+        if (!visibleIds.has(t.id)) continue
+        if (next[t.id] === undefined) {
+          next[t.id] = false
+          changed = true
+        }
+      }
+      return changed ? next : prev
+    })
+  }, [nativeTests])
 
   useDebouncedPersist(() => {
     saveProbeCfg({ model, randomString, tokenRuns, includeStreamUsage, selected })
@@ -1607,6 +1639,30 @@ function ModelProbeTool() {
     }
   }
 
+  const runProbeNative = async (t: ProbeTestDef): Promise<ProbeResult> => {
+    const spec = builtinCaseById(t.id)
+    const format = t.format
+    if (!spec || !format) return probeResult('failed', '未找到内置工具用例定义')
+    const proto = probeProtocolOf(format)
+    const body = proto.baseBody(cfgRef.current!.model, spec.prompt)
+    applyBuiltinTool(body, spec)
+    const log = probeNewLog(probeKey(t.id, format), `${t.name}（${PROBE_FORMAT_LABELS[format]}）`, format)
+    try {
+      const r = await probeRequest(log, format, body)
+      if (!r.ok) {
+        const err = probeExtractError(r.data)
+        const s: ProbeStatus = oracleUnsupportedNativeTool(err) ? 'unsupported' : 'failed'
+        return probeResult(s, err, { format, duration: r.log.duration, usage: r.log.usage, repro: probeReproOf(r.log) })
+      }
+      const check = oracleNativeToolEvidence(r.data, spec)
+      return probeResult(check.passed ? 'passed' : 'failed', check.detail, {
+        format, duration: r.log.duration, usage: r.log.usage, repro: probeReproOf(r.log), checks: [check],
+      })
+    } catch (e: any) {
+      return probeCatchResult(e, format, log)
+    }
+  }
+
   // memo 子组件需要稳定的回调引用：latest-ref 包装，避免给复杂闭包逐一维护依赖数组
   const testConnectionRef = useRef<() => void>(() => {})
   const onTestConnection = useCallback(() => testConnectionRef.current(), [])
@@ -1675,12 +1731,13 @@ function ModelProbeTool() {
       ? await probeBuildCfgFromChannel(ch, model.trim())
       : { baseUrl: '', apiKey: '', model: model.trim(), timeoutMs: 60000, urlOf: { chat: '', responses: '', anthropic: '' } }
     if (ch && !cfg.apiKey.trim()) errs.push('渠道 API Key 解密失败，请重新编辑渠道并保存。')
-    const selectedTests = PROBE_TESTS.filter(t => selectedRef.current[t.id])
+    const catalog = [...PROBE_TESTS, ...matchBuiltinToolCases(model.trim()).map(toNativeProbeTest)]
+    const selectedTests = catalog.filter(t => selectedRef.current[t.id])
     if (!selectedTests.length) errs.push('请至少勾选一个测试项。')
     const paramIds = selectedTests.filter(t => t.kind === 'parameter').map(t => t.id)
     const needFormats = selectedTests.some(t => probeMultiFormatKinds.includes(t.kind))
     const activeFormats = (['chat', 'responses', 'anthropic'] as ProbeFormat[]).filter(f => selectedRef.current[`${f}-basic`])
-    if (needFormats && activeFormats.length === 0) errs.push('参数 / 流式 / Token 稳定性 / 补充场景测试需要至少勾选一个基础格式测试（Chat / Responses / Anthropic）。')
+    if (needFormats && activeFormats.length === 0) errs.push('参数 / 流式 / Token 稳定性 / 补充场景 / 原生工具测试需要至少勾选一个基础格式测试（Chat / Responses / Anthropic）。')
     if (errs.length) { setStartErr(errs.join('\n')); return }
     setStartErr('')
 
@@ -1700,7 +1757,7 @@ function ModelProbeTool() {
       resultsObj[key] = gated
       setTestStatus(key, gated.status, gated.detail)
     }
-    PROBE_TESTS.forEach(t => {
+    catalog.forEach(t => {
       if (!selectedRef.current[t.id]) {
         probeSkipKeysOf(t, activeFormats).forEach(k => {
           resultsObj[k] = probeResult('skipped', '用户未勾选', { format: probeFormatOfKey(k) ?? undefined })
@@ -1720,7 +1777,7 @@ function ModelProbeTool() {
     const startMs = Date.now()
     let parametersDone = false
     try {
-      for (const t of PROBE_TESTS) {
+      for (const t of catalog) {
         if (stopRef.current) break
         if (!selectedRef.current[t.id]) continue
         if (t.kind === 'parameter') {
@@ -1756,7 +1813,7 @@ function ModelProbeTool() {
           }
           continue
         }
-        if (t.kind === 'stream' || t.kind === 'extra') {
+        if (t.kind === 'stream' || t.kind === 'extra' || t.kind === 'native') {
           if (t.format && !activeFormats.includes(t.format)) {
             const key = probeKey(t.id, t.format)
             const out = probeResult('skipped', `对应协议格式未启用（未勾选 ${PROBE_FORMAT_LABELS[t.format]} 基础测试）`, { format: t.format })
@@ -1771,7 +1828,9 @@ function ModelProbeTool() {
             const key = probeKey(t.id, f)
             setTestStatus(key, 'running')
             updateProgress(`${t.name}（${PROBE_FORMAT_LABELS[f]}）`)
-            const out = t.kind === 'stream' ? await runProbeStream(t, f) : await runProbeExtra(t.subtype!, f)
+            const out = t.kind === 'stream' ? await runProbeStream(t, f)
+              : t.kind === 'native' ? await runProbeNative(t)
+              : await runProbeExtra(t.subtype!, f)
             commit(key, out)
             completed++
             updateProgress()
@@ -1796,7 +1855,7 @@ function ModelProbeTool() {
         completed++
         updateProgress(`${t.name}：${PROBE_STATUS_LABELS[out.status]}`)
       }
-      PROBE_TESTS.forEach(t => {
+      catalog.forEach(t => {
         if (!selectedRef.current[t.id]) return
         probeExpectedKeysOf(t, activeFormats).forEach(k => {
           if (!resultsObj[k]) {
@@ -1862,7 +1921,7 @@ function ModelProbeTool() {
   }
   const exportHtml = () => {
     if (!report) return
-    downloadProbeReportHtml(probeSanitizeReport(report), PROBE_TESTS, PROBE_FORMAT_LABELS)
+    downloadProbeReportHtml(probeSanitizeReport(report), probeCatalog(), PROBE_FORMAT_LABELS)
   }
   const exportMd = () => {
     if (!report) return
@@ -1874,7 +1933,7 @@ function ModelProbeTool() {
     if (r.target.overrides.anthropic) md += `- Anthropic Base URL: ${r.target.overrides.anthropic}\n`
     md += `- 模型: ${r.target.model}\n`
     md += `- 通过: ${r.summary.passed} · 失败: ${r.summary.failed} · 不支持: ${r.summary.unsupported} · 跳过: ${r.summary.skipped}\n\n`
-    for (const t of PROBE_TESTS) {
+    for (const t of probeCatalog()) {
       const keys = probeResultKeysOf(t, r.results)
       if (!keys.length) continue
       md += `## ${t.name}\n\n`
@@ -1982,7 +2041,7 @@ function ModelProbeTool() {
 
   const filteredLogs = logFilter === 'all' ? logs : logs.filter(l => l.resultKey === logFilter || l.resultKey.startsWith(logFilter + '@'))
 
-  const groups = [...new Set(PROBE_TESTS.map(t => t.group))]
+  const groups = [...new Set(visibleTests.map(t => t.group))]
   const uiActiveFormats = useMemo(() => (['chat', 'responses', 'anthropic'] as ProbeFormat[]).filter(f => selected[`${f}-basic`]), [selected])
 
   return (
@@ -2029,12 +2088,12 @@ function ModelProbeTool() {
                 <div className="flex items-center justify-between px-6 pt-4 pb-3 flex-shrink-0">
                   <div className="flex items-center gap-3">
                     <h3 className="text-sm font-bold" style={{ color: 'var(--text)' }}>测试用例</h3>
-                    <span className="text-xs" style={{ color: 'var(--t3)' }}>参数、流式、缓存与补充场景只对已勾选的基础格式执行；「纯流式」仅 Chat；「图片输入」默认不勾选</span>
+                    <span className="text-xs" style={{ color: 'var(--t3)' }}>参数、流式、缓存与补充场景只对已勾选的基础格式执行；「纯流式」仅 Chat；「图片输入」与「原生工具调用」默认不勾选（后者可能单独计费）</span>
                   </div>
                   <div className="flex items-center gap-3 text-xs flex-shrink-0">
-                    <button onClick={() => { setSelected(Object.fromEntries(PROBE_TESTS.map(t => [t.id, true]))); }} disabled={running} className="cursor-pointer border-0 outline-none font-semibold" style={{ background: 'transparent', color: 'var(--accent)', fontFamily: 'inherit' }}>全选</button>
+                    <button onClick={() => { setSelected(prev => ({ ...prev, ...Object.fromEntries(visibleTests.map(t => [t.id, true])) })) }} disabled={running} className="cursor-pointer border-0 outline-none font-semibold" style={{ background: 'transparent', color: 'var(--accent)', fontFamily: 'inherit' }}>全选</button>
                     <span style={{ color: 'var(--borderHard)' }}>|</span>
-                    <button onClick={() => { setSelected(Object.fromEntries(PROBE_TESTS.map(t => [t.id, false]))); }} disabled={running} className="cursor-pointer border-0 outline-none font-semibold" style={{ background: 'transparent', color: 'var(--t2)', fontFamily: 'inherit' }}>全不选</button>
+                    <button onClick={() => { setSelected(prev => ({ ...prev, ...Object.fromEntries(visibleTests.map(t => [t.id, false])) })) }} disabled={running} className="cursor-pointer border-0 outline-none font-semibold" style={{ background: 'transparent', color: 'var(--t2)', fontFamily: 'inherit' }}>全不选</button>
                   </div>
                 </div>
 
@@ -2056,7 +2115,7 @@ function ModelProbeTool() {
                     {group === '协议基础' ? (
                       <div>
                         <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 px-6 py-3">
-                          {PROBE_TESTS.filter(t => t.group === group).map(t => (
+                          {visibleTests.filter(t => t.group === group).map(t => (
                             <ProbeFormatCard
                               key={t.id}
                               t={t}
@@ -2072,7 +2131,7 @@ function ModelProbeTool() {
                         )}
                       </div>
                     ) : (
-                      PROBE_TESTS.filter(t => t.group === group).map(t => {
+                      visibleTests.filter(t => t.group === group).map(t => {
                       const st = statusOf(t)
                       const color = st.status === 'failed' ? 'var(--err)' : st.status === 'passed' ? 'var(--ok)' : st.status === 'unsupported' ? 'var(--warn)' : st.status === 'running' ? 'var(--accent)' : 'var(--t3)'
                       const formatDisabled = !!t.format && t.kind !== 'basic' && !uiActiveFormats.includes(t.format)
@@ -2101,7 +2160,7 @@ function ModelProbeTool() {
                   <select value={logFilter} onChange={e => setLogFilter(e.target.value)} className="rounded-lg px-3 py-2 text-sm border-0 outline-none cursor-pointer"
                     style={{ background: 'var(--inputBg)', border: '1px solid var(--inputBorder)', color: 'var(--text)', fontFamily: 'inherit' }}>
                     <option value="all">全部测试项</option>
-                    {PROBE_TESTS.map(t => <option key={t.id} value={t.id}>{t.name}</option>)}
+                    {visibleTests.map(t => <option key={t.id} value={t.id}>{t.name}</option>)}
                   </select>
                   <Btn small variant="soft" onClick={() => { logsRef.current = []; setLogs([]); setOpenLogs({}) }}>清空日志</Btn>
                 </div>
