@@ -1,6 +1,7 @@
 import React, { useState, useCallback, useRef, useEffect, useLayoutEffect, useMemo, useDeferredValue } from 'react'
 import { Btn, Label, Card, Badge, CustomInput, CustomSelect, SearchableSelect, CustomTextarea, Toggle, SegmentedControl, SectionTitle, CopyBtn } from '../shared/ui'
 import { IconVideo } from '../shared/icons'
+import { probeVideoMeta, vidAspectRatio, vidFormatDuration } from '../shared/video-meta'
 
 // ─── Tool: 视频信息检测 ─────────────────────────────────────────────────────────
 
@@ -11,40 +12,6 @@ interface VideoItem {
   ratio: string; mime: string
   url?: string; error?: string
   src?: string // 探测成功后的可播放地址：url 条目为原链接，本地条目为 Blob URL（用于预览播放）
-}
-
-const VID_COMMON_RATIOS: [string, number][] = [
-  ['21:9', 21 / 9], ['32:9', 32 / 9], ['16:9', 16 / 9], ['16:10', 16 / 10],
-  ['5:4', 5 / 4], ['4:3', 4 / 3], ['3:2', 3 / 2], ['1:1', 1],
-  ['9:16', 9 / 16], ['9:18', 0.5], ['3:4', 3 / 4], ['2:3', 2 / 3],
-]
-
-function vidGcd(a: number, b: number): number {
-  a = Math.abs(Math.round(a)); b = Math.abs(Math.round(b))
-  while (b) { [a, b] = [b, a % b] }
-  return a
-}
-
-// 宽高比：先按常见比例就近吸附（容差 0.025），否则用 GCD 化简，化简后仍过大则退化为小数形式
-function vidAspectRatio(w: number, h: number): string {
-  if (!w || !h) return '—'
-  const r = w / h
-  for (const [label, val] of VID_COMMON_RATIOS) {
-    if (Math.abs(r - val) < 0.025) return label
-  }
-  const d = vidGcd(w, h)
-  const sw = w / d, sh = h / d
-  if (sw > 200 || sh > 200) return r.toFixed(2) + ':1'
-  return `${sw}:${sh}`
-}
-
-function vidFormatDuration(seconds: number): string {
-  if (!isFinite(seconds) || isNaN(seconds) || seconds < 0) return '—'
-  const h = Math.floor(seconds / 3600)
-  const m = Math.floor((seconds % 3600) / 60)
-  const s = Math.floor(seconds % 60)
-  const pad = (n: number) => String(n).padStart(2, '0')
-  return h > 0 ? `${h}:${pad(m)}:${pad(s)}` : `${pad(m)}:${pad(s)}`
 }
 
 const VID_MIME_MAP: Record<string, string> = {
@@ -77,38 +44,6 @@ function vidDisplayNameFromUrl(url: string): string {
     const clean = url.split(/[?#]/)[0]
     return decodeURIComponent(clean.split('/').pop() || url) || url
   } catch { return url }
-}
-
-// 探测视频元数据：不挂载 DOM 的 <video preload="metadata">，超时/失败均 reject 并清空 src 释放资源
-function probeVideoMeta(src: string, timeoutMs = 20000): Promise<{ width: number; height: number; duration: number }> {
-  return new Promise((resolve, reject) => {
-    const video = document.createElement('video')
-    video.preload = 'metadata'
-    let settled = false
-    const timer = setTimeout(() => {
-      if (settled) return
-      settled = true
-      video.src = ''
-      reject(new Error(`加载超时（${Math.round(timeoutMs / 1000)}s），请检查链接是否可访问`))
-    }, timeoutMs)
-    video.onloadedmetadata = () => {
-      if (settled) return
-      settled = true
-      clearTimeout(timer)
-      const { videoWidth: width, videoHeight: height, duration } = video
-      video.src = ''
-      if (!width || !height) { reject(new Error('无法读取视频尺寸，文件可能已损坏或格式不受支持')); return }
-      resolve({ width, height, duration })
-    }
-    video.onerror = () => {
-      if (settled) return
-      settled = true
-      clearTimeout(timer)
-      video.src = ''
-      reject(new Error('无法加载视频，链接可能已失效或不允许访问'))
-    }
-    video.src = src
-  })
 }
 
 let vidCounter = 0

@@ -25,6 +25,8 @@ const LEGACY_LOCALSTORAGE_KEYS = [
   'modelprobe-config', 'modelprobe-key', 'modelprobe-channels', 'modelprobe-active-channel',
   // 图片接口测试
   'imgtest-channels', 'imgtest-active', 'imgtest-prices', 'imgtest-rate', 'imgtest-ui', 'imgtest-hideprices',
+  // 视频接口测试（新键，无 localStorage 迁移史；列入清单以便 IndexedDB 不可用时回退写盘后能自愈迁回）
+  'videotest-channels', 'videotest-active', 'videotest-ui',
   // 提示词优化
   'promptopt-channels', 'promptopt-active', 'promptopt-ui',
   // LLM 报告生成

@@ -11,8 +11,9 @@
 const HISTORY_DB_NAME = 'dev-toolkit-history'
 // v2：新增 kv store（工具配置/渠道/提示词库等键值数据，从 localStorage 迁入）
 // v3：新增 cachehit store（LLM 缓存命中率测试的历史报告）
-const HISTORY_DB_VERSION = 3
-const HISTORY_STORES = ['imgtest', 'llmbatch', 'modelprobe', 'cachehit'] as const
+// v4：新增 videotest store（视频接口测试的历史记录）
+const HISTORY_DB_VERSION = 4
+const HISTORY_STORES = ['imgtest', 'llmbatch', 'modelprobe', 'cachehit', 'videotest'] as const
 const KV_STORE = 'kv'
 export type HistoryStore = typeof HISTORY_STORES[number]
 

@@ -57,9 +57,10 @@ export function Badge({ children, color }: { children: React.ReactNode; color?: 
 }
 
 // Fully custom Input — no native appearance
-export function CustomInput({ value, onChange, placeholder, className = '', type = 'text', mono, style }: {
+export function CustomInput({ value, onChange, placeholder, className = '', type = 'text', mono, style, onBlur }: {
   value: string | number; onChange: (v: string) => void; placeholder?: string
   className?: string; type?: string; mono?: boolean; style?: React.CSSProperties
+  onBlur?: () => void
 }) {
   const [focused, setFocused] = useState(false)
   return (
@@ -77,7 +78,7 @@ export function CustomInput({ value, onChange, placeholder, className = '', type
         value={value}
         onChange={e => onChange(e.target.value)}
         onFocus={() => setFocused(true)}
-        onBlur={() => setFocused(false)}
+        onBlur={() => { setFocused(false); onBlur?.() }}
         placeholder={placeholder}
         style={{
           width: '100%',
@@ -180,6 +181,116 @@ export function CustomSelect({ value, onChange, options, className = '' }: {
                 }}
               >
                 <span className="min-w-0 flex-1 truncate" title={o.label}>{o.label}</span>
+                {isActive && <span style={{ color: 'var(--accent)', flexShrink: 0 }}><IconCheck /></span>}
+              </button>
+            )
+          })}
+        </div>
+      )}
+    </div>
+  )
+}
+
+// 可手改的下拉：输入框即当前值，右侧箭头展开预设；输入不必落在选项里
+export function EditableSelect({ value, onChange, options, placeholder, className = '', mono }: {
+  value: string; onChange: (v: string) => void
+  options: { value: string; label: string }[]
+  placeholder?: string; className?: string; mono?: boolean
+}) {
+  const [open, setOpen] = useState(false)
+  const [focused, setFocused] = useState(false)
+  const ref = useRef<HTMLDivElement>(null)
+  const inputRef = useRef<HTMLInputElement>(null)
+  const exact = options.find(o => o.value === value)
+  const q = value.trim().toLowerCase()
+  const filtered = !q || exact
+    ? options
+    : options.filter(o => o.label.toLowerCase().includes(q) || o.value.toLowerCase().includes(q))
+  const monoStack = '"JetBrains Mono", "JetBrainsMono Nerd Font", "SF Mono", "Fira Code", "Fira Mono", "Roboto Mono", "Droid Sans Mono", "Cascadia Code", Consolas, "Courier New", monospace'
+
+  useEffect(() => {
+    if (!open) return
+    const handler = (e: PointerEvent) => {
+      if (ref.current && !ref.current.contains(e.target as Node)) setOpen(false)
+    }
+    window.addEventListener('pointerdown', handler)
+    return () => window.removeEventListener('pointerdown', handler)
+  }, [open])
+
+  return (
+    <div ref={ref} className={`relative w-full min-w-0 ${className}`}>
+      <div
+        className={`ui-control relative flex items-center rounded-xl overflow-hidden ${focused || open ? 'ui-control-focused' : ''}`}
+        style={{
+          background: 'var(--inputBg)',
+          border: `1px solid ${focused || open ? 'var(--accent)' : 'var(--inputBorder)'}`,
+          boxShadow: focused || open ? '0 0 0 3px var(--accentSub)' : 'var(--shadowSm)',
+        }}
+      >
+        <input
+          ref={inputRef}
+          value={value}
+          onChange={e => { onChange(e.target.value); setOpen(true) }}
+          onFocus={() => { setFocused(true); setOpen(true) }}
+          onBlur={() => setFocused(false)}
+          placeholder={placeholder}
+          spellCheck={false}
+          style={{
+            width: '100%',
+            minWidth: 0,
+            flex: 1,
+            padding: '10px 4px 10px 12px',
+            background: 'transparent',
+            border: 'none',
+            outline: 'none',
+            fontSize: 14,
+            color: 'var(--text)',
+            fontFamily: mono ? monoStack : 'inherit',
+          }}
+        />
+        <button
+          type="button"
+          tabIndex={-1}
+          aria-label="打开选项"
+          onClick={() => { setOpen(o => !o); inputRef.current?.focus() }}
+          className="flex-shrink-0 border-0 outline-none cursor-pointer"
+          style={{ background: 'transparent', color: 'var(--t3)', padding: '8px 12px 8px 4px' }}
+        >
+          <IconChevron open={open} />
+        </button>
+      </div>
+
+      {open && (
+        <div
+          className="floating-material absolute left-0 right-0 z-50 rounded-2xl overflow-hidden"
+          style={{
+            top: 'calc(100% + 5px)',
+            background: 'var(--bg)',
+            border: '1px solid var(--border)',
+            boxShadow: 'var(--shadowMd)',
+            padding: '4px',
+          }}
+        >
+          {filtered.length === 0 ? (
+            <div className="px-2.5 py-2 text-xs" style={{ color: 'var(--t3)' }}>无匹配预设，将按输入发送</div>
+          ) : filtered.map((o, idx) => {
+            const isActive = o.value === value
+            return (
+              <button
+                key={o.value}
+                type="button"
+                onClick={() => { onChange(o.value); setOpen(false) }}
+                className={`ui-option ${isActive ? 'ui-option-active' : ''} w-full flex items-center gap-2.5 rounded-xl cursor-pointer border-0 outline-none text-left`}
+                style={{
+                  padding: '8px 10px',
+                  background: isActive ? 'var(--accentSubHard)' : 'transparent',
+                  color: isActive ? 'var(--accent)' : 'var(--text)',
+                  fontSize: 14,
+                  fontFamily: 'inherit',
+                  marginBottom: idx < filtered.length - 1 ? 1 : 0,
+                }}
+              >
+                <span className="min-w-0 flex-1 truncate" title={o.value}>{o.label}</span>
                 {isActive && <span style={{ color: 'var(--accent)', flexShrink: 0 }}><IconCheck /></span>}
               </button>
             )

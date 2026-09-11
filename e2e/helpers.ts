@@ -36,7 +36,7 @@ export async function goto(page: Page, navText: RegExp | string): Promise<void> 
 /**
  * 读取共享历史记录 IndexedDB（dev-toolkit-history）里某个工具的 store 全部记录。
  * LLM 批量测试 / 模型探测 / 图片接口测试的历史记录都已从 localStorage 迁移到这里，
- * store 名分别是 'llmbatch' / 'modelprobe' / 'imgtest'。
+ * store 名分别是 'llmbatch' / 'modelprobe' / 'imgtest' / 'cachehit' / 'videotest'。
  */
 export function readHistoryStore(page: Page, store: string): Promise<any[]> {
   return page.evaluate(store => new Promise<any[]>((resolve, reject) => {

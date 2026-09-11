@@ -9,6 +9,7 @@ const tools = [
   { key: 'llmbatch', label: 'LLM 批量测试', heading: 'LLM 批量测试 & 验真' },
   { key: 'llmreport', label: 'LLM 报告生成', heading: 'LLM 报告生成' },
   { key: 'imgtest', label: '图片接口测试', text: '本次测试配置' },
+  { key: 'videotest', label: '视频接口测试', text: '本次测试配置' },
   { key: 'imganalyze', label: '图片信息识别', heading: '图片信息识别器' },
   { key: 'videoanalyze', label: '视频信息检测', heading: '视频信息检测' },
   // 数据格式工具
@@ -36,7 +37,7 @@ test('根路径渲染首页且不重定向', async ({ page }) => {
   await expect(page).toHaveURL('/?from=legacy#old-route')
   await expect(page).toHaveTitle('Dev Toolkit · 前端工具箱')
   await expect(page.getByRole('heading', { name: /工具集合/ })).toBeVisible()
-  await expect(page.locator('.home-card')).toHaveCount(17)
+  await expect(page.locator('.home-card')).toHaveCount(18)
   await expect(page.locator('aside')).toHaveCount(0)
   const lengths = await page.evaluate(() => ({
     before: (window as Window & { historyLengthBeforeApp?: number }).historyLengthBeforeApp,
@@ -45,7 +46,7 @@ test('根路径渲染首页且不重定向', async ({ page }) => {
   expect(lengths.after).toBe(lengths.before)
 })
 
-test('17 个工具路径均可直接进入并同步标题与侧栏状态', async ({ page }) => {
+test('18 个工具路径均可直接进入并同步标题与侧栏状态', async ({ page }) => {
   for (const tool of tools) {
     await page.goto(`/tools/${tool.key}`)
     await expect(page).toHaveURL(`/tools/${tool.key}`)

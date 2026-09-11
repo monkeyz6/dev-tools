@@ -86,6 +86,14 @@ export function IconImgTest() {
     </svg>
   )
 }
+export function IconVideoTest() {
+  return (
+    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round">
+      <rect x="2" y="6" width="14" height="12" rx="2"/><path d="m22 8-6 4 6 4V8Z"/>
+      <path d="M19.5 3.5 21 2m-1 3.5V6m0-1.5h-1.5"/>
+    </svg>
+  )
+}
 export function IconChevron({ open }: { open: boolean }) {
   return (
     <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"
