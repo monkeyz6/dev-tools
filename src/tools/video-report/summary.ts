@@ -107,7 +107,7 @@ export function videoNegativeProduced(r: Pick<VideoRecord, 'videoUrl'>): boolean
 
 function videoIssueText(r: VideoRecord, firstFail: VideoCheck | null): string | null {
   const negative = r.expect === 'reject' || r.expect === 'unsupported'
-  if (negative && firstFail) return videoTruncate(`${videoNegativeProduced(r) ? '未被拒绝' : '请求异常'}：${String(firstFail.actual)}`)
+  if (negative && firstFail && !r.ok) return videoTruncate(`${videoNegativeProduced(r) ? '未被拒绝' : '请求异常'}：${String(firstFail.actual)}`)
   if (!r.ok) return videoTruncate(r.error || (firstFail ? videoCheckSummaryText(firstFail) : `HTTP ${r.status || 0}`))
   return firstFail ? videoTruncate(videoCheckSummaryText(firstFail)) : null
 }

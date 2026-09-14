@@ -10,6 +10,11 @@ const files = [
   'src/tools/model-probe/oracles.ts',
   'src/tools/model-probe/builtin-tools.ts',
   'src/tools/model-probe/builtin-tools.test.ts',
+  'src/tools/video-report/types.ts',
+  'src/tools/video-report/errors.ts',
+  'src/tools/video-report/errors.test.ts',
+  'src/tools/video-report/retry.ts',
+  'src/tools/video-report/retry.test.ts',
 ]
 const outDir = join(root, '.tmp-unit')
 rmSync(outDir, { recursive: true, force: true })
@@ -31,7 +36,12 @@ for (const rel of files) {
 
 const r = spawnSync(
   process.execPath,
-  ['--test', join(outDir, 'src/tools/model-probe/builtin-tools.test.js')],
+  [
+    '--test',
+    join(outDir, 'src/tools/model-probe/builtin-tools.test.js'),
+    join(outDir, 'src/tools/video-report/errors.test.js'),
+    join(outDir, 'src/tools/video-report/retry.test.js'),
+  ],
   { stdio: 'inherit' },
 )
 process.exit(r.status ?? 1)

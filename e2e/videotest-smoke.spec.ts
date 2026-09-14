@@ -405,6 +405,121 @@ test('轮询中断后可手动重试查询：工作台与历史里同一条记�
   await expect(page.getByRole('cell', { name: '通过' }).first()).toBeVisible()
 })
 
+test('一键重试错误：同批只重跑勾选的请求失败，能查只查', async ({ page }) => {
+  await installVideoMetaStub(page)
+  const posts: Record<string, number> = {}
+  let polls = 0
+  let allowPoll = false
+
+  function caseKey(body: { resolution?: string; content?: { role?: string }[] }) {
+    if (Array.isArray(body.content) && body.content.some(c => c.role === 'first_frame')) return 'frames'
+    if (body.resolution === '480p') return '480p'
+    if (body.resolution === '720p') return '720p'
+    return 't2v'
+  }
+
+  await page.route(url => String(url).includes('/byteplus/api/v3/contents/generations/tasks') && !String(url).match(/tasks\/.+/), async route => {
+    if (route.request().method() === 'OPTIONS') { await route.fulfill({ status: 204, headers: CORS }); return }
+    const body = route.request().postDataJSON()
+    const key = caseKey(body)
+    posts[key] = (posts[key] || 0) + 1
+    if (key === '720p' && posts[key] === 1) {
+      await route.fulfill({
+        status: 400, contentType: 'application/json', headers: CORS,
+        body: JSON.stringify({ error: { code: 'QuotaExceeded', message: 'account balance insufficient' } }),
+      })
+      return
+    }
+    if (key === 'frames') {
+      await route.fulfill({
+        status: 200, contentType: 'application/json', headers: { ...CORS, 'x-oneapi-request-id': 'vid-retry-frames' },
+        body: JSON.stringify({ id: 'task_retry', status: 'queued' }),
+      })
+      return
+    }
+    await route.fulfill({
+      status: 200, contentType: 'application/json', headers: { ...CORS, 'x-oneapi-request-id': `vid-retry-${key}` },
+      body: JSON.stringify({
+        id: `task_${key}`, status: 'succeeded',
+        content: { video_url: `https://cdn.example/${key}.mp4` },
+        ratio: body.ratio, duration: body.duration, seed: body.seed,
+      }),
+    })
+  })
+  await page.route(url => /\/byteplus\/api\/v3\/contents\/generations\/tasks\/task_retry$/.test(String(url)), async route => {
+    if (route.request().method() === 'OPTIONS') { await route.fulfill({ status: 204, headers: CORS }); return }
+    polls += 1
+    if (!allowPoll) { await route.abort('timedout'); return }
+    await route.fulfill({
+      status: 200, contentType: 'application/json', headers: CORS,
+      body: JSON.stringify({ id: 'task_retry', status: 'succeeded', content: { video_url: 'https://cdn.example/frames.mp4' }, ratio: '16:9', duration: 5 }),
+    })
+  })
+  await page.route('**/cdn.example/**', route => route.fulfill({ status: 200, contentType: 'video/mp4', body: 'fake' }))
+
+  await page.goto('/tools/videotest')
+  await page.getByRole('button', { name: '渠道管理', exact: true }).click()
+  await page.getByPlaceholder('例如：主线-oinone').fill('一键重试渠道')
+  await page.getByPlaceholder('https://api.oinone.top').fill('https://mock.example')
+  await page.getByPlaceholder('sk-xxxxxxxx').fill('sk-test-1234567890')
+  await page.getByRole('button', { name: '保存渠道' }).click()
+  await page.getByRole('button', { name: '批量测试', exact: true }).click()
+
+  const selectAll = page.locator('label:has-text("全选") input[type="checkbox"]')
+  if (!await selectAll.isChecked()) await selectAll.check()
+  await selectAll.uncheck()
+  for (const name of ['文生 · 仅必填', '480p · 9:16 · 4s', '720p · 21:9 · 5s', '首尾帧']) {
+    await page.locator(`[data-case-name="${name}"] input[type="checkbox"]`).check()
+  }
+  await page.getByRole('button', { name: '▶ 运行选中' }).click()
+  await expect(page.getByText('批量测试结束')).toBeVisible({ timeout: 30000 })
+
+  await expect(page.locator('[data-case-name="文生 · 仅必填"]').getByText(/✓ 通过/)).toBeVisible()
+  await expect(page.locator('[data-case-name="480p · 9:16 · 4s"]').getByText(/✕ .*通过/)).toBeVisible()
+  await expect(page.locator('[data-case-name="720p · 21:9 · 5s"]').getByText('! 请求失败')).toBeVisible()
+  const framesBox = page.locator('[data-case-name="首尾帧"]')
+  await expect(framesBox.getByText('! 请求失败')).toBeVisible()
+  await expect(framesBox.getByRole('button', { name: '↻ 重试查询' })).toBeVisible()
+
+  const histBefore = await readHistoryStore(page, 'videotest')
+  expect(histBefore).toHaveLength(4)
+  const runIds = new Set(histBefore.map((r: { runId: string }) => r.runId))
+  expect(runIds.size).toBe(1)
+  const idOf = (name: string) => histBefore.find((r: { caseName: string }) => r.caseName === name).id
+  const passId = idOf('文生 · 仅必填')
+  const failId = idOf('480p · 9:16 · 4s')
+  const quotaId = idOf('720p · 21:9 · 5s')
+  const pollId = idOf('首尾帧')
+  const runId = histBefore[0].runId
+  const postsBefore = { ...posts }
+  const pollsBefore = polls
+
+  allowPoll = true
+  await page.getByRole('button', { name: '↻ 重试错误' }).click()
+  await expect(page.getByText('错误重试结束')).toBeVisible({ timeout: 30000 })
+
+  await expect(page.locator('[data-case-name="文生 · 仅必填"]').getByText(/✓ 通过/)).toBeVisible()
+  await expect(page.locator('[data-case-name="480p · 9:16 · 4s"]').getByText(/✕ .*通过/)).toBeVisible()
+  await expect(page.locator('[data-case-name="720p · 21:9 · 5s"]').getByText('! 请求失败')).toHaveCount(0)
+  await expect(framesBox.getByText(/✓ 通过/)).toBeVisible()
+  await expect(framesBox.getByRole('button', { name: '↻ 重试查询' })).toHaveCount(0)
+
+  expect(posts.t2v).toBe(postsBefore.t2v)
+  expect(posts['480p']).toBe(postsBefore['480p'])
+  expect(posts['720p']).toBe(postsBefore['720p'] + 1)
+  expect(posts.frames).toBe(postsBefore.frames)
+  expect(polls).toBeGreaterThan(pollsBefore)
+
+  const histAfter = await readHistoryStore(page, 'videotest')
+  expect(histAfter).toHaveLength(4)
+  expect(new Set(histAfter.map((r: { runId: string }) => r.runId))).toEqual(new Set([runId]))
+  expect(histAfter.find((r: { caseName: string }) => r.caseName === '文生 · 仅必填').id).toBe(passId)
+  expect(histAfter.find((r: { caseName: string }) => r.caseName === '480p · 9:16 · 4s').id).toBe(failId)
+  expect(histAfter.find((r: { caseName: string }) => r.caseName === '720p · 21:9 · 5s').id).not.toBe(quotaId)
+  expect(histAfter.find((r: { caseName: string }) => r.caseName === '首尾帧').id).toBe(pollId)
+  expect(histAfter.find((r: { caseName: string }) => r.caseName === '首尾帧').pollLog.some((t: { status: string }) => String(t.status).includes('手动重试查询'))).toBe(true)
+})
+
 function writeKv(page: import('@playwright/test').Page, key: string, value: string) {
   return page.evaluate(([key, value]) => new Promise<void>((resolve, reject) => {
     const req = indexedDB.open('dev-toolkit-history')

@@ -8,7 +8,9 @@ import { encryptLlmApiKey, decryptLlmApiKey } from '../shared/api-key-crypto'
 import { probeVideoMeta, vidAspectRatio, vidCheckRatio, vidCheckResolution, vidFormatDuration } from '../shared/video-meta'
 import { VIDEO_CASE_DEFS, VIDEO_MATERIAL_DEFS, VIDEO_RESOLUTION_HEIGHT, videoModelMaxResolution, videoModelMaxResolutionLabel, videoFmtTime } from './video-report/types'
 import type { VideoCaseDef, VideoCaseKind, VideoCheck, VideoExpect, VideoRecord } from './video-report/types'
+import { formatVideoTaskError, parseVideoTaskError, videoBuildErrorBodyChecks, videoShouldCheckErrorBody } from './video-report/errors'
 import { videoClassify, videoVerdict } from './video-report/summary'
+import { videoCanRequery, videoRetryAction, videoRetrySort, videoRetryTargets } from './video-report/retry'
 import { videoGroupBatches, videoTrimByBatch } from './video-report/batches'
 import type { VideoBatch } from './video-report/batches'
 import VideoReportView from './video-report/VideoReportView'
@@ -195,10 +197,7 @@ function videoOpenApiError(json: any, httpStatus: number, text: string): string 
 }
 
 function videoTaskError(json: any): string | null {
-  const err = json?.error || json?.data?.error
-  if (!err) return null
-  if (typeof err === 'string') return err
-  return `${err.code || ''} ${err.message || JSON.stringify(err)}`.trim()
+  return formatVideoTaskError(parseVideoTaskError(json).detail)
 }
 
 function videoExtractTaskId(json: any): string | null {
@@ -375,18 +374,6 @@ function videoCaseStatus(rec: VideoRecord): 'pass' | 'fail' | 'error' {
   return status
 }
 
-/**
- * 能否手动重试查询：拿到了任务 id、不是素材类记录，且任务还没到终态
- * （succeeded 但没拿到 video_url 也算——可能是响应被截断，再查一次）。
- */
-function videoCanRequery(rec: Pick<VideoRecord, 'taskId' | 'taskStatus' | 'kind' | 'videoUrl'>): boolean {
-  if (!rec.taskId || rec.kind === 'material-group' || rec.kind === 'material-assets') return false
-  const st = rec.taskStatus || ''
-  if (videoTaskFailed(st)) return false
-  if (videoTaskSucceeded(st) && rec.videoUrl) return false
-  return true
-}
-
 function videoIsNegative(rec: Pick<VideoRecord, 'expect'>): boolean {
   return rec.expect === 'reject' || rec.expect === 'unsupported'
 }
@@ -395,12 +382,14 @@ function videoIsNegative(rec: Pick<VideoRecord, 'expect'>): boolean {
 function videoNegativeOutcome(rec: VideoRecord): { rejected: boolean; produced: boolean; actual: string } {
   const produced = videoTaskSucceeded(rec.taskStatus || '') && !!rec.videoUrl
   const http4xx = rec.status >= 400 && rec.status < 500
+  // 提交 4xx 不会写入 taskId；查询 4xx 已有 taskId，只是轮询终态，不能算模型拒绝
+  const submitRejected = http4xx && !rec.taskId
   const taskFailed = videoTaskFailed(rec.taskStatus || '')
   const mediaFetchErr = videoIsMediaFetchError(rec.error)
-  const rejected = !produced && !mediaFetchErr && (http4xx || taskFailed)
+  const rejected = !produced && !mediaFetchErr && (submitRejected || taskFailed)
   const actual = produced ? '任务成功并出片'
     : mediaFetchErr ? `素材拉取失败（网关取不到图，不是模型拒绝，请换左栏「敏感人像」链接）· ${rec.error}`
-    : http4xx ? `HTTP ${rec.status} 已拒绝${rec.error ? ' · ' + rec.error : ''}`
+    : submitRejected ? `HTTP ${rec.status} 已拒绝${rec.error ? ' · ' + rec.error : ''}`
     : taskFailed ? `任务 ${rec.taskStatus}${rec.error ? ' · ' + rec.error : ''}`
     : rec.status ? `HTTP ${rec.status}${rec.taskStatus ? ' · 任务 ' + rec.taskStatus : ''}${rec.error ? ' · ' + rec.error : ''}`
     : (rec.error || '无响应')
@@ -416,16 +405,23 @@ function videoBuildChecks(rec: VideoRecord): VideoCheck[] {
     const out = videoNegativeOutcome(rec)
     if (rec.expect === 'reject') {
       checks.push({ name: '预期拒绝', target: '4xx 或任务 failed', actual: out.actual, pass: out.rejected })
+      if (videoShouldCheckErrorBody(rec)) checks.push(...videoBuildErrorBodyChecks(rec))
       return checks
     }
     if (!out.produced) {
       checks.push({ name: '预期不支持', target: `4xx 或任务 failed（能力表：最高 ${videoModelMaxResolutionLabel(rec.model)}）`, actual: out.actual, pass: out.rejected })
+      if (videoShouldCheckErrorBody(rec)) checks.push(...videoBuildErrorBodyChecks(rec))
       return checks
     }
     checks.push({ name: '预期不支持', target: `能力表：最高 ${videoModelMaxResolutionLabel(rec.model)}`, actual: '任务成功并出片 · 能力表可能过期，请核对', pass: true, info: true })
   }
 
   checks.push({ name: rec.kind.startsWith('material') ? 'OpenAPI 请求成功' : '请求成功', target: 'HTTP 2xx', actual: rec.status ? `HTTP ${rec.status}` : '无响应', pass: httpOk })
+
+  if (!negative && videoShouldCheckErrorBody(rec)) {
+    checks.push(...videoBuildErrorBodyChecks(rec))
+    if (rec.status >= 400) return checks
+  }
 
   for (const skip of rec.skippedRoles || []) {
     checks.push({ name: '素材角色', target: '已提供', actual: skip, pass: true, info: true })
@@ -1110,6 +1106,7 @@ function VideoApiTestTool() {
     rec.reqId = rec.respHeaders['x-oneapi-request-id'] || rec.respHeaders['x-request-id'] || ''
     rec.rawSnippet = videoFormatBody(text)
     const json = videoParseJson(text)
+    rec.errorDetail = parseVideoTaskError(json).detail
     const submitErr = videoOpenApiError(json, resp.status, text) || videoTaskError(json)
     const taskId = videoExtractTaskId(json)
     if (resp.status >= 400 || !taskId) {
@@ -1163,6 +1160,7 @@ function VideoApiTestTool() {
       lastJson = videoParseJson(qt)
       rec.taskStatus = videoExtractStatus(lastJson) || rec.taskStatus
       rec.pollLog.push({ at: Date.now(), status: rec.taskStatus || '', progress: lastJson?.progress || lastJson?.data?.progress })
+      if (q.status >= 400) break
     }
     return { lastJson, stopped: false }
   }
@@ -1181,9 +1179,10 @@ function VideoApiTestTool() {
 
     const failed = videoTaskFailed(rec.taskStatus || '')
     const succeeded = videoTaskSucceeded(rec.taskStatus || '')
+    rec.errorDetail = parseVideoTaskError(lastJson).detail
     if (failed || !succeeded || !rec.videoUrl) {
       rec.ok = false
-      rec.error = videoTaskError(lastJson) || (failed ? '任务失败' : succeeded ? '未返回 video_url' : `轮询超时（${VIDEO_POLL_MAX_MS / 60000} 分钟）任务仍未结束，可稍后「重试查询」`)
+      rec.error = videoTaskError(lastJson) || videoOpenApiError(lastJson, rec.status, rec.rawSnippet) || (failed ? '任务失败' : succeeded ? '未返回 video_url' : `轮询超时（${VIDEO_POLL_MAX_MS / 60000} 分钟）任务仍未结束，可稍后「重试查询」`)
       rec.checks = videoBuildChecks(rec)
       return
     }
@@ -1320,10 +1319,7 @@ function VideoApiTestTool() {
 
   const runList = async (list: VideoCase[]) => {
     if (running) { toastShow('已有运行中'); return }
-    const ordered = [...list].sort((a, b) => {
-      const rank = (c: VideoCase) => c.kind === 'material-group' ? 0 : c.kind === 'material-assets' ? 1 : c.def.expect === 'reject' ? 3 : 2
-      return rank(a) - rank(b)
-    })
+    const ordered = videoRetrySort(list)
     setRunning(true)
     currentRunIdRef.current = videoUid()
     assetsRef.current = { groupId: null }
@@ -1339,6 +1335,34 @@ function VideoApiTestTool() {
       stopRef.current = false
     }
     toastShow('批量测试结束')
+  }
+
+  /** 只重跑已勾选的请求失败用例，留在当前批：能查的只查，其余整单重提 */
+  const runErrorRetries = async () => {
+    if (running) { toastShow('已有运行中'); return }
+    const list = videoRetryTargets(casesRef.current)
+    if (!list.length) { toastShow('请先勾选请求失败的用例'); return }
+    setRunning(true)
+    stopRef.current = false
+    try {
+      for (const c of list) {
+        if (stopRef.current) break
+        try {
+          if (c.result && videoRetryAction(c.result) === 'requery') await requeryRecord(c.result)
+          else await runCase(c)
+        } catch { /* continue */ }
+      }
+    } finally {
+      setRunning(false)
+      stopRef.current = false
+    }
+    toastShow('错误重试结束')
+  }
+
+  const requestStop = () => {
+    stopRef.current = true
+    for (const id of requeryingRef.current) requeryCancelRef.current.add(id)
+    toastShow('将在当前用例结束后停止')
   }
 
   const selCases = cases.filter(c => c.selected)
@@ -1651,13 +1675,14 @@ function VideoApiTestTool() {
           </label>
           <Btn small variant="primary" disabled={running} onClick={() => runList(cases.slice())}>▶ 全部运行</Btn>
           <Btn small variant="soft" disabled={running} onClick={() => { if (!selCases.length) { toastShow('请先选择用例'); return } runList(selCases.slice()) }}>▶ 运行选中</Btn>
+          <Btn small variant="soft" disabled={running} onClick={() => runErrorRetries()}>↻ 重试错误</Btn>
           <Btn small variant="soft" disabled={running} onClick={async () => {
             const next = cases.find(c => c.selected && c.status === 'idle')
             if (!next) { toastShow('没有更多待运行的选中用例'); return }
             await runCase(next)
           }}>→ 逐个：运行下一个</Btn>
           <Btn small variant="ghost" disabled={running} onClick={resetRun}>↺ 重置状态</Btn>
-          <Btn small variant="danger" disabled={!running} onClick={() => { stopRef.current = true; toastShow('将在当前用例结束后停止') }}>■ 停止</Btn>
+          <Btn small variant="danger" disabled={!running} onClick={requestStop}>■ 停止</Btn>
           <Btn small variant="soft" disabled={exportBusy || !cases.some(c => c.selected && c.result)}
             title="只导出已勾选且有结果的用例"
             onClick={() => setExportJob(cases.filter(c => c.selected && c.result).map(c => c.result!))}>导出 HTML</Btn>

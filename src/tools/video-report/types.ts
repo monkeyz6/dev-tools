@@ -122,6 +122,12 @@ export interface VideoPollTick {
   progress?: string
 }
 
+export interface VideoErrorDetail {
+  code?: string
+  message?: string
+  type?: string
+}
+
 export interface VideoRecord {
   id: string
   runId?: string
@@ -144,6 +150,8 @@ export interface VideoRecord {
   sentPreview: string
   ok: boolean
   error: string | null
+  /** 查询/提交失败体拆出的 error.code / message / type */
+  errorDetail?: VideoErrorDetail | null
   rawSnippet: string
   responseBodyComplete?: boolean
   taskId: string | null
