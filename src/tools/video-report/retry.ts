@@ -11,11 +11,11 @@ export type VideoRetryCase = {
 }
 
 function videoTaskSucceeded(st: string) {
-  return st === 'succeeded' || st === 'success'
+  return st === 'succeeded' || st === 'success' || st === 'completed'
 }
 
 function videoTaskFailed(st: string) {
-  return st === 'failed' || st === 'failure'
+  return st === 'failed' || st === 'failure' || st === 'cancelled'
 }
 
 /**
@@ -28,6 +28,32 @@ export function videoCanRequery(rec: Pick<VideoRecord, 'taskId' | 'taskStatus' |
   if (videoTaskFailed(st)) return false
   if (videoTaskSucceeded(st) && rec.videoUrl) return false
   return true
+}
+
+export function videoReprobeSrc(rec: Pick<VideoRecord, 'videoUrl' | 'targets'>): string | null {
+  const uri = typeof rec.targets?.outputUri === 'string' ? rec.targets.outputUri : ''
+  if (/^https?:\/\//i.test(uri)) return uri
+  if (rec.videoUrl && /^https?:\/\//i.test(rec.videoUrl)) return rec.videoUrl
+  if (rec.videoUrl && (rec.videoUrl.startsWith('blob:') || rec.videoUrl.startsWith('data:'))) return rec.videoUrl
+  return null
+}
+
+export function videoHasUsableProbe(rec: Pick<VideoRecord, 'probe'>): boolean {
+  return !!(rec.probe && rec.probe.w && rec.probe.h && rec.probe.duration > 0)
+}
+
+/**
+ * 能否重新识别成片：有地址或已有元数据，且还没读到宽高、或校验未通过。
+ * 只重探 / 重算校验，不重提任务。已通过的不再打扰。
+ */
+export function videoCanReprobe(rec: Pick<VideoRecord, 'videoUrl' | 'probe' | 'kind' | 'targets' | 'ok' | 'checks'>): boolean {
+  if (rec.kind === 'material-group' || rec.kind === 'material-assets') return false
+  const src = videoReprobeSrc(rec)
+  const probed = videoHasUsableProbe(rec)
+  if (!src && !probed) return false
+  if (!probed) return true
+  if (rec.ok === false) return true
+  return (rec.checks || []).some(c => !c.info && !c.pass)
 }
 
 export function videoRetryAction(rec: Pick<VideoRecord, 'taskId' | 'taskStatus' | 'kind' | 'videoUrl'> | null | undefined): VideoRetryAction {

@@ -11,7 +11,7 @@ interface VideoItem {
   width: number; height: number; duration: number
   ratio: string; mime: string
   url?: string; error?: string
-  src?: string // 探测成功后的可播放地址：url 条目为原链接，本地条目为 Blob URL（用于预览播放）
+  src?: string // 探测成功后的可播放地址：直链能播用原 URL，否则是 fetch 兜底的 Blob URL
 }
 
 const VID_MIME_MAP: Record<string, string> = {
@@ -91,7 +91,7 @@ function VideoAnalyzerTool() {
   const removeItem = useCallback((id: string) => {
     setItems(prev => {
       const target = prev.find(i => i.id === id)
-      if (target?.source === 'local' && target.src) {
+      if (target?.src?.startsWith('blob:')) {
         URL.revokeObjectURL(target.src)
         localBlobUrlsRef.current.delete(target.src)
       }
@@ -138,7 +138,10 @@ function VideoAnalyzerTool() {
       const url = urls[i]
       tasks.push(
         probeVideoMeta(url)
-          .then(meta => updateItem(item.id, { status: 'done', width: meta.width, height: meta.height, duration: meta.duration, ratio: vidAspectRatio(meta.width, meta.height), src: url }))
+          .then(meta => {
+            if (meta.playUrl.startsWith('blob:')) localBlobUrlsRef.current.add(meta.playUrl)
+            updateItem(item.id, { status: 'done', width: meta.width, height: meta.height, duration: meta.duration, ratio: vidAspectRatio(meta.width, meta.height), src: meta.playUrl })
+          })
           .catch((err: Error) => updateItem(item.id, { status: 'error', error: err.message || '检测失败' }))
       )
     })
@@ -247,7 +250,7 @@ function VideoAnalyzerTool() {
                             title="点击放大观看"
                           >
                             <video
-                              src={it.src} muted playsInline preload="metadata"
+                              src={it.src} muted playsInline preload="metadata" referrerPolicy="no-referrer"
                               className="w-full h-full object-cover pointer-events-none"
                               onLoadedMetadata={e => { try { e.currentTarget.currentTime = Math.min(0.1, (e.currentTarget.duration || 1) / 2) } catch { /* ignore */ } }}
                             />
@@ -338,7 +341,7 @@ function VideoAnalyzerTool() {
             </div>
             <div className="rounded-xl overflow-hidden flex items-center justify-center min-h-0" style={{ border: '1px solid var(--border)', background: '#000' }}>
               {previewItem.src && (
-                <video key={previewItem.id} src={previewItem.src} controls autoPlay className="max-w-full max-h-[72vh]" />
+                <video key={previewItem.id} src={previewItem.src} controls autoPlay referrerPolicy="no-referrer" className="max-w-full max-h-[72vh]" />
               )}
             </div>
           </div>

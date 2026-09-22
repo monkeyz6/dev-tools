@@ -1,6 +1,6 @@
 import React, { useMemo } from 'react'
 import type { VideoRecord } from './types'
-import { videoFmtTime } from './types'
+import { VIDEO_API_TYPE_LABEL, videoApiTypeOf, videoFmtTime } from './types'
 import { videoBuildReportSummary } from './summary'
 import type { VideoSupportLevel } from './summary'
 
@@ -92,7 +92,7 @@ function VideoReportView({ records, renderDetail, rootRef }: {
             <div className="text-[11px] font-semibold" style={{ color: 'var(--accent)', letterSpacing: '0.14em' }}>视频接口测试报告</div>
             <div className="flex items-center gap-2.5 flex-wrap mt-2.5">
               <h3 className="text-[26px] font-bold break-words" style={{ color: 'var(--text)', letterSpacing: '-0.021em', lineHeight: 1.15 }}>
-                Seedance 火山原生能力核查
+                {VIDEO_API_TYPE_LABEL[videoApiTypeOf(records[0]?.apiType)]}能力核查
               </h3>
               <Pill level={overall.level}>{overall.verdictText}</Pill>
             </div>

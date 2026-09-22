@@ -10,11 +10,16 @@ const files = [
   'src/tools/model-probe/oracles.ts',
   'src/tools/model-probe/builtin-tools.ts',
   'src/tools/model-probe/builtin-tools.test.ts',
+  'src/tools/model-probe/protocol.test.ts',
   'src/tools/video-report/types.ts',
   'src/tools/video-report/errors.ts',
   'src/tools/video-report/errors.test.ts',
   'src/tools/video-report/retry.ts',
   'src/tools/video-report/retry.test.ts',
+  'src/tools/video-report/google-omni.ts',
+  'src/tools/video-report/google-omni.test.ts',
+  'src/shared/video-meta.ts',
+  'src/shared/video-meta.test.ts',
 ]
 const outDir = join(root, '.tmp-unit')
 rmSync(outDir, { recursive: true, force: true })
@@ -39,8 +44,11 @@ const r = spawnSync(
   [
     '--test',
     join(outDir, 'src/tools/model-probe/builtin-tools.test.js'),
+    join(outDir, 'src/tools/model-probe/protocol.test.js'),
     join(outDir, 'src/tools/video-report/errors.test.js'),
     join(outDir, 'src/tools/video-report/retry.test.js'),
+    join(outDir, 'src/tools/video-report/google-omni.test.js'),
+    join(outDir, 'src/shared/video-meta.test.js'),
   ],
   { stdio: 'inherit' },
 )

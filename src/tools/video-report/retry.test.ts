@@ -1,6 +1,6 @@
 import { describe, it } from 'node:test'
 import assert from 'node:assert/strict'
-import { videoCanRequery, videoRetryAction, videoRetrySort, videoRetryTargets } from './retry.ts'
+import { videoCanReprobe, videoCanRequery, videoReprobeSrc, videoRetryAction, videoRetrySort, videoRetryTargets } from './retry.ts'
 import type { VideoRetryCase } from './retry.ts'
 import type { VideoRecord } from './types.ts'
 
@@ -33,12 +33,48 @@ describe('videoCanRequery', () => {
   it('任务 failed 不能查，succeeded 且已有 video_url 也不能查', () => {
     assert.equal(videoCanRequery(rec({ taskId: 't1', taskStatus: 'failed' })), false)
     assert.equal(videoCanRequery(rec({ taskId: 't1', taskStatus: 'succeeded', videoUrl: 'https://cdn.example/v.mp4' })), false)
+    assert.equal(videoCanRequery(rec({ taskId: 'v1_1', taskStatus: 'completed', videoUrl: 'https://cdn.example/v.mp4' })), false)
+    assert.equal(videoCanRequery(rec({ taskId: 'v1_1', taskStatus: 'cancelled' })), false)
   })
 
   it('有 taskId 且未终态，或 succeeded 但缺 video_url，可以查', () => {
     assert.equal(videoCanRequery(rec({ taskId: 't1', taskStatus: 'queued' })), true)
     assert.equal(videoCanRequery(rec({ taskId: 't1', taskStatus: 'running' })), true)
     assert.equal(videoCanRequery(rec({ taskId: 't1', taskStatus: 'succeeded' })), true)
+  })
+})
+
+describe('videoReprobeSrc', () => {
+  it('优先 http outputUri，其次 http / blob videoUrl', () => {
+    assert.equal(videoReprobeSrc({ videoUrl: 'blob:http://localhost/1', targets: { outputUri: 'https://cdn.example/v.mp4' } }), 'https://cdn.example/v.mp4')
+    assert.equal(videoReprobeSrc({ videoUrl: 'https://cdn.example/v.mp4', targets: {} }), 'https://cdn.example/v.mp4')
+    assert.equal(videoReprobeSrc({ videoUrl: 'blob:http://localhost/1', targets: {} }), 'blob:http://localhost/1')
+    assert.equal(videoReprobeSrc({ videoUrl: null, targets: {} }), null)
+  })
+})
+
+describe('videoCanReprobe', () => {
+  const probe = { w: 1080, h: 1080, duration: 5 }
+  it('没读到元数据可以再探，素材类或已通过不能', () => {
+    assert.equal(videoCanReprobe({ kind: 't2v', videoUrl: 'https://cdn.example/v.mp4', probe: null, targets: {}, ok: true, checks: [] }), true)
+    assert.equal(videoCanReprobe({ kind: 't2v', videoUrl: 'blob:http://localhost/1', probe: null, targets: {}, ok: true, checks: [] }), true)
+    assert.equal(videoCanReprobe({ kind: 't2v', videoUrl: 'blob:http://localhost/1', probe: null, targets: { outputUri: 'https://cdn.example/v.mp4' }, ok: true, checks: [] }), true)
+    assert.equal(videoCanReprobe({ kind: 't2v', videoUrl: 'https://cdn.example/v.mp4', probe, targets: {}, ok: true, checks: [] }), false)
+    assert.equal(videoCanReprobe({ kind: 't2v', videoUrl: 'https://cdn.example/v.mp4', probe, targets: {}, ok: true, checks: [{ name: '分辨率', target: '1080p', actual: '最近 720p', pass: true }] }), false)
+    assert.equal(videoCanReprobe({ kind: 'material-group', videoUrl: 'https://cdn.example/v.mp4', probe: null, targets: {}, ok: true, checks: [] }), false)
+    assert.equal(videoCanReprobe({ kind: 't2v', videoUrl: null, probe: null, targets: {}, ok: true, checks: [] }), false)
+  })
+
+  it('历史未通过（已有元数据但校验红）也可以重新识别', () => {
+    assert.equal(videoCanReprobe({
+      kind: 't2v', videoUrl: 'https://cdn.example/v.mp4', probe, targets: {}, ok: true,
+      checks: [{ name: '分辨率', target: '1080p', actual: '最近 720p', pass: false }],
+    }), true)
+    assert.equal(videoCanReprobe({
+      kind: 't2v', videoUrl: null, probe, targets: {}, ok: true,
+      checks: [{ name: '分辨率', target: '1080p', actual: '最近 720p', pass: false }],
+    }), true)
+    assert.equal(videoCanReprobe({ kind: 't2v', videoUrl: 'https://cdn.example/v.mp4', probe, targets: {}, ok: false, checks: [] }), true)
   })
 })
 

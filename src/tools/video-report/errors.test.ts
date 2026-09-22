@@ -96,6 +96,15 @@ describe('videoExpectedErrorFamily / videoShouldCheckErrorBody', () => {
     assert.equal(videoShouldCheckErrorBody({ status: 400, taskStatus: '', kind: 'material-group' }), false)
     assert.equal(videoShouldCheckErrorBody({ status: 400, taskStatus: '', kind: 'material-assets' }), false)
     assert.equal(videoShouldCheckErrorBody({ status: 400, taskStatus: '', kind: 't2v' }), true)
+    assert.equal(videoShouldCheckErrorBody({ status: 400, taskStatus: 'failed', apiType: 'google-omni' }), false)
+  })
+
+  it('读 Google error.message / status', () => {
+    const r = parseVideoTaskError({ error: { message: 'Invalid aspect ratio', status: 'INVALID_ARGUMENT', code: 400 } })
+    assert.equal(r.shape, 'object')
+    assert.equal(r.detail?.message, 'Invalid aspect ratio')
+    assert.equal(r.detail?.type, 'INVALID_ARGUMENT')
+    assert.equal(r.detail?.code, '400')
   })
 })
 

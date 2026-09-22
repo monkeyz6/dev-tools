@@ -1,5 +1,5 @@
 import { test, expect } from '@playwright/test'
-import { readHistoryStore, readKv, inputByLabel, selectOption } from './helpers'
+import { readHistoryStore, readKv, writeHistoryStore, inputByLabel, selectOption } from './helpers'
 import { readFileSync } from 'node:fs'
 
 const CORS = {
@@ -580,4 +580,55 @@ test('旧版默认素材链接自动迁到官方示例；素材拉取失败不�
   await expect(faceCase.getByText('! 请求异常')).toBeVisible()
   await expect(faceCase.getByText('✓ 已拒绝')).toHaveCount(0)
   await expect(faceCase.locator('tr').filter({ hasText: '预期拒绝' })).toContainText('素材拉取失败')
+})
+
+test('历史未通过可重新识别：按已有元数据重算校验，不重提任务', async ({ page }) => {
+  await page.goto('/tools/videotest')
+  await expect(page.getByText('本次测试配置')).toBeVisible()
+  await writeHistoryStore(page, 'videotest', {
+    id: 'hist-1080-fail',
+    runId: 'run-reprobe',
+    time: Date.now(),
+    caseName: '1080p · 1:1 · 5s',
+    caseDesc: '旧面积档把 1080×1080 判成 720p',
+    channelName: '历史渠道',
+    model: 'doubao-seedance-2-0',
+    prompt: 'x',
+    apiType: 'seedance',
+    kind: 't2v',
+    caseId: 'res-1080p',
+    expect: 'success',
+    testMaterials: false,
+    targets: { resolution: '1080p', ratio: '1:1', duration: 5, generate_audio: true },
+    skippedRoles: [],
+    status: 200,
+    respHeaders: {},
+    reqId: '',
+    sentPreview: '',
+    ok: true,
+    error: null,
+    rawSnippet: '',
+    taskId: 'task_old_1080',
+    taskStatus: 'succeeded',
+    pollCount: 1,
+    videoUrl: 'https://ark-acg-cn-beijing.tos-cn-beijing.volces.com/expired.mp4?X-Tos-Algorithm=TOS4',
+    probe: { w: 1080, h: 1080, duration: 5.04, hasAudio: true },
+    usage: null,
+    durationMs: 1000,
+    checks: [{ name: '分辨率', target: '1080p（面积档 ±15%）', actual: '1080×1080 → 最近 720p（偏差 43.8%）', pass: false }],
+    pollLog: [],
+  })
+  await page.reload()
+  await page.getByRole('button', { name: /^历史记录/ }).click()
+  await expect(page.getByTestId('videotest-batch')).toBeVisible()
+  const row = page.locator('tr').filter({ hasText: '1080p · 1:1 · 5s' })
+  await expect(row.getByText('未通过')).toBeVisible()
+  await expect(page.getByRole('button', { name: /重新识别未通过/ })).toBeVisible()
+  await row.getByRole('button', { name: '↻ 重新识别', exact: true }).click()
+  await expect(row.getByText('通过')).toBeVisible({ timeout: 10000 })
+  await expect(row.getByRole('button', { name: '↻ 重新识别', exact: true })).toHaveCount(0)
+  const hist = await readHistoryStore(page, 'videotest')
+  const rec = hist.find((r: { id: string }) => r.id === 'hist-1080-fail')
+  expect(rec.checks.find((c: { name: string }) => c.name === '分辨率').pass).toBe(true)
+  expect(rec.pollLog.some((t: { status: string }) => String(t.status).includes('重新识别视频信息'))).toBe(true)
 })

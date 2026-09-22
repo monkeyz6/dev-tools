@@ -40,9 +40,11 @@ export function parseVideoTaskError(json: any): VideoErrorParse {
     return { shape: 'string', detail: message ? { message } : null }
   }
   if (typeof err !== 'object') return { shape: 'missing', detail: null }
-  const code = videoNonEmptyString((err as { code?: unknown }).code)
+  const rawCode = (err as { code?: unknown }).code
+  const code = videoNonEmptyString(typeof rawCode === 'number' ? String(rawCode) : rawCode)
   const message = videoNonEmptyString((err as { message?: unknown }).message)
   const type = videoNonEmptyString((err as { type?: unknown }).type)
+    || videoNonEmptyString((err as { status?: unknown }).status)
   return { shape: 'object', detail: { code, message, type } }
 }
 
@@ -76,7 +78,8 @@ export function videoTaskFailedStatus(st: string | null | undefined): boolean {
 }
 
 /** 生成任务 failed，或查询/提交 HTTP ≥400 时才做错误体校验；素材 OpenAPI 错误形态不同，不套用 */
-export function videoShouldCheckErrorBody(rec: Pick<VideoRecord, 'status' | 'taskStatus'> & { kind?: VideoRecord['kind'] }): boolean {
+export function videoShouldCheckErrorBody(rec: Pick<VideoRecord, 'status' | 'taskStatus'> & { kind?: VideoRecord['kind']; apiType?: VideoRecord['apiType'] }): boolean {
+  if (rec.apiType === 'google-omni') return false
   if (rec.kind === 'material-group' || rec.kind === 'material-assets') return false
   return videoTaskFailedStatus(rec.taskStatus) || rec.status >= 400
 }

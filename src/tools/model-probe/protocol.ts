@@ -76,8 +76,8 @@ export const PROBE_MULTITURN_CODE = 'ORBIT'
 export const PROBE_MULTITURN_TURN1 = 'Remember the codeword ORBIT. Reply with a short ack, do not mention the codeword.'
 export const PROBE_MULTITURN_TURN2 = 'Reply with only the codeword.'
 export const PROBE_IMAGE_PROMPT = 'What is the dominant color of this image? Reply with one English word.'
-/** 8×8 纯红 PNG（#DC2626），不依赖外网图 */
-export const PROBE_RED_PNG_B64 = 'iVBORw0KGgoAAAANSUhEUgAAAAgAAAAICAIAAABLbSncAAAAEUlEQVR4nGO4o6aGFTEMLQkAF/tKAS/fz4YAAAAASUVORK5CYII='
+/** 32×32 纯红 PNG（#DC2626，1024 px）。Grok 拒绝总像素低于 512 的图。不依赖外网图 */
+export const PROBE_RED_PNG_B64 = 'iVBORw0KGgoAAAANSUhEUgAAACAAAAAgCAIAAAD8GO2jAAAAKklEQVR42mO4o6ZGU8QwasGoBaMWjFowasGoBaMWjFowasGoBaMWDBULAIjyoD2JhwFtAAAAAElFTkSuQmCC'
 
 export const probeEmptyUsage = (): ProbeUsage => ({ input: null, output: null, cacheRead: null, cacheWrite: null })
 export const probeNum = (v: any): number | null => (typeof v === 'number' && isFinite(v) ? v : null)

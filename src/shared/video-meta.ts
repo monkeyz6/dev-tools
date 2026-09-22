@@ -51,13 +51,22 @@ export function vidCheckRatio(target: string | null | undefined, w: number, h: n
   return { target: t, actual: +a.toFixed(3), devPct: +(dev * 100).toFixed(1), pass: dev <= tol }
 }
 
-/** 分辨率档位按同档 16:9 参考面积对比，任何比例都能验（Seedance 的 720p 在 1:1 时是 960×960，短边并不等于 720） */
+/**
+ * 分辨率两套口径，任一贴合即过：
+ * - 面积档：同档 16:9 参考面积（Seedance 720p 1:1 是 960×960，短边不是 720）
+ * - 短边档：短边等于档位高度（Seedance 1080p 1:1 实测 1080×1080，面积会偏离 16:9 参考 40%+，会被误判成 720p）
+ */
 const VID_RESOLUTION_AREA: Array<[string, number]> = [
+  ['360p', 640 * 360],
   ['480p', 864 * 480],
   ['720p', 1280 * 720],
   ['1080p', 1920 * 1080],
   ['4k', 3840 * 2160],
 ]
+const VID_RESOLUTION_SHORT: Record<string, number> = {
+  '360p': 360, '480p': 480, '720p': 720, '1080p': 1080, '4k': 2160,
+}
+const VID_SHORT_SIDE_TOL = 0.05
 
 export function vidNormalizeResolution(s: string | null | undefined): string | null {
   if (!s) return null
@@ -82,9 +91,24 @@ export function vidCheckResolution(target: string | null | undefined, w: number,
   const t = vidNormalizeResolution(target)
   if (!t || !w || !h) return null
   const ref = VID_RESOLUTION_AREA.find(([k]) => k === t)![1]
-  const dev = Math.abs(w * h - ref) / ref
-  const nearest = vidResolutionTier(w, h)
-  return { target: t, nearest: nearest?.tier ?? '—', devPct: +(dev * 100).toFixed(1), pass: dev <= tol }
+  const areaDev = Math.abs(w * h - ref) / ref
+  const nominal = VID_RESOLUTION_SHORT[t]
+  const shortDev = nominal ? Math.abs(Math.min(w, h) - nominal) / nominal : Number.POSITIVE_INFINITY
+  const areaPass = areaDev <= tol
+  const shortPass = shortDev <= VID_SHORT_SIDE_TOL
+  const pass = areaPass || shortPass
+  const via = areaPass ? 'area' as const : shortPass ? 'short' as const : null
+  const nearest = pass ? t : (vidResolutionTier(w, h)?.tier ?? '—')
+  const dev = areaPass ? areaDev : shortPass ? shortDev : Math.min(areaDev, shortDev)
+  return {
+    target: t,
+    nearest,
+    via,
+    areaDevPct: +(areaDev * 100).toFixed(1),
+    shortDevPct: +(shortDev * 100).toFixed(1),
+    devPct: +(dev * 100).toFixed(1),
+    pass,
+  }
 }
 
 /** 尽力检测音轨：Firefox mozHasAudio、Safari audioTracks、Chrome 需静音播一小段看 webkitAudioDecodedByteCount；都拿不到回 null */
@@ -105,37 +129,253 @@ async function vidDetectAudio(video: HTMLVideoElement, capMs = 3000): Promise<bo
   return Promise.race([attempt, cap])
 }
 
-/** 探测视频元数据：不挂载 DOM 的 <video preload="metadata">，超时/失败均 reject 并清空 src 释放资源。`detectAudio` 打开后多返回 hasAudio（尽力，测不出为 null） */
-export function probeVideoMeta(src: string, timeoutMs = 20000, opts: { detectAudio?: boolean } = {}): Promise<{ width: number; height: number; duration: number; hasAudio: boolean | null }> {
+export type VideoProbeResult = {
+  width: number
+  height: number
+  duration: number
+  hasAudio: boolean | null
+  /** 可塞进 <video src> 的地址：直链能播就是原 URL，否则是 fetch 出来的 blob: */
+  playUrl: string
+}
+
+export function videoIsRemoteHttpUrl(src: string) {
+  return /^https?:\/\//i.test(src)
+}
+
+/** 火山 TOS 签名成片：HEAD 常 403、Content-Disposition: attachment，<video> 不稳 */
+export function videoLooksLikeSignedTosUrl(src: string) {
+  return /tos-|volces\.com|X-Tos-|ark-acg-/i.test(src)
+}
+
+function mp4Type(view: DataView, off: number) {
+  return String.fromCharCode(view.getUint8(off), view.getUint8(off + 1), view.getUint8(off + 2), view.getUint8(off + 3))
+}
+
+function mp4Walk(view: DataView, start: number, end: number, visit: (type: string, payload: number, boxEnd: number) => void) {
+  let off = start
+  while (off + 8 <= end) {
+    let size = view.getUint32(off)
+    const type = mp4Type(view, off + 4)
+    let hdr = 8
+    if (size === 1) {
+      if (off + 16 > end) break
+      const big = view.getBigUint64(off + 8)
+      if (big > BigInt(Number.MAX_SAFE_INTEGER)) break
+      size = Number(big)
+      hdr = 16
+    } else if (size === 0) {
+      size = end - off
+    }
+    if (size < hdr) break
+    const boxEnd = Math.min(off + size, end)
+    visit(type, off + hdr, boxEnd)
+    if (size === 0 || off + size <= off) break
+    off += size
+  }
+}
+
+/**
+ * 从 ISO BMFF 读宽高时长。Seedance TOS 成片的 tkhd 宽度经常是 0，要以 stsd 视觉样本为准。
+ * 有 vide/soun handler 就能判断音轨，不依赖 video 元素。
+ */
+export function parseMp4Meta(buf: ArrayBuffer): { width: number; height: number; duration: number; hasAudio: boolean | null } | null {
+  if (buf.byteLength < 16) return null
+  const view = new DataView(buf)
+  let movieDur = 0
+  let videoDur = 0
+  let width = 0
+  let height = 0
+  let hasVideo = false
+  let hasAudio = false
+
+  const readTimeSec = (payload: number, boxEnd: number) => {
+    if (payload >= boxEnd) return 0
+    const ver = view.getUint8(payload)
+    if (ver === 1 && payload + 32 <= boxEnd) {
+      const ts = view.getUint32(payload + 20)
+      const dur = Number(view.getBigUint64(payload + 24))
+      return ts ? dur / ts : 0
+    }
+    if (payload + 20 <= boxEnd) {
+      const ts = view.getUint32(payload + 12)
+      const dur = view.getUint32(payload + 16)
+      return ts ? dur / ts : 0
+    }
+    return 0
+  }
+
+  const readStsdVisual = (payload: number, boxEnd: number) => {
+    if (payload + 16 > boxEnd) return
+    if (!view.getUint32(payload + 4)) return
+    mp4Walk(view, payload + 8, boxEnd, (sampleType, samplePayload, sampleEnd) => {
+      if (sampleEnd - samplePayload < 28) return
+      if (!/^(avc1|avc3|hvc1|hev1|vp09|av01|mp4v|encv)$/.test(sampleType)) return
+      const w = view.getUint16(samplePayload + 24)
+      const h = view.getUint16(samplePayload + 26)
+      if (w && h) { width = w; height = h }
+    })
+  }
+
+  const walkTrackBoxes = (start: number, end: number, state: { handler: string; duration: number }) => {
+    mp4Walk(view, start, end, (type, payload, boxEnd) => {
+      if (type === 'mdia' || type === 'minf' || type === 'stbl') {
+        walkTrackBoxes(payload, boxEnd, state)
+        return
+      }
+      if (type === 'hdlr' && payload + 12 <= boxEnd) state.handler = mp4Type(view, payload + 8)
+      if (type === 'mdhd') state.duration = readTimeSec(payload, boxEnd)
+      if (type === 'stsd') readStsdVisual(payload, boxEnd)
+    })
+  }
+
+  mp4Walk(view, 0, view.byteLength, (type, payload, boxEnd) => {
+    if (type !== 'moov') return
+    mp4Walk(view, payload, boxEnd, (inner, ip, ie) => {
+      if (inner === 'mvhd') {
+        const sec = readTimeSec(ip, ie)
+        if (sec > 0) movieDur = sec
+      }
+      if (inner === 'trak') {
+        const state = { handler: '', duration: 0 }
+        walkTrackBoxes(ip, ie, state)
+        if (state.handler === 'soun') hasAudio = true
+        if (state.handler === 'vide') {
+          hasVideo = true
+          if (state.duration > 0) videoDur = state.duration
+        }
+      }
+    })
+  })
+
+  if (!width || !height) return null
+  const duration = videoDur > 0 ? videoDur : movieDur
+  if (!(duration > 0)) return null
+  return { width, height, duration, hasAudio: hasVideo || hasAudio ? hasAudio : null }
+}
+
+function videoReleaseEl(video: HTMLVideoElement) {
+  video.onloadedmetadata = null
+  video.onerror = null
+  video.removeAttribute('src')
+  video.load()
+  video.remove()
+}
+
+/** TOS 签名链常只签 GET：HEAD 会 403，部分引擎的 <video> 先发 HEAD 就 onerror；成片还带 Content-Disposition: attachment。CORS 允许时改 GET 拉成 blob 再播。 */
+export async function fetchVideoObjectUrl(src: string, timeoutMs = 20000): Promise<string> {
+  const ctrl = new AbortController()
+  const timer = setTimeout(() => ctrl.abort(), timeoutMs)
+  try {
+    const resp = await fetch(src, { signal: ctrl.signal, credentials: 'omit', referrerPolicy: 'no-referrer', mode: 'cors' })
+    if (!resp.ok) throw new Error(`拉取视频失败 HTTP ${resp.status}`)
+    const blob = await resp.blob()
+    if (!blob.size) throw new Error('拉取视频为空')
+    const type = blob.type && blob.type !== 'application/octet-stream' ? blob.type : 'video/mp4'
+    const playable = blob.type === type ? blob : new Blob([blob], { type })
+    return URL.createObjectURL(playable)
+  } catch (e: any) {
+    if (e?.name === 'AbortError') throw new Error(`拉取视频超时（${Math.round(timeoutMs / 1000)}s）`)
+    throw e
+  } finally {
+    clearTimeout(timer)
+  }
+}
+
+function probeWithElement(src: string, timeoutMs: number, opts: { detectAudio?: boolean }): Promise<Omit<VideoProbeResult, 'playUrl'>> {
   return new Promise((resolve, reject) => {
     const video = document.createElement('video')
     video.preload = 'metadata'
+    video.muted = true
+    video.playsInline = true
+    video.referrerPolicy = 'no-referrer'
+    video.setAttribute('playsinline', '')
+    video.style.cssText = 'position:fixed;left:0;top:0;width:1px;height:1px;opacity:0;pointer-events:none'
+    document.body?.appendChild(video)
     let settled = false
-    const timer = setTimeout(() => {
-      if (settled) return
-      settled = true
-      video.src = ''
-      reject(new Error(`加载超时（${Math.round(timeoutMs / 1000)}s），请检查链接是否可访问`))
-    }, timeoutMs)
-    video.onloadedmetadata = () => {
+    const finish = (fn: () => void) => {
       if (settled) return
       settled = true
       clearTimeout(timer)
+      fn()
+      videoReleaseEl(video)
+    }
+    const timer = setTimeout(() => {
+      finish(() => reject(new Error(`加载超时（${Math.round(timeoutMs / 1000)}s），请检查链接是否可访问`)))
+    }, timeoutMs)
+    video.onloadedmetadata = () => {
+      if (settled) return
       const { videoWidth: width, videoHeight: height, duration } = video
-      if (!width || !height) { video.src = ''; reject(new Error('无法读取视频尺寸，文件可能已损坏或格式不受支持')); return }
-      if (!opts.detectAudio) { video.src = ''; resolve({ width, height, duration, hasAudio: null }); return }
+      if (!width || !height) {
+        finish(() => reject(new Error('无法读取视频尺寸，文件可能已损坏或格式不受支持')))
+        return
+      }
+      if (!opts.detectAudio) {
+        finish(() => resolve({ width, height, duration, hasAudio: null }))
+        return
+      }
+      settled = true
+      clearTimeout(timer)
       vidDetectAudio(video).catch(() => null).then(hasAudio => {
-        video.src = ''
+        videoReleaseEl(video)
         resolve({ width, height, duration, hasAudio })
       })
     }
     video.onerror = () => {
-      if (settled) return
-      settled = true
-      clearTimeout(timer)
-      video.src = ''
-      reject(new Error('无法加载视频，链接可能已失效或不允许访问'))
+      finish(() => reject(new Error('无法加载视频，链接可能已失效或不允许访问')))
     }
     video.src = src
   })
+}
+
+async function probeFromObjectUrl(blobUrl: string, timeoutMs: number, opts: { detectAudio?: boolean }): Promise<VideoProbeResult> {
+  try {
+    const bytes = await (await fetch(blobUrl)).arrayBuffer()
+    const parsed = parseMp4Meta(bytes)
+    if (parsed && parsed.width && parsed.height && parsed.duration > 0) {
+      return { ...parsed, playUrl: blobUrl }
+    }
+  } catch { /* 再交给 <video> */ }
+  const meta = await probeWithElement(blobUrl, timeoutMs, opts)
+  return { ...meta, playUrl: blobUrl }
+}
+
+/**
+ * 探测视频元数据。blob/data 与火山 TOS 签名成片先读 moov/stsd 宽高（tkhd 宽度经常是 0），
+ * 不依赖 <video>；其它地址仍先走播放器，失败再 fetch。`playUrl` 若是 blob: 由调用方 revoke。
+ */
+export async function probeVideoMeta(src: string, timeoutMs = 20000, opts: { detectAudio?: boolean } = {}): Promise<VideoProbeResult> {
+  const started = Date.now()
+  const remaining = () => Math.max(timeoutMs - (Date.now() - started), 800)
+  const local = src.startsWith('blob:') || src.startsWith('data:')
+  if (local) return probeFromObjectUrl(src, timeoutMs, opts)
+  const tos = videoIsRemoteHttpUrl(src) && videoLooksLikeSignedTosUrl(src)
+
+  if (tos) {
+    try {
+      const blobUrl = await fetchVideoObjectUrl(src, timeoutMs)
+      try {
+        return await probeFromObjectUrl(blobUrl, remaining(), opts)
+      } catch (e) {
+        URL.revokeObjectURL(blobUrl)
+        throw e
+      }
+    } catch {
+      /* 拉不下来再试直链播放器 */
+    }
+  }
+
+  try {
+    const meta = await probeWithElement(src, tos ? remaining() : timeoutMs, opts)
+    return { ...meta, playUrl: src }
+  } catch (err) {
+    if (!videoIsRemoteHttpUrl(src) || remaining() < 800) throw err
+    let blobUrl: string | null = null
+    try {
+      blobUrl = await fetchVideoObjectUrl(src, remaining())
+      return await probeFromObjectUrl(blobUrl, remaining(), opts)
+    } catch {
+      if (blobUrl) URL.revokeObjectURL(blobUrl)
+      throw err
+    }
+  }
 }

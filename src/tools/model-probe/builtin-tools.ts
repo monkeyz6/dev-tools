@@ -119,24 +119,24 @@ const xaiCases: BuiltinProbeCase[] = [
     vendor: 'xai',
     tool: 'web_search',
     name: 'Grok 联网搜索',
-    desc: 'xAI Responses web_search',
-    explain: `xAI 服务端 Web Search。${PAID}`,
+    desc: 'xAI Responses web_search，tool_choice=required',
+    explain: `xAI Responses 声明 {type:web_search}，tool_choice 用字符串 "required"。对象形式 {type:web_search} 对不上 ModelToolChoice，会 400。input 用 [{role,content}]。${PAID}`,
     format: 'responses',
-    prompt: 'What is a major news headline from today? You must use the web_search tool.',
-    apply: { tools: [{ type: 'web_search' }], tool_choice: { type: 'web_search' } },
-    evidence: ['web_search_call', 'url_citation', 'web_search'],
+    prompt: 'What is a major news headline from today?',
+    apply: { tools: [{ type: 'web_search' }], tool_choice: 'required' },
+    evidence: ['web_search_call', 'url_citation', 'citations', 'web_search'],
   }),
   caseBase({
     id: 'native-xai-x_search',
     vendor: 'xai',
     tool: 'x_search',
     name: 'Grok X 搜索',
-    desc: 'xAI Responses x_search',
-    explain: `xAI 服务端 X Search。${PAID}`,
+    desc: 'xAI Responses x_search，tool_choice=required',
+    explain: `xAI Responses 声明 {type:x_search}，tool_choice 同样用字符串 "required"。可能要几十秒，渠道超时建议 ≥120s。${PAID}`,
     format: 'responses',
-    prompt: 'Search X for a recent post about xAI. You must use the x_search tool.',
-    apply: { tools: [{ type: 'x_search' }], tool_choice: { type: 'x_search' } },
-    evidence: ['x_search_call', 'x_search'],
+    prompt: 'What are people saying about xAI on X?',
+    apply: { tools: [{ type: 'x_search' }], tool_choice: 'required' },
+    evidence: ['x_search_call', 'url_citation', 'citations', 'x_search'],
   }),
   caseBase({
     id: 'native-xai-code_interpreter',
@@ -144,10 +144,10 @@ const xaiCases: BuiltinProbeCase[] = [
     tool: 'code_interpreter',
     name: 'Grok 代码执行',
     desc: 'xAI Responses code_interpreter',
-    explain: `xAI 服务端 Code Interpreter。${PAID}`,
+    explain: `xAI 服务端 Code Interpreter。tool_choice 用字符串 "required"。${PAID}`,
     format: 'responses',
     prompt: 'Use the code interpreter to compute 17*23. You must run code.',
-    apply: { tools: [{ type: 'code_interpreter' }], tool_choice: { type: 'code_interpreter' } },
+    apply: { tools: [{ type: 'code_interpreter' }], tool_choice: 'required' },
     evidence: ['code_interpreter_call', 'code_interpreter'],
   }),
   caseBase({
@@ -156,10 +156,10 @@ const xaiCases: BuiltinProbeCase[] = [
     tool: 'image_generation',
     name: 'Grok 图像生成',
     desc: 'xAI Responses image_generation，会出图计费',
-    explain: `xAI 服务端 Image Generation。会出图计费。${PAID}`,
+    explain: `xAI 服务端 Image Generation。会出图计费。tool_choice 用字符串 "required"。${PAID}`,
     format: 'responses',
     prompt: 'Generate a tiny 64x64 solid red square. You must use the image generation tool.',
-    apply: { tools: [{ type: 'image_generation' }], tool_choice: { type: 'image_generation' } },
+    apply: { tools: [{ type: 'image_generation' }], tool_choice: 'required' },
     evidence: ['image_generation_call', 'image_generation'],
   }),
 ]
@@ -470,6 +470,10 @@ export function builtinCaseById(id: string): BuiltinProbeCase | undefined {
 }
 
 export function applyBuiltinTool(body: Record<string, any>, spec: BuiltinProbeCase): void {
+  // xAI Responses 的 input 示例是 [{role,content}]，不是 OpenAI 的 input_text 块
+  if (spec.vendor === 'xai' && typeof body.input === 'string') {
+    body.input = [{ role: 'user', content: body.input }]
+  }
   if (spec.apply.tools) body.tools = spec.apply.tools
   if (spec.apply.tool_choice !== undefined) body.tool_choice = spec.apply.tool_choice
   if (spec.apply.extra) Object.assign(body, spec.apply.extra)

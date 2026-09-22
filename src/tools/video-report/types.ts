@@ -1,7 +1,19 @@
+export type VideoApiType = 'seedance' | 'google-omni'
+
+export const VIDEO_API_TYPE_LABEL: Record<VideoApiType, string> = {
+  seedance: 'Seedance 火山原生',
+  'google-omni': 'Google Omni',
+}
+
+export function videoApiTypeOf(v: string | null | undefined): VideoApiType {
+  return v === 'google-omni' ? 'google-omni' : 'seedance'
+}
+
 export type VideoCaseKind =
   | 'material-group'
   | 'material-assets'
   | 't2v'
+  | 'i2v'
   | 'i2v-frames'
   | 'ref-omni'
   | 'i2v-reject'
@@ -78,16 +90,23 @@ export const VIDEO_CASE_DEFS: VideoCaseDef[] = [
   },
 ]
 
-export const VIDEO_RESOLUTION_HEIGHT: Record<string, number> = { '480p': 480, '720p': 720, '1080p': 1080, '4k': 2160 }
+export const VIDEO_RESOLUTION_HEIGHT: Record<string, number> = { '360p': 360, '480p': 480, '720p': 720, '1080p': 1080, '4k': 2160 }
 
 /**
  * 模型能力表（输出高度上限）：
+ * - gemini-omni-flash-preview（非 1.1）：官方仅 720p
+ * - Omni 1.1：360p / 720p / 1080p / 4K
  * - 2.0-fast / 2.0-mini：官方只到 720p
  * - 2.5（doubao/dreamina-seedance-2-5）：2026-08-17 起官方原生 1080p，仍无 4K
  * - 其余（2.0 标准版及自定义 id）：视为支持 4K
  */
 export function videoModelMaxResolution(model: string): number {
   const id = model.trim()
+  if (/gemini-omni|omni-flash|omni-1\.1/i.test(id)) {
+    if (/1[.-]1/.test(id)) return 2160
+    if (/omni-flash-preview|gemini-omni-flash-preview/i.test(id)) return 720
+    return 2160
+  }
   if (/-(fast|mini)(-|$)/i.test(id)) return 720
   if (/2-5|2\.5/i.test(id)) return 1080
   return 2160
@@ -137,6 +156,8 @@ export interface VideoRecord {
   channelName: string
   model: string
   prompt: string
+  /** 缺省视为 seedance（旧记录） */
+  apiType?: VideoApiType
   kind: VideoCaseKind
   caseId?: string
   /** 缺省视为 success（旧记录） */

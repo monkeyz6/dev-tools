@@ -72,3 +72,19 @@ export function readKv(page: Page, key: string): Promise<string | null> {
     req.onerror = () => reject(req.error)
   }), key)
 }
+
+/** 往某个历史 store 写入一条记录（store 须已由应用打开过、完成升级）。 */
+export function writeHistoryStore(page: Page, store: string, rec: unknown): Promise<void> {
+  return page.evaluate(({ store, rec }) => new Promise<void>((resolve, reject) => {
+    const req = indexedDB.open('dev-toolkit-history')
+    req.onsuccess = () => {
+      const db = req.result
+      if (!db.objectStoreNames.contains(store)) { reject(new Error('missing store ' + store)); return }
+      const tx = db.transaction(store, 'readwrite')
+      tx.objectStore(store).put(rec)
+      tx.oncomplete = () => resolve()
+      tx.onerror = () => reject(tx.error)
+    }
+    req.onerror = () => reject(req.error)
+  }), { store, rec })
+}

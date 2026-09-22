@@ -5,12 +5,19 @@ import { historyDbGetAll, historyDbPutOne, historyDbDeleteOne, historyDbDeleteMa
 import { useDebouncedPersist } from '../shared/use-debounced-persist'
 import { uniqueCopyName } from '../shared/channel-copy'
 import { encryptLlmApiKey, decryptLlmApiKey } from '../shared/api-key-crypto'
-import { probeVideoMeta, vidAspectRatio, vidCheckRatio, vidCheckResolution, vidFormatDuration } from '../shared/video-meta'
-import { VIDEO_CASE_DEFS, VIDEO_MATERIAL_DEFS, VIDEO_RESOLUTION_HEIGHT, videoModelMaxResolution, videoModelMaxResolutionLabel, videoFmtTime } from './video-report/types'
-import type { VideoCaseDef, VideoCaseKind, VideoCheck, VideoExpect, VideoRecord } from './video-report/types'
+import { fetchVideoObjectUrl, probeVideoMeta, vidAspectRatio, vidCheckRatio, vidCheckResolution, vidFormatDuration, videoIsRemoteHttpUrl } from '../shared/video-meta'
+import type { VideoProbeResult } from '../shared/video-meta'
+import { VIDEO_API_TYPE_LABEL, VIDEO_CASE_DEFS, VIDEO_MATERIAL_DEFS, VIDEO_RESOLUTION_HEIGHT, videoApiTypeOf, videoModelMaxResolution, videoModelMaxResolutionLabel, videoFmtTime } from './video-report/types'
+import type { VideoApiType, VideoCaseDef, VideoCaseKind, VideoCheck, VideoExpect, VideoRecord } from './video-report/types'
+import {
+  OMNI_CASE_DEFS, OMNI_DEFAULT_MODEL, OMNI_DEFAULT_URLS, OMNI_MODEL_OPTIONS,
+  omniBase64ToBlobUrl, omniBuildPlan, omniFetchMedia, omniIs720OnlyModel, omniIsCorsError, omniLooksLikeFileUrl,
+  omniLooksLikeModel, omniResolveFileUrl, omniSupportsResolution,
+  omniMaterializeRequest, omniParseSubmit, omniPollUrl, omniPreviewBody, omniScrubBody, omniScrubValue,
+} from './video-report/google-omni'
 import { formatVideoTaskError, parseVideoTaskError, videoBuildErrorBodyChecks, videoShouldCheckErrorBody } from './video-report/errors'
 import { videoClassify, videoVerdict } from './video-report/summary'
-import { videoCanRequery, videoRetryAction, videoRetrySort, videoRetryTargets } from './video-report/retry'
+import { videoCanReprobe, videoCanRequery, videoHasUsableProbe, videoReprobeSrc, videoRetryAction, videoRetrySort, videoRetryTargets } from './video-report/retry'
 import { videoGroupBatches, videoTrimByBatch } from './video-report/batches'
 import type { VideoBatch } from './video-report/batches'
 import VideoReportView from './video-report/VideoReportView'
@@ -25,6 +32,8 @@ const VIDEO_ASSET_POLL_MAX_MS = 3 * 60 * 1000
 const VIDEO_SUBMIT_TIMEOUT_MS = 5 * 60 * 1000
 /** 任务轮询 / 素材 OpenAPI 单次请求 */
 const VIDEO_REQUEST_TIMEOUT_MS = 60 * 1000
+/** Omni 轮询 GET / 拉成片：官方 GET 会把整段视频以 base64 塞进 body，60s 容易误判超时 */
+const VIDEO_OMNI_FETCH_TIMEOUT_MS = VIDEO_SUBMIT_TIMEOUT_MS
 const VIDEO_DURATION_TOL = 1
 const VIDEO_RATIO_TOL = 0.05
 const VIDEO_RESOLUTION_TOL = 0.15
@@ -85,10 +94,32 @@ function videoUrlOrDefault(saved: string | undefined, role: keyof typeof VIDEO_D
   return VIDEO_LEGACY_DEFAULT_URLS[role].includes(saved.trim()) ? def : saved
 }
 
+/** 切协议时只替换仍等于该协议默认值的槽，用户手改过的 URL 不动 */
+function applyProtocolDefaultUrls(next: VideoApiType, prev: VideoMediaUrls): VideoMediaUrls {
+  const seedanceDef = (role: keyof VideoMediaUrls, v: string) => v === VIDEO_DEFAULT_URLS[role] || VIDEO_LEGACY_DEFAULT_URLS[role].includes(v)
+  const omniDef = (role: keyof typeof OMNI_DEFAULT_URLS, v: string) => v === OMNI_DEFAULT_URLS[role]
+  if (next === 'google-omni') {
+    return {
+      ...prev,
+      firstFrame: seedanceDef('firstFrame', prev.firstFrame) ? OMNI_DEFAULT_URLS.firstFrame : prev.firstFrame,
+      lastFrame: seedanceDef('lastFrame', prev.lastFrame) ? OMNI_DEFAULT_URLS.lastFrame : prev.lastFrame,
+      refImage: seedanceDef('refImage', prev.refImage) ? OMNI_DEFAULT_URLS.refImage : prev.refImage,
+      refVideo: seedanceDef('refVideo', prev.refVideo) ? OMNI_DEFAULT_URLS.refVideo : prev.refVideo,
+    }
+  }
+  return {
+    ...prev,
+    firstFrame: omniDef('firstFrame', prev.firstFrame) ? VIDEO_DEFAULT_URLS.firstFrame : prev.firstFrame,
+    lastFrame: omniDef('lastFrame', prev.lastFrame) ? VIDEO_DEFAULT_URLS.lastFrame : prev.lastFrame,
+    refImage: omniDef('refImage', prev.refImage) ? VIDEO_DEFAULT_URLS.refImage : prev.refImage,
+    refVideo: omniDef('refVideo', prev.refVideo) ? VIDEO_DEFAULT_URLS.refVideo : prev.refVideo,
+  }
+}
+
 /** 网关服务端拉素材失败（TOS fetch 4xx/5xx）——这是素材链接的问题，不是模型拒绝，不能算「已拒绝」 */
 function videoIsMediaFetchError(err: string | null | undefined): boolean {
   if (!err) return false
-  return /素材转换失败|Failed to download media|fetch object return status code|failed to fetch (image|video|audio|media)/i.test(err)
+  return /素材转换失败|素材跨域读失败|Failed to download media|fetch object return status code|failed to fetch (image|video|audio|media)/i.test(err)
 }
 
 interface VideoChannel { id: string; name: string; baseUrl: string; apiKeyEnc: string; keyMask: string }
@@ -130,6 +161,19 @@ interface VideoAssets {
 
 function videoUid() { return Date.now().toString(36) + Math.random().toString(36).slice(2, 7) }
 function videoEsc(s: unknown) { return String(s ?? '') }
+
+function videoRemoteSrc(rec: VideoRecord): string | null {
+  const uri = rec.targets.outputUri
+  if (typeof uri === 'string' && videoIsRemoteHttpUrl(uri)) return uri
+  if (rec.videoUrl && videoIsRemoteHttpUrl(rec.videoUrl)) return rec.videoUrl
+  return rec.videoUrl
+}
+
+function videoDisplayUrl(rec: VideoRecord): string {
+  const uri = rec.targets.outputUri
+  if (typeof uri === 'string' && videoIsRemoteHttpUrl(uri)) return uri
+  return rec.videoUrl || ''
+}
 function videoTrimUrl(s: string) { return s.trim() }
 
 function videoLoadChannels(): VideoChannel[] {
@@ -142,7 +186,7 @@ function videoLoadChannels(): VideoChannel[] {
 }
 
 function videoLoadUi(): {
-  model?: string; prompt?: string; testMaterials?: boolean
+  apiType?: VideoApiType; model?: string; prompt?: string; testMaterials?: boolean
   firstFrame?: string; lastFrame?: string; refImage?: string; refVideo?: string; refAudio?: string; sensitiveFace?: string
 } {
   if (typeof window === 'undefined') return {}
@@ -209,11 +253,11 @@ function videoExtractStatus(json: any): string {
 }
 
 function videoTaskSucceeded(st: string) {
-  return st === 'succeeded' || st === 'success'
+  return st === 'succeeded' || st === 'success' || st === 'completed'
 }
 
 function videoTaskFailed(st: string) {
-  return st === 'failed' || st === 'failure'
+  return st === 'failed' || st === 'failure' || st === 'cancelled'
 }
 
 function videoExtractVideoUrl(json: any): string | null {
@@ -388,7 +432,9 @@ function videoNegativeOutcome(rec: VideoRecord): { rejected: boolean; produced: 
   const mediaFetchErr = videoIsMediaFetchError(rec.error)
   const rejected = !produced && !mediaFetchErr && (submitRejected || taskFailed)
   const actual = produced ? '任务成功并出片'
-    : mediaFetchErr ? `素材拉取失败（网关取不到图，不是模型拒绝，请换左栏「敏感人像」链接）· ${rec.error}`
+    : mediaFetchErr ? (omniIsCorsError(rec.error)
+      ? `素材跨域读失败（浏览器 fetch 被拦，不是模型拒绝，请换左栏链接）· ${rec.error}`
+      : `素材拉取失败（网关取不到图，不是模型拒绝，请换左栏「敏感人像」链接）· ${rec.error}`)
     : submitRejected ? `HTTP ${rec.status} 已拒绝${rec.error ? ' · ' + rec.error : ''}`
     : taskFailed ? `任务 ${rec.taskStatus}${rec.error ? ' · ' + rec.error : ''}`
     : rec.status ? `HTTP ${rec.status}${rec.taskStatus ? ' · 任务 ' + rec.taskStatus : ''}${rec.error ? ' · ' + rec.error : ''}`
@@ -400,6 +446,12 @@ function videoBuildChecks(rec: VideoRecord): VideoCheck[] {
   const checks: VideoCheck[] = []
   const negative = videoIsNegative(rec)
   const httpOk = rec.status >= 200 && rec.status < 300
+  if (typeof rec.targets.omniTransport === 'string') {
+    checks.push({ name: '传输', target: rec.targets.omniTransport, actual: rec.targets.omniTransport, pass: true, info: true })
+  }
+  if (typeof rec.targets.delivery === 'string') {
+    checks.push({ name: '成片交付', target: rec.targets.delivery, actual: rec.targets.delivery, pass: true, info: true })
+  }
 
   if (negative) {
     const out = videoNegativeOutcome(rec)
@@ -409,11 +461,11 @@ function videoBuildChecks(rec: VideoRecord): VideoCheck[] {
       return checks
     }
     if (!out.produced) {
-      checks.push({ name: '预期不支持', target: `4xx 或任务 failed（能力表：最高 ${videoModelMaxResolutionLabel(rec.model)}）`, actual: out.actual, pass: out.rejected })
+      checks.push({ name: '预期不支持', target: `4xx 或任务 failed（能力表：${videoCapabilityHint(rec)}）`, actual: out.actual, pass: out.rejected })
       if (videoShouldCheckErrorBody(rec)) checks.push(...videoBuildErrorBodyChecks(rec))
       return checks
     }
-    checks.push({ name: '预期不支持', target: `能力表：最高 ${videoModelMaxResolutionLabel(rec.model)}`, actual: '任务成功并出片 · 能力表可能过期，请核对', pass: true, info: true })
+    checks.push({ name: '预期不支持', target: `能力表：${videoCapabilityHint(rec)}`, actual: '任务成功并出片 · 能力表可能过期，请核对', pass: true, info: true })
   }
 
   checks.push({ name: rec.kind.startsWith('material') ? 'OpenAPI 请求成功' : '请求成功', target: 'HTTP 2xx', actual: rec.status ? `HTTP ${rec.status}` : '无响应', pass: httpOk })
@@ -444,8 +496,12 @@ function videoBuildChecks(rec: VideoRecord): VideoCheck[] {
     if (hit) {
       checks.push({
         name: '分辨率',
-        target: `${wantRes}（面积档 ±${Math.round(VIDEO_RESOLUTION_TOL * 100)}%）`,
-        actual: `${rec.probe.w}×${rec.probe.h} → 最近 ${hit.nearest}（偏差 ${hit.devPct}%）`,
+        target: `${wantRes}（面积 ±${Math.round(VIDEO_RESOLUTION_TOL * 100)}% 或短边 ±5%）`,
+        actual: hit.via === 'short'
+          ? `${rec.probe.w}×${rec.probe.h} · 短边档 ${hit.target}`
+          : hit.via === 'area'
+            ? `${rec.probe.w}×${rec.probe.h} · 面积档 ${hit.target}（偏差 ${hit.devPct}%）`
+            : `${rec.probe.w}×${rec.probe.h} → 最近 ${hit.nearest}（面积 ${hit.areaDevPct}% / 短边 ${hit.shortDevPct}%）`,
         pass: hit.pass,
       })
     }
@@ -508,16 +564,26 @@ function videoBuildChecks(rec: VideoRecord): VideoCheck[] {
   return checks
 }
 
-/** 用例分辨率超出模型能力表上限时按「预期不支持」判定；不支持/未知档位（500p）不参与 */
-function videoExpectFor(def: VideoCaseDef, model: string): VideoExpect {
+function videoCapabilityHint(rec: Pick<VideoRecord, 'model' | 'apiType'>): string {
+  if (videoApiTypeOf(rec.apiType) === 'google-omni' && omniIs720OnlyModel(rec.model)) return '仅 720p'
+  return `最高 ${videoModelMaxResolutionLabel(rec.model)}`
+}
+
+/** 用例分辨率超出模型能力表时按「预期不支持」判定；未知档位（500p）不参与 */
+function videoExpectFor(def: VideoCaseDef, model: string, apiType: VideoApiType = 'seedance'): VideoExpect {
   if (def.expect === 'reject') return 'reject'
+  if (apiType === 'google-omni') {
+    return omniSupportsResolution(model, def.params.resolution) ? 'success' : 'unsupported'
+  }
   const h = def.params.resolution ? VIDEO_RESOLUTION_HEIGHT[def.params.resolution.toLowerCase()] : undefined
   if (h && h > videoModelMaxResolution(model)) return 'unsupported'
   return 'success'
 }
 
-function videoBuildCases(testMaterials: boolean): VideoCase[] {
-  const defs = testMaterials ? [...VIDEO_MATERIAL_DEFS, ...VIDEO_CASE_DEFS] : VIDEO_CASE_DEFS
+function videoBuildCases(testMaterials: boolean, apiType: VideoApiType = 'seedance'): VideoCase[] {
+  const defs = apiType === 'google-omni'
+    ? OMNI_CASE_DEFS
+    : (testMaterials ? [...VIDEO_MATERIAL_DEFS, ...VIDEO_CASE_DEFS] : VIDEO_CASE_DEFS)
   return defs.map(d => ({
     id: d.id,
     def: d,
@@ -561,6 +627,13 @@ async function videoExportAsHtml(rootEl: HTMLElement, filename: string) {
     await videoWithExpandedScrollAreas(rootEl, async () => {
       const clone = rootEl.cloneNode(true) as HTMLElement
       clone.querySelectorAll('[data-html2canvas-ignore]').forEach(el => el.remove())
+      clone.querySelectorAll('video').forEach(el => {
+        const src = el.getAttribute('src') || ''
+        if (src.startsWith('blob:') || src.startsWith('data:')) {
+          el.removeAttribute('src')
+          el.removeAttribute('srcObject')
+        }
+      })
       const varNames = ['bg', 's1', 's2', 'border', 'borderHard', 'text', 't2', 't3', 'accent', 'accentFg', 'accentSub', 'accentSubHard', 'primary', 'primaryFg', 'sidebar', 'code', 'shadow', 'shadowMd', 'ok', 'okBg', 'err', 'errBg', 'warn', 'warnBg', 'inputBg', 'inputBorder']
       const cs = getComputedStyle(rootEl)
       const varsCss = ':root{' + varNames.map(n => `--${n}:${cs.getPropertyValue('--' + n).trim()}`).join(';') + '}'
@@ -607,10 +680,11 @@ function videoExportFilename(): string {
 type VideoChFormState = { name: string; baseUrl: string; apiKey: string }
 
 const VideoChannelsPane = React.memo(function VideoChannelsPane({
-  channels, activeChId, chForm, editingChId,
+  channels, activeChId, chForm, editingChId, apiType,
   onSetActive, onEdit, onCopy, onDelete, onSave, onChFormChange, onClearForm,
 }: {
   channels: VideoChannel[]; activeChId: string | null; chForm: VideoChFormState; editingChId: string | null
+  apiType: VideoApiType
   onSetActive: (id: string) => void; onEdit: (c: VideoChannel) => void; onCopy: (c: VideoChannel) => void; onDelete: (id: string) => void
   onSave: () => void; onChFormChange: React.Dispatch<React.SetStateAction<VideoChFormState>>; onClearForm: () => void
 }) {
@@ -655,7 +729,11 @@ const VideoChannelsPane = React.memo(function VideoChannelsPane({
         <div className="flex items-center gap-3 mt-4">
           <Btn variant="primary" small={false} onClick={onSave}>保存渠道</Btn>
           <Btn variant="soft" onClick={onClearForm}>清空表单</Btn>
-          <span className="text-[11px]" style={{ color: 'var(--t3)' }}>baseUrl 填网关根，工具会拼 /byteplus/api/v3/... 与 OpenAPI。apiKey 经 AES-GCM 加密。</span>
+          <span className="text-[11px]" style={{ color: 'var(--t3)' }}>{
+            apiType === 'google-omni'
+              ? 'baseUrl 填网关根，工具会拼 /v1beta/interactions。apiKey 经 AES-GCM 加密。'
+              : 'baseUrl 填网关根，工具会拼 /byteplus/api/v3/... 与 OpenAPI。apiKey 经 AES-GCM 加密。'
+          }</span>
         </div>
       </Card>
     </div>
@@ -664,10 +742,12 @@ const VideoChannelsPane = React.memo(function VideoChannelsPane({
 
 const VideoHistoryPane = React.memo(function VideoHistoryPane({
   history, channels, exportBusy, fChannel, fModel, fResult, requeryingIds,
-  onFChannel, onFModel, onFResult, onStartExport, onClearAll, onDetail, onDeleteOne, onRestore, onDeleteBatch, onRequery,
+  onFChannel, onFModel, onFResult, onStartExport, onClearAll, onDetail, onDeleteOne, onRestore, onDeleteBatch, onRequery, onReprobe, onReprobeBatch,
 }: {
   requeryingIds: Set<string>
   onRequery: (r: VideoRecord) => void
+  onReprobe: (r: VideoRecord) => void
+  onReprobeBatch: (records: VideoRecord[]) => void
   history: VideoRecord[]; channels: VideoChannel[]; exportBusy: boolean
   fChannel: string; fModel: string; fResult: string
   onFChannel: (v: string) => void; onFModel: (v: string) => void; onFResult: (v: string) => void
@@ -712,6 +792,8 @@ const VideoHistoryPane = React.memo(function VideoHistoryPane({
       <div className="flex flex-col gap-3">
         {batches.map((b, idx) => {
           const open = isOpen(b.id, idx)
+          const reprobeable = b.records.filter(r => videoCanReprobe(r))
+          const reprobeBusy = reprobeable.some(r => requeryingIds.has(r.id))
           return (
             <div key={b.id} data-testid="videotest-batch" className="rounded-xl overflow-hidden" style={{ border: '1px solid var(--border)' }}>
               <div className="flex items-center gap-3 px-4 py-3 flex-wrap" style={{ background: 'var(--s1)' }}>
@@ -721,10 +803,15 @@ const VideoHistoryPane = React.memo(function VideoHistoryPane({
                     {b.legacy && <Badge>旧记录</Badge>}
                   </div>
                   <div className="text-[11px] mt-0.5" style={{ color: 'var(--t3)' }}>
-                    {b.channelName || '—'} · {b.models.join(' / ') || '—'} · {b.records.length} 个用例 · 通过 {b.passed}/{b.records.length}
+                    {b.channelName || '—'} · {VIDEO_API_TYPE_LABEL[b.apiType]} · {b.models.join(' / ') || '—'} · {b.records.length} 个用例 · 通过 {b.passed}/{b.records.length}
                   </div>
                 </button>
                 <Btn small variant="soft" onClick={() => onRestore(b)}>↺ 还原到工作台</Btn>
+                {reprobeable.length > 0 && (
+                  <Btn small variant="accent" disabled={reprobeBusy} onClick={() => onReprobeBatch(b.records)}>
+                    {reprobeBusy ? '识别中…' : `↻ 重新识别未通过 (${reprobeable.length})`}
+                  </Btn>
+                )}
                 <Btn small variant="soft" disabled={exportBusy} onClick={() => onStartExport(b.records)}>导出 HTML</Btn>
                 <Btn small variant="danger" onClick={() => onDeleteBatch(b)}>删除本批</Btn>
               </div>
@@ -754,6 +841,11 @@ const VideoHistoryPane = React.memo(function VideoHistoryPane({
                                   {requeryingIds.has(r.id) ? '查询中…' : '↻ 重试查询'}
                                 </Btn>
                               )}
+                              {videoCanReprobe(r) && (
+                                <Btn small variant="accent" disabled={requeryingIds.has(r.id)} onClick={() => onReprobe(r)}>
+                                  {requeryingIds.has(r.id) ? '识别中…' : '↻ 重新识别'}
+                                </Btn>
+                              )}
                               <Btn small variant="ghost" onClick={() => onDeleteOne(r.id)}>删除</Btn>
                             </td>
                           </tr>
@@ -773,24 +865,29 @@ const VideoHistoryPane = React.memo(function VideoHistoryPane({
 
 function VideoApiTestTool() {
   const ui0 = videoLoadUi()
+  const ui0ApiType = videoApiTypeOf(ui0.apiType)
   const [pane, setPane] = useState<'test' | 'channels' | 'history'>('test')
   const [channels, setChannels] = useState<VideoChannel[]>(() => videoLoadChannels())
   const [activeChId, setActiveChId] = useState<string | null>(() => (typeof window === 'undefined' ? null : kvGet(VIDEO_ACTIVE_KEY)))
-  const [model, setModel] = useState(ui0.model ?? VIDEO_DEFAULT_MODEL)
+  const [apiType, setApiType] = useState<VideoApiType>(ui0ApiType)
+  const [model, setModel] = useState(ui0.model ?? (ui0ApiType === 'google-omni' ? OMNI_DEFAULT_MODEL : VIDEO_DEFAULT_MODEL))
   const [prompt, setPrompt] = useState(ui0.prompt ?? VIDEO_DEFAULT_PROMPT)
-  const [testMaterials, setTestMaterials] = useState(!!ui0.testMaterials)
-  const [urls, setUrls] = useState<VideoMediaUrls>({
-    firstFrame: videoUrlOrDefault(ui0.firstFrame, 'firstFrame'),
-    lastFrame: videoUrlOrDefault(ui0.lastFrame, 'lastFrame'),
-    refImage: videoUrlOrDefault(ui0.refImage, 'refImage'),
-    refVideo: videoUrlOrDefault(ui0.refVideo, 'refVideo'),
-    refAudio: videoUrlOrDefault(ui0.refAudio, 'refAudio'),
-    sensitiveFace: videoUrlOrDefault(ui0.sensitiveFace, 'sensitiveFace'),
+  const [testMaterials, setTestMaterials] = useState(ui0ApiType === 'seedance' && !!ui0.testMaterials)
+  const [urls, setUrls] = useState<VideoMediaUrls>(() => {
+    const loaded: VideoMediaUrls = {
+      firstFrame: videoUrlOrDefault(ui0.firstFrame, 'firstFrame'),
+      lastFrame: videoUrlOrDefault(ui0.lastFrame, 'lastFrame'),
+      refImage: videoUrlOrDefault(ui0.refImage, 'refImage'),
+      refVideo: videoUrlOrDefault(ui0.refVideo, 'refVideo'),
+      refAudio: videoUrlOrDefault(ui0.refAudio, 'refAudio'),
+      sensitiveFace: videoUrlOrDefault(ui0.sensitiveFace, 'sensitiveFace'),
+    }
+    return ui0ApiType === 'google-omni' ? applyProtocolDefaultUrls('google-omni', loaded) : loaded
   })
   const [history, setHistory] = useState<VideoRecord[]>([])
   const [chForm, setChForm] = useState({ name: '', baseUrl: '', apiKey: '' })
   const [editingChId, setEditingChId] = useState<string | null>(null)
-  const [cases, setCases] = useState<VideoCase[]>(() => videoBuildCases(!!ui0.testMaterials))
+  const [cases, setCases] = useState<VideoCase[]>(() => videoBuildCases(ui0ApiType === 'seedance' && !!ui0.testMaterials, ui0ApiType))
   const [running, setRunning] = useState(false)
   const [toast, setToast] = useState('')
   const [detailRec, setDetailRec] = useState<VideoRecord | null>(null)
@@ -811,10 +908,16 @@ function VideoApiTestTool() {
   const historyRef = useRef(history)
   const urlsRef = useRef(urls)
   const assetsRef = useRef<VideoAssets>({ groupId: null })
+  const omniSessionRef = useRef<{ lastInteractionId: string | null }>({ lastInteractionId: null })
+  const omniMediaCacheRef = useRef(new Map<string, { mime: string; b64: string }>())
+  const omniBlobUrlsRef = useRef(new Set<string>())
+  const previewRecRef = useRef<VideoRecord | null>(null)
+  const apiTypeRef = useRef(apiType)
   const currentRunIdRef = useRef<string | null>(null)
   /** 正在手动重试查询的记录 id（ref 供异步流程判重，state 供按钮渲染）与请求停止的 id */
   const requeryingRef = useRef<Set<string>>(new Set())
   const requeryCancelRef = useRef<Set<string>>(new Set())
+  const reprobeTriedRef = useRef<Set<string>>(new Set())
   const [requeryingIds, setRequeryingIds] = useState<Set<string>>(new Set())
   const cancelRequery = (id: string) => { requeryCancelRef.current.add(id); toastShow('将在本次查询返回后停止') }
 
@@ -822,6 +925,8 @@ function VideoApiTestTool() {
   useEffect(() => { casesRef.current = cases }, [cases])
   useEffect(() => { historyRef.current = history }, [history])
   useEffect(() => { urlsRef.current = urls }, [urls])
+  useEffect(() => { apiTypeRef.current = apiType }, [apiType])
+  useEffect(() => () => { for (const u of omniBlobUrlsRef.current) URL.revokeObjectURL(u); omniBlobUrlsRef.current.clear() }, [])
 
   useEffect(() => { try { kvSet(VIDEO_CH_KEY, JSON.stringify(channels)) } catch { /* ignore */ } }, [channels])
   useEffect(() => {
@@ -838,16 +943,17 @@ function VideoApiTestTool() {
   useDebouncedPersist(() => {
     try {
       kvSet(VIDEO_UI_KEY, JSON.stringify({
-        model, prompt, testMaterials,
+        apiType, model, prompt, testMaterials,
         firstFrame: urls.firstFrame, lastFrame: urls.lastFrame,
         refImage: urls.refImage, refVideo: urls.refVideo, refAudio: urls.refAudio, sensitiveFace: urls.sensitiveFace,
       }))
     } catch { /* ignore */ }
-  }, [model, prompt, testMaterials, urls])
+  }, [apiType, model, prompt, testMaterials, urls])
 
   useEffect(() => {
-    setCases(prev => videoMergeCases(prev, videoBuildCases(testMaterials)))
-  }, [testMaterials])
+    if (apiType !== 'seedance') return
+    setCases(prev => videoMergeCases(prev, videoBuildCases(testMaterials, 'seedance')))
+  }, [testMaterials, apiType])
 
   useEffect(() => {
     if (!exportJob) return
@@ -864,7 +970,7 @@ function VideoApiTestTool() {
 
   useEffect(() => {
     if (!previewUrl) return
-    const handler = (e: KeyboardEvent) => { if (e.key === 'Escape') setPreviewUrl(null) }
+    const handler = (e: KeyboardEvent) => { if (e.key === 'Escape') { previewRecRef.current = null; setPreviewUrl(null) } }
     window.addEventListener('keydown', handler)
     return () => window.removeEventListener('keydown', handler)
   }, [previewUrl])
@@ -947,8 +1053,132 @@ function VideoApiTestTool() {
     setCases(cases.map(c => ({ ...c, selected: v })))
   }
 
+  const rememberOmniBlob = (url: string | null) => {
+    if (url && url.startsWith('blob:')) omniBlobUrlsRef.current.add(url)
+  }
+  const resolveVideoChannel = (rec?: Pick<VideoRecord, 'channelName'> | null) =>
+    (rec?.channelName ? channelsRef.current.find(x => x.name === rec.channelName) : undefined)
+    || channelsRef.current.find(x => x.id === activeChId)
+    || null
+  const fetchOmniFileBlobUrl = async (
+    uri: string,
+    rec?: Pick<VideoRecord, 'channelName'> | null,
+    opts?: { retries?: number; channel?: VideoChannel; apiKey?: string },
+  ): Promise<string> => {
+    const ch = opts?.channel || resolveVideoChannel(rec)
+    if (!ch) throw new Error('找不到可用渠道：请先在「渠道管理」添加渠道')
+    const apiKey = opts?.apiKey || await decryptLlmApiKey(ch.apiKeyEnc)
+    if (!apiKey) throw new Error('渠道 API Key 无效，请重新编辑保存')
+    const fileUrl = omniResolveFileUrl(uri, ch.baseUrl)
+    const retries = Math.max(1, opts?.retries ?? 6)
+    let lastErr = '拉取成片失败'
+    for (let i = 0; i < retries; i++) {
+      if (i) await sleep(VIDEO_POLL_MS)
+      try {
+        const fileResp = await videoFetch(fileUrl, VIDEO_OMNI_FETCH_TIMEOUT_MS, {
+          method: 'GET',
+          headers: { Authorization: `Bearer ${apiKey}`, Accept: '*/*' },
+        })
+        if (fileResp.status === 401 || fileResp.status === 403) {
+          throw new Error(`拉取成片失败 HTTP ${fileResp.status}（需要 Authorization Bearer）`)
+        }
+        if (!fileResp.ok) {
+          lastErr = `拉取成片失败 HTTP ${fileResp.status}`
+          continue
+        }
+        const buf = await fileResp.arrayBuffer()
+        if (!buf.byteLength) {
+          lastErr = '拉取成片为空'
+          continue
+        }
+        const head = new TextDecoder().decode(buf.slice(0, 160)).trimStart()
+        if (head.startsWith('{') || head.startsWith('<')) {
+          const text = new TextDecoder().decode(buf.slice(0, 400))
+          const json = videoParseJson(text)
+          const msg = json?.error?.message || json?.message || text.slice(0, 160)
+          throw new Error(`成片下载不是视频：${msg}`)
+        }
+        const rawType = (fileResp.headers.get('content-type') || '').toLowerCase()
+        const type = rawType.startsWith('video/') ? rawType.split(';')[0] : 'video/mp4'
+        const playUrl = URL.createObjectURL(new Blob([buf], { type }))
+        rememberOmniBlob(playUrl)
+        return playUrl
+      } catch (e: any) {
+        if (e?.message && /HTTP 401|HTTP 403/.test(e.message)) throw e
+        lastErr = e?.message || lastErr
+      }
+    }
+    throw new Error(lastErr)
+  }
+  const adoptProbedVideo = (rec: VideoRecord, sourceUrl: string, meta: VideoProbeResult) => {
+    rec.probe = { w: meta.width, h: meta.height, duration: meta.duration, hasAudio: meta.hasAudio }
+    rec.ok = true
+    rec.error = null
+    if (meta.playUrl.startsWith('blob:') && meta.playUrl !== sourceUrl) {
+      if ((typeof rec.targets.outputUri !== 'string' || !rec.targets.outputUri) && videoIsRemoteHttpUrl(sourceUrl)) {
+        rec.targets.outputUri = sourceUrl
+      }
+      rec.videoUrl = meta.playUrl
+      rememberOmniBlob(meta.playUrl)
+    }
+  }
+  const recoverPlayableVideo = async (el: HTMLVideoElement, src: string | null, rec?: VideoRecord | null) => {
+    if (!src || !videoIsRemoteHttpUrl(src) || el.dataset.blobFallback) return
+    el.dataset.blobFallback = '1'
+    try {
+      const playUrl = omniLooksLikeFileUrl(src)
+        ? await fetchOmniFileBlobUrl(src, rec, { retries: 1 })
+        : await fetchVideoObjectUrl(src)
+      rememberOmniBlob(playUrl)
+      el.src = playUrl
+    } catch { /* 预览仍失败则保持黑场，成片探测另走 probe */ }
+  }
+  const rememberOmniInteraction = (rec: VideoRecord) => {
+    if (videoApiTypeOf(rec.apiType) !== 'google-omni') return
+    if (!rec.ok || !rec.taskId || (rec.expect ?? 'success') !== 'success') return
+    omniSessionRef.current.lastInteractionId = rec.taskId
+  }
+  const revokeOmniBlobs = () => {
+    for (const u of omniBlobUrlsRef.current) URL.revokeObjectURL(u)
+    omniBlobUrlsRef.current.clear()
+  }
+  const videoRecordForHistory = (rec: VideoRecord): VideoRecord => {
+    const omni = rec.apiType === 'google-omni'
+    let rawSnippet = omni ? omniScrubBody(rec.rawSnippet) : rec.rawSnippet
+    if (rawSnippet.length > 80_000) rawSnippet = rawSnippet.slice(0, 80_000) + '\n…'
+    const sentPreview = omni ? omniScrubBody(rec.sentPreview) : rec.sentPreview
+    let videoUrl = rec.videoUrl
+    if (videoUrl && (videoUrl.startsWith('blob:') || videoUrl.startsWith('data:'))) {
+      videoUrl = typeof rec.targets.outputUri === 'string' ? rec.targets.outputUri : null
+    }
+    return { ...rec, rawSnippet, sentPreview, videoUrl }
+  }
+
+  const switchApiType = (t: VideoApiType) => {
+    if (t === apiType) return
+    if (running || casesRef.current.some(c => c.status === 'running') || requeryingRef.current.size) {
+      toastShow('请先停止当前运行再切换接口类型')
+      return
+    }
+    revokeOmniBlobs()
+    omniSessionRef.current = { lastInteractionId: null }
+    omniMediaCacheRef.current = new Map()
+    assetsRef.current = { groupId: null }
+    currentRunIdRef.current = null
+    setRestoredFrom(null)
+    setApiType(t)
+    if (t === 'google-omni') {
+      setTestMaterials(false)
+      if (omniLooksLikeModel(model) === false) setModel(OMNI_DEFAULT_MODEL)
+    } else if (omniLooksLikeModel(model)) {
+      setModel(VIDEO_DEFAULT_MODEL)
+    }
+    setUrls(prev => applyProtocolDefaultUrls(t, prev))
+    setCases(videoBuildCases(t === 'seedance' && testMaterials, t))
+  }
+
   const persistRecord = async (rec: VideoRecord) => {
-    const histRec: VideoRecord = { ...rec, rawSnippet: rec.rawSnippet.length > 80_000 ? rec.rawSnippet.slice(0, 80_000) + '\n…' : rec.rawSnippet }
+    const histRec: VideoRecord = videoRecordForHistory(rec)
     const stale = historyRef.current.filter(r => r.runId === histRec.runId && r.caseName === histRec.caseName)
     const staleIds = new Set(stale.map(r => r.id))
     const next = videoTrimByBatch([histRec, ...historyRef.current.filter(r => !staleIds.has(r.id))])
@@ -1188,16 +1418,146 @@ function VideoApiTestTool() {
     }
 
     try {
-      const meta = await probeVideoMeta(rec.videoUrl, 20000, { detectAudio: typeof rec.targets.generate_audio === 'boolean' })
-      rec.probe = { w: meta.width, h: meta.height, duration: meta.duration, hasAudio: meta.hasAudio }
-      rec.ok = true
-      rec.error = null
+      const sourceUrl = rec.videoUrl
+      const meta = await probeVideoMeta(sourceUrl, 20000, { detectAudio: typeof rec.targets.generate_audio === 'boolean' })
+      adoptProbedVideo(rec, sourceUrl, meta)
     } catch (e: any) {
       rec.ok = true
       rec.probe = null
       rec.error = e?.message || '成片元数据不可读'
     }
     rec.checks = videoBuildChecks(rec)
+  }
+
+  const applyOmniOutput = async (rec: VideoRecord, video: { uri?: string; data?: string; mime: string } | null, ch: VideoChannel, apiKey: string) => {
+    if (video?.uri) rec.targets.outputUri = video.uri
+    let playUrl: string | null = null
+    if (video?.data) {
+      try {
+        playUrl = omniBase64ToBlobUrl(video.data, video.mime)
+        rememberOmniBlob(playUrl)
+      } catch { /* ignore decode */ }
+    }
+    if (!playUrl && video?.uri) {
+      const fileUrl = omniResolveFileUrl(video.uri, ch.baseUrl)
+      rec.targets.outputUri = fileUrl
+      try {
+        // Files :download 必须带渠道 Bearer；未 ACTIVE 时短时重试。不要把鉴权 URI 塞进 <video src>
+        playUrl = await fetchOmniFileBlobUrl(fileUrl, rec, { retries: 6, channel: ch, apiKey })
+      } catch (e: any) {
+        rec.videoUrl = fileUrl
+        rec.ok = true
+        rec.probe = null
+        rec.error = e?.message || '成片下载失败（需 Authorization Bearer，勿在浏览器直接打开）'
+        rec.checks = videoBuildChecks(rec)
+        return
+      }
+    }
+    rec.videoUrl = playUrl
+    if (!playUrl) {
+      rec.ok = false
+      rec.error = rec.error || '未返回视频'
+      rec.checks = videoBuildChecks(rec)
+      return
+    }
+    try {
+      const meta = await probeVideoMeta(playUrl, 20000, { detectAudio: typeof rec.targets.generate_audio === 'boolean' })
+      adoptProbedVideo(rec, playUrl, meta)
+    } catch (e: any) {
+      rec.ok = true
+      rec.probe = null
+      rec.error = e?.message || '成片元数据不可读'
+    }
+    rec.checks = videoBuildChecks(rec)
+    if (rec.targets.upscaled) {
+      rec.checks.push({ name: '分辨率', target: '官方 1080p/4K 为 upscale', actual: rec.probe ? `${rec.probe.w}×${rec.probe.h}` : '未读到', pass: true, info: true })
+    }
+  }
+
+  const pollOmni = async (
+    rec: VideoRecord, ch: VideoChannel, apiKey: string,
+    shouldStop: () => boolean, immediate = false,
+  ): Promise<{ lastJson: any; stopped: boolean; parsed: ReturnType<typeof omniParseSubmit> | null }> => {
+    const pollUrl = omniPollUrl(ch.baseUrl, rec.taskId || '', rec.model)
+    const t0 = Date.now()
+    let lastJson: any = null
+    let parsed: ReturnType<typeof omniParseSubmit> | null = null
+    let first = immediate
+    while (Date.now() - t0 < VIDEO_POLL_MAX_MS) {
+      if (shouldStop()) return { lastJson, stopped: true, parsed }
+      if (!first) {
+        await sleep(VIDEO_POLL_MS)
+        if (shouldStop()) return { lastJson, stopped: true, parsed }
+      }
+      first = false
+      rec.pollCount += 1
+      const q = await videoFetch(pollUrl, VIDEO_OMNI_FETCH_TIMEOUT_MS, { headers: { Authorization: `Bearer ${apiKey}` } })
+      const qt = await q.text()
+      rec.status = q.status
+      rec.respHeaders = Object.fromEntries(q.headers.entries())
+      rec.reqId = rec.reqId || rec.respHeaders['x-oneapi-request-id'] || rec.respHeaders['x-request-id'] || ''
+      lastJson = videoParseJson(qt)
+      rec.rawSnippet = lastJson ? JSON.stringify(omniScrubValue(lastJson), null, 2) : omniScrubBody(qt)
+      parsed = omniParseSubmit(q.status, lastJson, qt)
+      rec.taskStatus = parsed.status || rec.taskStatus
+      rec.pollLog.push({ at: Date.now(), status: rec.taskStatus || '' })
+      if (parsed.kind !== 'poll') break
+    }
+    return { lastJson, stopped: false, parsed }
+  }
+
+  const runOmni = async (c: VideoCase, ch: VideoChannel, apiKey: string, rec: VideoRecord) => {
+    const built = omniBuildPlan(c.def, rec.model, rec.prompt, urlsRef.current, omniSessionRef.current.lastInteractionId)
+    rec.targets = { ...built.targets }
+    rec.skippedRoles = built.skipped
+    if (built.missing) {
+      rec.ok = false
+      rec.error = built.missing
+      rec.checks = videoBuildChecks(rec)
+      return
+    }
+    let body = built.plan.body
+    rec.sentPreview = c.editedPreview != null ? omniScrubBody(c.editedPreview) : omniPreviewBody(body)
+    if (c.editedPreview != null) {
+      const edited = JSON.parse(c.editedPreview)
+      if (!edited || typeof edited !== 'object' || Array.isArray(edited)) throw new Error('请求体必须是 JSON 对象')
+      body = edited
+    }
+    const sent = await omniMaterializeRequest(body, urlsRef.current as unknown as Record<string, string>, omniMediaCacheRef.current, omniFetchMedia)
+    const resp = await videoFetch(ch.baseUrl + built.plan.endpoint, VIDEO_SUBMIT_TIMEOUT_MS, {
+      method: 'POST', headers: videoHeaders(apiKey), body: JSON.stringify(sent),
+    })
+    const text = await resp.text()
+    rec.status = resp.status
+    rec.respHeaders = Object.fromEntries(resp.headers.entries())
+    rec.reqId = rec.respHeaders['x-oneapi-request-id'] || rec.respHeaders['x-request-id'] || ''
+    const json = videoParseJson(text)
+    rec.rawSnippet = json ? JSON.stringify(omniScrubValue(json), null, 2) : omniScrubBody(text)
+    const parsed = omniParseSubmit(resp.status, json, text)
+    rec.errorDetail = parsed.kind === 'error' ? parsed.detail : null
+    rec.taskId = parsed.id
+    rec.taskStatus = parsed.status || rec.taskStatus
+    rec.pollLog.push({ at: Date.now(), status: rec.taskStatus || '' })
+
+    if (parsed.kind === 'error') {
+      rec.ok = false
+      rec.error = parsed.message
+      rec.checks = videoBuildChecks(rec)
+      return
+    }
+    if (parsed.kind === 'poll') {
+      rec.ok = false
+      rec.error = '同步请求未等到终态（仍是 in_progress）。可稍后「重试查询」'
+      rec.checks = videoBuildChecks(rec)
+      return
+    }
+    if (parsed.kind === 'done') {
+      rec.usage = parsed.usage
+      rec.taskId = parsed.id || rec.taskId
+      rec.taskStatus = parsed.status
+      await applyOmniOutput(rec, parsed.video, ch, apiKey)
+      rememberOmniInteraction(rec)
+    }
   }
 
   /**
@@ -1220,18 +1580,43 @@ function VideoApiTestTool() {
     const t0 = performance.now()
     let cancelled = false
     try {
-      const polled = await pollTask(next, ch, apiKey, null, () => requeryCancelRef.current.has(rec.id), true)
-      if (polled.stopped) {
-        cancelled = true
-        next.ok = false
-        next.error = '已停止查询'
-        next.checks = videoBuildChecks(next)
+      if (videoApiTypeOf(rec.apiType) === 'google-omni') {
+        const polled = await pollOmni(next, ch, apiKey, () => requeryCancelRef.current.has(rec.id), true)
+        if (polled.stopped) {
+          cancelled = true
+          next.ok = false
+          next.error = '已停止查询'
+          next.checks = videoBuildChecks(next)
+        } else if (!polled.parsed || polled.parsed.kind === 'poll') {
+          next.ok = false
+          next.error = `轮询超时（${VIDEO_POLL_MAX_MS / 60000} 分钟）任务仍未结束，可稍后「重试查询」`
+          next.checks = videoBuildChecks(next)
+        } else if (polled.parsed.kind === 'error') {
+          next.ok = false
+          next.error = polled.parsed.message
+          next.errorDetail = polled.parsed.detail
+          next.checks = videoBuildChecks(next)
+        } else {
+          next.usage = polled.parsed.usage
+          next.taskStatus = polled.parsed.status
+          await applyOmniOutput(next, polled.parsed.video, ch, apiKey)
+        }
       } else {
-        await finalizeTask(next, polled.lastJson)
+        const polled = await pollTask(next, ch, apiKey, null, () => requeryCancelRef.current.has(rec.id), true)
+        if (polled.stopped) {
+          cancelled = true
+          next.ok = false
+          next.error = '已停止查询'
+          next.checks = videoBuildChecks(next)
+        } else {
+          await finalizeTask(next, polled.lastJson)
+        }
       }
     } catch (e: any) {
       next.ok = false
-      next.error = e?.name === 'AbortError' ? `轮询请求超时（单次 ${VIDEO_REQUEST_TIMEOUT_MS / 1000}s）` : (e?.message || String(e))
+      next.error = e?.name === 'AbortError'
+        ? `轮询请求超时（单次 ${(videoApiTypeOf(rec.apiType) === 'google-omni' ? VIDEO_OMNI_FETCH_TIMEOUT_MS : VIDEO_REQUEST_TIMEOUT_MS) / 1000}s）`
+        : (e?.message || String(e))
       next.checks = videoBuildChecks(next)
     } finally {
       requeryingRef.current.delete(rec.id)
@@ -1240,6 +1625,7 @@ function VideoApiTestTool() {
     }
     next.durationMs = (rec.durationMs || 0) + Math.round(performance.now() - t0)
     next.ok = videoSettleOk(next)
+    rememberOmniInteraction(next)
     replaceRecord(next)
     if (!cancelled) {
       const st = next.taskStatus || ''
@@ -1249,7 +1635,7 @@ function VideoApiTestTool() {
 
   /** 按 id 原地替换一条记录：历史列表 + IndexedDB + 工作台里引用它的用例 + 打开中的详情弹窗 */
   const replaceRecord = (next: VideoRecord) => {
-    const histRec: VideoRecord = { ...next, rawSnippet: next.rawSnippet.length > 80_000 ? next.rawSnippet.slice(0, 80_000) + '\n…' : next.rawSnippet }
+    const histRec: VideoRecord = videoRecordForHistory(next)
     if (historyRef.current.some(r => r.id === next.id)) {
       const list = historyRef.current.map(r => (r.id === next.id ? histRec : r))
       historyRef.current = list
@@ -1268,11 +1654,96 @@ function VideoApiTestTool() {
     setDetailRec(cur => (cur && cur.id === next.id ? next : cur))
   }
 
+  const reprobeRecord = async (rec: VideoRecord, opts?: { quiet?: boolean }) => {
+    const src = videoReprobeSrc(rec)
+    const hadProbe = videoHasUsableProbe(rec)
+    if (!src && !hadProbe) {
+      if (!opts?.quiet) toastShow('没有可识别的成片地址或元数据')
+      return
+    }
+    if (requeryingRef.current.has(rec.id)) return
+    requeryingRef.current.add(rec.id)
+    setRequeryingIds(new Set(requeryingRef.current))
+    const next: VideoRecord = {
+      ...rec,
+      targets: { ...rec.targets },
+      pollLog: [...(rec.pollLog || []), { at: Date.now(), status: '↻ 重新识别视频信息' }],
+    }
+    const apply = (msg: string) => {
+      next.checks = videoBuildChecks(next)
+      next.ok = videoSettleOk(next)
+      replaceRecord(next)
+      if (!opts?.quiet) toastShow(msg)
+    }
+    try {
+      if (hadProbe) {
+        next.ok = true
+        if (next.error && /无法加载视频|成片元数据不可读|拉取成片|成片下载/.test(next.error)) next.error = null
+        next.checks = videoBuildChecks(next)
+        next.ok = videoSettleOk(next)
+        const cls = videoClassify(next)
+        if (cls === 'pass' || !src) {
+          replaceRecord(next)
+          if (!opts?.quiet) toastShow(cls === 'pass' ? '已按现有元数据重算校验' : '已重算校验，仍未通过')
+          return
+        }
+      }
+      if (!src) {
+        apply('没有可探测的成片地址')
+        return
+      }
+      const probeSrc = omniLooksLikeFileUrl(src)
+        ? await fetchOmniFileBlobUrl(src, next, { retries: 6 })
+        : src
+      const meta = await probeVideoMeta(probeSrc, 20000, { detectAudio: typeof next.targets.generate_audio === 'boolean' })
+      adoptProbedVideo(next, src, meta)
+      apply('成片已重新识别')
+    } catch (e: any) {
+      if (hadProbe) {
+        replaceRecord(next)
+        if (!opts?.quiet) toastShow('链接暂不可读，已按上次元数据重算校验')
+      } else {
+        next.probe = null
+        next.error = e?.message || '成片元数据不可读'
+        apply(next.error)
+      }
+    } finally {
+      requeryingRef.current.delete(rec.id)
+      setRequeryingIds(new Set(requeryingRef.current))
+    }
+  }
+
+  const reprobeBatch = async (recs: VideoRecord[]) => {
+    const list = recs.filter(r => videoCanReprobe(r))
+    if (!list.length) { toastShow('没有可重新识别的记录'); return }
+    let passed = 0
+    let remain = 0
+    for (const r of list) {
+      const cur = historyRef.current.find(x => x.id === r.id) || r
+      if (!videoCanReprobe(cur)) continue
+      await reprobeRecord(cur, { quiet: true })
+      const after = historyRef.current.find(x => x.id === cur.id) || cur
+      if (videoClassify(after) === 'pass') passed++
+      else remain++
+    }
+    toastShow(`重新识别完成：通过 ${passed}${remain ? `，仍未通过 ${remain}` : ''}`)
+  }
+
+  useEffect(() => {
+    for (const c of cases) {
+      const r = c.result
+      if (!r || !videoCanReprobe(r) || reprobeTriedRef.current.has(r.id)) continue
+      if (!r.error || !/无法加载视频|成片元数据不可读|拉取成片|成片下载/.test(r.error)) continue
+      reprobeTriedRef.current.add(r.id)
+      void reprobeRecord(r)
+    }
+  }, [cases])
+
   const runCase = async (c: VideoCase) => {
     if (running && c.status !== 'running') { toastShow('正在批量运行中'); return }
     const ch = channelsRef.current.find(x => x.id === activeChId)
     if (!ch) { toastShow('请先在「渠道管理」添加并选择渠道'); return }
-    const m = model.trim() || VIDEO_DEFAULT_MODEL
+    const m = model.trim() || (apiType === 'google-omni' ? OMNI_DEFAULT_MODEL : VIDEO_DEFAULT_MODEL)
     const apiKey = await decryptLlmApiKey(ch.apiKeyEnc)
     if (!apiKey) { toastShow('渠道 API Key 无效，请重新编辑保存'); return }
     if (!currentRunIdRef.current) currentRunIdRef.current = videoUid()
@@ -1286,18 +1757,21 @@ function VideoApiTestTool() {
     const rec: VideoRecord = {
       id: videoUid(), runId: currentRunIdRef.current, time: Date.now(),
       caseName: c.name, caseDesc: c.desc, channelName: ch.name, model: m, prompt,
-      kind: c.kind, caseId: c.id, expect: videoExpectFor(c.def, m), testMaterials, targets: {}, skippedRoles: [],
+      apiType, kind: c.kind, caseId: c.id, expect: videoExpectFor(c.def, m, apiType), testMaterials: apiType === 'seedance' && testMaterials, targets: {}, skippedRoles: [],
       status: 0, respHeaders: {}, reqId: '', sentPreview: '',
       ok: false, error: null, rawSnippet: '', taskId: null, taskStatus: null, pollCount: 0,
       videoUrl: null, probe: null, usage: null, durationMs: 0, checks: [], pollLog: [],
     }
     try {
-      if (c.kind === 'material-group' || c.kind === 'material-assets') await runOpenApi(c, ch, apiKey, rec)
+      if (apiType === 'google-omni') await runOmni(c, ch, apiKey, rec)
+      else if (c.kind === 'material-group' || c.kind === 'material-assets') await runOpenApi(c, ch, apiKey, rec)
       else await runTask(c, ch, apiKey, rec)
     } catch (e: any) {
       rec.ok = false
       rec.error = e?.name === 'AbortError'
-        ? (rec.taskId ? `轮询请求超时（单次 ${VIDEO_REQUEST_TIMEOUT_MS / 1000}s）` : `提交请求超时（${VIDEO_SUBMIT_TIMEOUT_MS / 60000} 分钟内网关未返回任务 id，通常卡在素材转换）`)
+        ? (rec.taskId ? `轮询请求超时（单次 ${(apiType === 'google-omni' ? VIDEO_OMNI_FETCH_TIMEOUT_MS : VIDEO_REQUEST_TIMEOUT_MS) / 1000}s）` : (apiType === 'google-omni'
+          ? `提交请求超时（${VIDEO_SUBMIT_TIMEOUT_MS / 60000} 分钟内未返回 interaction）`
+          : `提交请求超时（${VIDEO_SUBMIT_TIMEOUT_MS / 60000} 分钟内网关未返回任务 id，通常卡在素材转换）`))
         : (e?.message || String(e))
       rec.checks = videoBuildChecks(rec)
     }
@@ -1314,6 +1788,9 @@ function VideoApiTestTool() {
     setCases(cs => cs.map(c => ({ ...c, status: 'idle' as const, result: null })))
     currentRunIdRef.current = null
     assetsRef.current = { groupId: null }
+    omniSessionRef.current = { lastInteractionId: null }
+    omniMediaCacheRef.current = new Map()
+    revokeOmniBlobs()
     setRestoredFrom(null)
   }
 
@@ -1323,6 +1800,7 @@ function VideoApiTestTool() {
     setRunning(true)
     currentRunIdRef.current = videoUid()
     assetsRef.current = { groupId: null }
+    omniSessionRef.current = { lastInteractionId: null }
     setRestoredFrom(null)
     stopRef.current = false
     try {
@@ -1456,15 +1934,29 @@ function VideoApiTestTool() {
           <b>错误：</b>{videoEsc(r.error)}
         </div>
       ))}
+      {videoCanReprobe(r) && (
+        <div data-html2canvas-ignore className="flex items-center gap-2 flex-wrap rounded-xl px-3 py-2 text-xs"
+          style={{ background: 'var(--accentSub)', border: '1px solid var(--border)', color: 'var(--t2)' }}>
+          <span>{videoHasUsableProbe(r)
+            ? '校验未通过。可重新识别成片宽高时长，并按当前规则重算（不重提任务）'
+            : '成片地址在，但浏览器没读到宽高时长（TOS 直链有时会被播放器拒，新标签能开）'}</span>
+          <div className="ml-auto">
+            <Btn small variant="accent" disabled={requeryingIds.has(r.id)} onClick={() => reprobeRecord(r)}>
+              {requeryingIds.has(r.id) ? '识别中…' : '↻ 重新识别视频信息'}
+            </Btn>
+          </div>
+        </div>
+      )}
       {r.videoUrl && (
         <div>
           <p className="text-xs font-semibold mb-1.5" style={{ color: 'var(--t3)', letterSpacing: '0.05em' }}>成片（链接约 24h 过期）</p>
           <div className="rounded-xl overflow-hidden cursor-zoom-in" style={{ border: '1px solid var(--border)', background: '#000' }}
-            onClick={() => setPreviewUrl(r.videoUrl)}>
-            <video src={r.videoUrl} muted playsInline preload="metadata" className="w-full max-h-[260px] object-contain"
+            onClick={() => { previewRecRef.current = r; setPreviewUrl(r.videoUrl) }}>
+            <video src={r.videoUrl} muted playsInline preload="metadata" referrerPolicy="no-referrer" className="w-full max-h-[260px] object-contain"
+              onError={e => { void recoverPlayableVideo(e.currentTarget, videoRemoteSrc(r), r) }}
               onLoadedMetadata={e => { try { e.currentTarget.currentTime = Math.min(0.1, (e.currentTarget.duration || 1) / 2) } catch { /* ignore */ } }} />
           </div>
-          <a href={r.videoUrl} target="_blank" rel="noreferrer" className="text-[11px] font-mono break-all mt-1.5 inline-block" style={{ color: 'var(--accent)' }}>{r.videoUrl}</a>
+          <a href={videoDisplayUrl(r) || r.videoUrl} target="_blank" rel="noreferrer" className="text-[11px] font-mono break-all mt-1.5 inline-block" style={{ color: 'var(--accent)' }}>{videoDisplayUrl(r) || r.videoUrl}</a>
         </div>
       )}
       {r.pollLog.length > 0 && (
@@ -1491,10 +1983,14 @@ function VideoApiTestTool() {
   )
 
   const renderCaseRow = (c: VideoCase, i: number) => {
-    const m = model.trim() || VIDEO_DEFAULT_MODEL
-    const built = videoBuildPlan(c.def, m, prompt, urls, testMaterials, assetsRef.current)
-    const preview = c.editedPreview != null ? c.editedPreview : videoPlanPreview(built.plan)
-    const expect = videoExpectFor(c.def, m)
+    const m = model.trim() || (apiType === 'google-omni' ? OMNI_DEFAULT_MODEL : VIDEO_DEFAULT_MODEL)
+    const built = apiType === 'google-omni'
+      ? omniBuildPlan(c.def, m, prompt, urls, omniSessionRef.current.lastInteractionId)
+      : videoBuildPlan(c.def, m, prompt, urls, testMaterials, assetsRef.current)
+    const preview = !c.expanded && apiType === 'google-omni'
+      ? ''
+      : (c.editedPreview != null ? c.editedPreview : (apiType === 'google-omni' ? omniPreviewBody(built.plan.body) : videoPlanPreview(built.plan)))
+    const expect = videoExpectFor(c.def, m, apiType)
     const statusColor = c.status === 'running' ? 'var(--accent)' : c.status === 'pass' ? 'var(--ok)' : c.status === 'fail' ? 'var(--err)' : c.status === 'error' ? 'var(--warn)' : 'transparent'
     return (
       <div key={c.id} data-case-name={c.name} className="rounded-2xl overflow-hidden transition-all duration-150"
@@ -1544,7 +2040,18 @@ function VideoApiTestTool() {
 
   const restoreBatch = useCallback((batch: VideoBatch) => {
     if (casesRef.current.some(c => c.result) && !window.confirm('当前页已有结果，还原将覆盖工作台，继续？')) return
-    const nextCases = videoBuildCases(batch.records.some(r => r.testMaterials))
+    const batchApi = videoApiTypeOf(batch.apiType || batch.records[0]?.apiType)
+    revokeOmniBlobs()
+    omniSessionRef.current = { lastInteractionId: null }
+    omniMediaCacheRef.current = new Map()
+    if (batchApi === 'google-omni') {
+      const last = [...batch.records]
+        .filter(r => r.ok && r.taskId && (r.expect ?? 'success') === 'success')
+        .sort((a, b) => a.time - b.time)
+        .at(-1)
+      if (last?.taskId) omniSessionRef.current.lastInteractionId = last.taskId
+    }
+    const nextCases = videoBuildCases(batchApi === 'seedance' && batch.records.some(r => r.testMaterials), batchApi)
     const byName = new Map(batch.records.map(r => [r.caseName, r]))
     const byId = new Map(batch.records.filter(r => r.caseId).map(r => [r.caseId!, r]))
     let restored = 0
@@ -1556,7 +2063,8 @@ function VideoApiTestTool() {
       c.expanded = true
       restored++
     }
-    setTestMaterials(batch.records.some(r => r.testMaterials))
+    setApiType(batchApi)
+    setTestMaterials(batchApi === 'seedance' && batch.records.some(r => r.testMaterials))
     setCases(nextCases)
     casesRef.current = nextCases
     if (batch.models[0]) setModel(batch.models[0])
@@ -1588,7 +2096,7 @@ function VideoApiTestTool() {
   const leftPanel = (
     <div className="w-[340px] flex-shrink-0 overflow-y-auto p-5 flex flex-col gap-4">
       <Card>
-        <p className="text-sm font-bold mb-3" style={{ color: 'var(--text)' }}>本次测试配置 <span className="text-xs font-normal" style={{ color: 'var(--t3)' }}>Seedance 火山原生</span></p>
+        <p className="text-sm font-bold mb-3" style={{ color: 'var(--text)' }}>本次测试配置 <span className="text-xs font-normal" style={{ color: 'var(--t3)' }}>{VIDEO_API_TYPE_LABEL[apiType]}</span></p>
         <div className="flex flex-col gap-3">
           <div>
             <Label className="block mb-1.5">使用渠道</Label>
@@ -1596,20 +2104,35 @@ function VideoApiTestTool() {
             {channels.length === 0 && <p className="text-xs mt-1.5" style={{ color: 'var(--warn)' }}>⚠ 请先到「渠道管理」标签页添加渠道。</p>}
           </div>
           <div>
+            <Label className="block mb-1.5">接口类型</Label>
+            <CustomSelect value={apiType} onChange={v => switchApiType(v as VideoApiType)} options={[
+              { value: 'seedance', label: 'Seedance 火山原生' },
+              { value: 'google-omni', label: 'Google Omni' },
+            ]} />
+          </div>
+          <div>
             <Label className="block mb-1.5">模型编码</Label>
-            <EditableSelect value={model} onChange={setModel} options={VIDEO_MODEL_OPTIONS} placeholder="doubao-seedance-2-0" />
+            <EditableSelect value={model} onChange={setModel} options={apiType === 'google-omni' ? OMNI_MODEL_OPTIONS : VIDEO_MODEL_OPTIONS} placeholder={apiType === 'google-omni' ? OMNI_DEFAULT_MODEL : 'doubao-seedance-2-0'} />
           </div>
           <div>
             <Label className="block mb-1.5">提示词</Label>
             <CustomTextarea value={prompt} onChange={setPrompt} rows={3} placeholder={VIDEO_DEFAULT_PROMPT} />
           </div>
-          <Toggle value={testMaterials} onChange={setTestMaterials} label="测试素材库" />
-          <p className="text-[11px] -mt-1" style={{ color: 'var(--t3)' }}>开启后先登记素材，媒体用例改写成 asset://；关闭则直接用下方 https 地址。</p>
+          {apiType === 'seedance' && (
+            <>
+              <Toggle value={testMaterials} onChange={setTestMaterials} label="测试素材库" />
+              <p className="text-[11px] -mt-1" style={{ color: 'var(--t3)' }}>开启后先登记素材，媒体用例改写成 asset://；关闭则直接用下方 https 地址。</p>
+            </>
+          )}
         </div>
       </Card>
       <Card>
         <p className="text-sm font-bold mb-3" style={{ color: 'var(--text)' }}>素材 URL <span className="text-xs font-normal" style={{ color: 'var(--t3)' }}>可改，空值则跳过该角色</span></p>
-        <p className="text-[11px] mb-3 -mt-1.5" style={{ color: 'var(--t3)' }}>默认是火山方舟官方文档的示例素材。链接由网关服务端拉取：需公网可匿名访问（Wikimedia 等对非浏览器 UA / 数据中心 IP 会 403、429），图片宽高 ≥300px、宽高比 0.4~2.5。</p>
+        <p className="text-[11px] mb-3 -mt-1.5" style={{ color: 'var(--t3)' }}>
+          {apiType === 'google-omni'
+            ? 'Omni 由浏览器 fetch 成 base64 再发送，链接必须允许 CORS。默认用 picsum / MDN。名人照仍是 Wikimedia，读失败记请求异常。'
+            : '默认是火山方舟官方文档的示例素材。链接由网关服务端拉取：需公网可匿名访问（Wikimedia 等对非浏览器 UA / 数据中心 IP 会 403、429），图片宽高 ≥300px、宽高比 0.4~2.5。'}
+        </p>
         <div className="flex flex-col gap-3">
           <div data-testid="videotest-first-frame">
             <Label className="block mb-1.5">首帧</Label>
@@ -1636,17 +2159,20 @@ function VideoApiTestTool() {
             )}
             {refVideoErr && <p className="text-[11px] mt-1.5" style={{ color: 'var(--err)' }}>{refVideoErr}</p>}
             {urls.refVideo.trim() && (
-              <video src={urls.refVideo.trim()} muted playsInline preload="metadata" className="mt-2 w-full rounded-lg max-h-28 object-contain" style={{ background: '#000', border: '1px solid var(--border)' }} />
+              <video src={urls.refVideo.trim()} muted playsInline preload="metadata" referrerPolicy="no-referrer" className="mt-2 w-full rounded-lg max-h-28 object-contain" style={{ background: '#000', border: '1px solid var(--border)' }}
+                onError={e => { void recoverPlayableVideo(e.currentTarget, urls.refVideo.trim()) }} />
             )}
           </div>
+          {apiType === 'seedance' && (
           <div data-testid="videotest-ref-audio">
             <Label className="block mb-1.5">参考音频</Label>
             <CustomInput value={urls.refAudio} onChange={v => setUrls(u => ({ ...u, refAudio: v }))} placeholder="https://…" />
           </div>
+          )}
           <div data-testid="videotest-sensitive-face" className="pt-3" style={{ borderTop: '1px solid var(--border)' }}>
             <Label className="block mb-1.5">敏感人像</Label>
             <CustomInput value={urls.sensitiveFace} onChange={v => setUrls(u => ({ ...u, sensitiveFace: v }))} placeholder="https://…（名人 / 真人正脸）" />
-            <p className="text-[11px] mt-1.5" style={{ color: 'var(--t3)' }}>只给「拒绝 · 名人首帧」用，始终 https 直链、不登记进素材库；默认是 Wikimedia 上的赵丽颖发布会照。</p>
+            <p className="text-[11px] mt-1.5" style={{ color: 'var(--t3)' }}>{apiType === 'google-omni' ? '只给「Omni · 拒绝名人图」用。默认 Wikimedia 对 fetch 常无 CORS，读失败记请求异常、不算已拒绝，可换成能被页面 fetch 的链接。' : '只给「拒绝 · 名人首帧」用，始终 https 直链、不登记进素材库；默认是 Wikimedia 上的赵丽颖发布会照。'}</p>
           </div>
         </div>
       </Card>
@@ -1659,12 +2185,12 @@ function VideoApiTestTool() {
         <div className="flex items-center gap-2 mb-3">
           <p className="text-sm font-bold" style={{ color: 'var(--text)' }}>测试用例</p>
           <span className="inline-flex items-center justify-center rounded-full px-2 py-0.5 text-xs font-bold" style={{ background: 'var(--accentSub)', color: 'var(--accent)' }}>{cases.length}</span>
-          <span className="text-xs" style={{ color: 'var(--t3)' }}>· 火山原生 · {testMaterials ? '含素材库' : '仅生视频'}</span>
+          <span className="text-xs" style={{ color: 'var(--t3)' }}>· {VIDEO_API_TYPE_LABEL[apiType]} · {apiType === 'seedance' && testMaterials ? '含素材库' : '仅生视频'}</span>
         </div>
         {restoredFrom && (
           <div className="flex items-center gap-2 flex-wrap rounded-xl px-3 py-2.5 mb-3 text-xs" data-testid="videotest-restored-note"
             style={{ background: 'var(--accentSub)', border: '1px solid var(--border)', color: 'var(--t2)' }}>
-            <span>当前是 <b style={{ color: 'var(--text)' }}>{videoFmtTime(restoredFrom.time)}</b> 那一轮的历史结果（{restoredFrom.count} 条）· 成片只留 URL/封面，TOS 可能过期</span>
+            <span>当前是 <b style={{ color: 'var(--text)' }}>{videoFmtTime(restoredFrom.time)}</b> 那一轮的历史结果（{restoredFrom.count} 条）· {apiType === 'google-omni' ? '成片 blob 刷新即失效，历史不落盘整段视频' : '成片只留 URL/封面，TOS 可能过期'}</span>
             <div className="ml-auto"><Btn small variant="ghost" onClick={resetRun}>清除</Btn></div>
           </div>
         )}
@@ -1715,7 +2241,7 @@ function VideoApiTestTool() {
           {pane === 'test' && renderTestPane()}
           {pane === 'channels' && (
             <VideoChannelsPane
-              channels={channels} activeChId={activeChId} chForm={chForm} editingChId={editingChId}
+              channels={channels} activeChId={activeChId} chForm={chForm} editingChId={editingChId} apiType={apiType}
               onSetActive={setActiveChId} onEdit={editChannel} onCopy={copyChannel} onDelete={delChannel}
               onSave={saveChannel} onChFormChange={setChForm} onClearForm={clearChForm}
             />
@@ -1724,6 +2250,7 @@ function VideoApiTestTool() {
             <VideoHistoryPane
               history={history} channels={channels} exportBusy={exportBusy} requeryingIds={requeryingIds}
               fChannel={fChannel} fModel={fModel} fResult={fResult} onRequery={requeryRecord}
+              onReprobe={reprobeRecord} onReprobeBatch={reprobeBatch}
               onFChannel={setFChannel} onFModel={setFModel} onFResult={setFResult}
               onStartExport={setExportJob}
               onClearAll={clearAllHistory} onDetail={setDetailRec} onDeleteOne={deleteHistOne}
@@ -1742,6 +2269,11 @@ function VideoApiTestTool() {
                 {videoCanRequery(detailRec) && (
                   <Btn small variant="accent" disabled={requeryingIds.has(detailRec.id)} onClick={() => requeryRecord(detailRec)}>
                     {requeryingIds.has(detailRec.id) ? '查询中…' : '↻ 重试查询'}
+                  </Btn>
+                )}
+                {videoCanReprobe(detailRec) && (
+                  <Btn small variant="accent" disabled={requeryingIds.has(detailRec.id)} onClick={() => reprobeRecord(detailRec)}>
+                    {requeryingIds.has(detailRec.id) ? '识别中…' : '↻ 重新识别视频信息'}
                   </Btn>
                 )}
                 <Btn small variant="soft" disabled={exportBusy} onClick={() => setExportJob([detailRec])}>导出 HTML</Btn>
@@ -1777,12 +2309,13 @@ function VideoApiTestTool() {
       {previewUrl && (
         <div className="fixed inset-0 z-50 flex items-center justify-center p-4 ia-lightbox-enter"
           style={{ background: 'color-mix(in srgb, var(--bg) 85%, transparent)', backdropFilter: 'blur(8px)' }}
-          onClick={e => { if (e.target === e.currentTarget) setPreviewUrl(null) }}
+          onClick={e => { if (e.target === e.currentTarget) { previewRecRef.current = null; setPreviewUrl(null) } }}
         >
           <div className="max-w-4xl w-full flex flex-col gap-3">
-            <div className="flex items-center justify-end"><Btn small variant="soft" onClick={() => setPreviewUrl(null)}>关闭 ✕</Btn></div>
+            <div className="flex items-center justify-end"><Btn small variant="soft" onClick={() => { previewRecRef.current = null; setPreviewUrl(null) }}>关闭 ✕</Btn></div>
             <div className="rounded-xl overflow-hidden" style={{ border: '1px solid var(--border)', background: '#000' }}>
-              <video src={previewUrl} controls autoPlay className="max-w-full max-h-[72vh] mx-auto block" />
+              <video src={previewUrl} controls autoPlay referrerPolicy="no-referrer" className="max-w-full max-h-[72vh] mx-auto block"
+                onError={e => { void recoverPlayableVideo(e.currentTarget, previewUrl, previewRecRef.current) }} />
             </div>
           </div>
         </div>

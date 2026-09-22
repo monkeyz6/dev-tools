@@ -80,6 +80,13 @@ describe('oracleNativeToolEvidence', () => {
     const check = oracleNativeToolEvidence({ output: [{ type: 'message', content: [{ text: 'hi' }] }] }, spec)
     assert.equal(check.passed, false)
   })
+  it('xAI 只有 citations / url_citation 也算搜过', () => {
+    const web = matchBuiltinToolCases('grok-4.7').find(c => c.id === 'native-xai-web_search')!
+    assert.equal(oracleNativeToolEvidence({ citations: ['https://example.com/a'] }, web).passed, true)
+    assert.equal(oracleNativeToolEvidence({
+      output: [{ type: 'message', content: [{ type: 'output_text', annotations: [{ type: 'url_citation', url: 'https://example.com' }] }] }],
+    }, web).passed, true)
+  })
   it('正文提到工具名不算通过', () => {
     const check = oracleNativeToolEvidence({
       output: [{ type: 'message', content: [{ text: 'I used web_search_call / url_citation' }] }],
@@ -120,7 +127,27 @@ describe('applyBuiltinTool', () => {
     applyBuiltinTool(body, spec)
     assert.deepEqual(body.tools, [{ type: 'web_search' }])
     assert.deepEqual(body.tool_choice, { type: 'web_search' })
+    assert.equal(body.input, spec.prompt)
     assert.equal(body.temperature, undefined)
+  })
+  it('Grok 联网搜索用字符串 required 和 role/content input', () => {
+    const spec = matchBuiltinToolCases('grok-4.7').find(c => c.id === 'native-xai-web_search')!
+    const body: Record<string, unknown> = { model: 'grok-4.7', input: spec.prompt }
+    applyBuiltinTool(body, spec)
+    assert.deepEqual(body, {
+      model: 'grok-4.7',
+      input: [{ role: 'user', content: 'What is a major news headline from today?' }],
+      tools: [{ type: 'web_search' }],
+      tool_choice: 'required',
+    })
+  })
+  it('Grok X 搜索同样不发对象 tool_choice', () => {
+    const spec = matchBuiltinToolCases('grok-4.7').find(c => c.id === 'native-xai-x_search')!
+    const body: Record<string, unknown> = { model: 'grok-4.7', input: spec.prompt }
+    applyBuiltinTool(body, spec)
+    assert.deepEqual(body.tools, [{ type: 'x_search' }])
+    assert.equal(body.tool_choice, 'required')
+    assert.deepEqual(body.input, [{ role: 'user', content: 'What are people saying about xAI on X?' }])
   })
   it('通义 Chat 把 enable_search 写到顶层', () => {
     const spec = matchBuiltinToolCases('qwen-plus').find(c => c.id === 'native-qwen-enable_search')!

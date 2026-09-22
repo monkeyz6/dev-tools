@@ -1,4 +1,5 @@
-import type { VideoRecord } from './types'
+import type { VideoApiType, VideoRecord } from './types'
+import { videoApiTypeOf } from './types'
 import { videoClassify } from './summary'
 
 export const VIDEO_HIST_MAX_BATCHES = 20
@@ -11,6 +12,7 @@ export interface VideoBatch {
   endAt: number
   channelName: string
   models: string[]
+  apiType: VideoApiType
   passed: number
   failed: number
   errored: number
@@ -36,6 +38,7 @@ function videoBatchOf(id: string, records: VideoRecord[], legacy: boolean): Vide
     endAt: times.length ? Math.max(...times) : 0,
     channelName: sorted[0]?.channelName || '',
     models,
+    apiType: videoApiTypeOf(sorted[0]?.apiType),
     passed, failed, errored,
     legacy,
   }
@@ -59,7 +62,7 @@ export function videoGroupBatches(records: VideoRecord[]): VideoBatch[] {
 
   const legacyByKey = new Map<string, VideoRecord[]>()
   for (const r of legacy) {
-    const key = `${r.channelName}|${r.model}`
+    const key = `${r.channelName}|${r.model}|${videoApiTypeOf(r.apiType)}`
     const list = legacyByKey.get(key)
     if (list) list.push(r)
     else legacyByKey.set(key, [r])
