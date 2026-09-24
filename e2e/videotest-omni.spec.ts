@@ -236,7 +236,7 @@ test('Omni mock：同步 data / uri、占位不进历史、拒绝 21:9、CORS �
       }),
     })
   })
-  await page.route(url => String(url).includes('/byteplus/'), route => route.fulfill({ status: 599, body: 'seedance-should-not-run' }))
+  await page.route(url => String(url).includes('/api/v3/contents/generations/tasks') || String(url).includes('/byteplus/'), route => route.fulfill({ status: 599, body: 'seedance-should-not-run' }))
 
   await page.goto('/tools/videotest')
   await setupChannel(page, 'Omni 测试渠道')

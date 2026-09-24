@@ -16,6 +16,8 @@ import {
   omniMaterializeRequest, omniParseSubmit, omniPollUrl, omniPreviewBody, omniScrubBody, omniScrubValue,
 } from './video-report/google-omni'
 import { formatVideoTaskError, parseVideoTaskError, videoBuildErrorBodyChecks, videoShouldCheckErrorBody } from './video-report/errors'
+import { videoOfficialLink, videoOfficialUrlVerdict } from './video-report/official-url'
+import { VIDEO_TASK_ENDPOINT, videoAssetEndpoint, videoSeedancePath, videoSeedanceUrl } from './video-report/seedance-url'
 import { videoClassify, videoVerdict } from './video-report/summary'
 import { videoCanReprobe, videoCanRequery, videoHasUsableProbe, videoReprobeSrc, videoRetryAction, videoRetrySort, videoRetryTargets } from './video-report/retry'
 import { videoGroupBatches, videoTrimByBatch } from './video-report/batches'
@@ -315,7 +317,7 @@ function videoBuildPlan(def: VideoCaseDef, model: string, prompt: string, urls: 
       plan: {
         kind: 'openapi',
         method: 'POST',
-        endpoint: '/byteplus/?Action=CreateAssetGroup&Version=2024-01-01',
+        endpoint: videoAssetEndpoint('CreateAssetGroup'),
         headers: { Authorization: 'Bearer {{APIKEY}}', 'Content-Type': 'application/json' },
         body: { Name: `videotest-${new Date().toISOString().slice(0, 19).replace(/[:T]/g, '')}`, Description: '视频接口测试自动创建', GroupType: 'AIGC' },
       },
@@ -334,7 +336,7 @@ function videoBuildPlan(def: VideoCaseDef, model: string, prompt: string, urls: 
       plan: {
         kind: 'openapi',
         method: 'POST',
-        endpoint: '/byteplus/?Action=CreateAsset&Version=2024-01-01',
+        endpoint: videoAssetEndpoint('CreateAsset'),
         headers: { Authorization: 'Bearer {{APIKEY}}', 'Content-Type': 'application/json' },
         body: { GroupId: assets?.groupId || '{{GROUP_ID}}', items },
       },
@@ -383,7 +385,7 @@ function videoBuildPlan(def: VideoCaseDef, model: string, prompt: string, urls: 
     plan: {
       kind: 'task',
       method: 'POST',
-      endpoint: '/byteplus/api/v3/contents/generations/tasks',
+      endpoint: VIDEO_TASK_ENDPOINT,
       headers: { Authorization: 'Bearer {{APIKEY}}', 'Content-Type': 'application/json' },
       body,
     },
@@ -488,6 +490,13 @@ function videoBuildChecks(rec: VideoRecord): VideoCheck[] {
     checks.push({ name: '任务状态', target: 'succeeded', actual: rec.taskStatus, pass: videoTaskSucceeded(rec.taskStatus) })
   }
   checks.push({ name: '视频地址', target: 'content.video_url', actual: rec.videoUrl || '无', pass: !!rec.videoUrl })
+  if (videoApiTypeOf(rec.apiType) !== 'google-omni') {
+    const remote = videoOfficialLink(rec)
+    if (remote) {
+      const official = videoOfficialUrlVerdict(rec.model, remote)
+      checks.push({ name: '官方域名', target: official.target, actual: official.actual, pass: official.pass })
+    }
+  }
   checks.push({ name: '成片元数据', target: '可读宽高时长', actual: rec.probe ? `${rec.probe.w}×${rec.probe.h} · ${rec.probe.duration.toFixed(2)}s` : (rec.error && !rec.probe ? rec.error : '未读到'), pass: !!(rec.probe && rec.probe.w && rec.probe.h && rec.probe.duration > 0) })
 
   const wantRes = rec.targets.resolution
@@ -732,7 +741,7 @@ const VideoChannelsPane = React.memo(function VideoChannelsPane({
           <span className="text-[11px]" style={{ color: 'var(--t3)' }}>{
             apiType === 'google-omni'
               ? 'baseUrl 填网关根，工具会拼 /v1beta/interactions。apiKey 经 AES-GCM 加密。'
-              : 'baseUrl 填网关根，工具会拼 /byteplus/api/v3/... 与 OpenAPI。apiKey 经 AES-GCM 加密。'
+              : 'baseUrl 填网关根。含 oinone 或 ainowork 时拼 /byteplus/api/v3/... 与 /byteplus/?Action=…，否则不加 /byteplus。末尾已是 /byteplus 不会再加一次。apiKey 经 AES-GCM 加密。'
           }</span>
         </div>
       </Card>
@@ -1212,7 +1221,7 @@ function VideoApiTestTool() {
     }
 
     if (c.kind === 'material-group') {
-      const resp = await videoFetch(ch.baseUrl + plan.endpoint, VIDEO_REQUEST_TIMEOUT_MS, { method: 'POST', headers: videoHeaders(apiKey), body: JSON.stringify(plan.body) })
+      const resp = await videoFetch(videoSeedanceUrl(ch.baseUrl, plan.endpoint), VIDEO_REQUEST_TIMEOUT_MS, { method: 'POST', headers: videoHeaders(apiKey), body: JSON.stringify(plan.body) })
       const text = await resp.text()
       rec.status = resp.status
       rec.respHeaders = Object.fromEntries(resp.headers.entries())
@@ -1254,7 +1263,7 @@ function VideoApiTestTool() {
         return
       }
       const body = { GroupId: assetsRef.current.groupId, URL: item.URL, Name: item.Name, AssetType: item.AssetType }
-      const resp = await videoFetch(ch.baseUrl + '/byteplus/?Action=CreateAsset&Version=2024-01-01', VIDEO_REQUEST_TIMEOUT_MS, {
+      const resp = await videoFetch(videoSeedanceUrl(ch.baseUrl, videoAssetEndpoint('CreateAsset')), VIDEO_REQUEST_TIMEOUT_MS, {
         method: 'POST', headers: videoHeaders(apiKey), body: JSON.stringify(body),
       })
       lastStatus = resp.status
@@ -1276,7 +1285,7 @@ function VideoApiTestTool() {
       let status = 'Processing'
       while (Date.now() - t0 < VIDEO_ASSET_POLL_MAX_MS) {
         if (stopRef.current) break
-        const q = await videoFetch(ch.baseUrl + '/byteplus/?Action=GetAsset&Version=2024-01-01', VIDEO_REQUEST_TIMEOUT_MS, {
+        const q = await videoFetch(videoSeedanceUrl(ch.baseUrl, videoAssetEndpoint('GetAsset')), VIDEO_REQUEST_TIMEOUT_MS, {
           method: 'POST', headers: videoHeaders(apiKey), body: JSON.stringify({ Id: assetId }),
         })
         const qt = await q.text()
@@ -1327,7 +1336,7 @@ function VideoApiTestTool() {
     if (c.editedPreview != null) plan = videoParseEditedPreview(plan, c.editedPreview)
     rec.sentPreview = JSON.stringify(plan.body, null, 2)
 
-    const resp = await videoFetch(ch.baseUrl + plan.endpoint, VIDEO_SUBMIT_TIMEOUT_MS, {
+    const resp = await videoFetch(videoSeedanceUrl(ch.baseUrl, plan.endpoint), VIDEO_SUBMIT_TIMEOUT_MS, {
       method: 'POST', headers: videoHeaders(apiKey), body: JSON.stringify(plan.body),
     })
     const text = await resp.text()
@@ -1367,7 +1376,7 @@ function VideoApiTestTool() {
     rec: VideoRecord, ch: VideoChannel, apiKey: string, initialJson: any,
     shouldStop: () => boolean, immediate = false,
   ): Promise<{ lastJson: any; stopped: boolean }> => {
-    const pollUrl = `${ch.baseUrl}/byteplus/api/v3/contents/generations/tasks/${encodeURIComponent(rec.taskId || '')}`
+    const pollUrl = videoSeedanceUrl(ch.baseUrl, `${VIDEO_TASK_ENDPOINT}/${encodeURIComponent(rec.taskId || '')}`)
     const t0 = Date.now()
     let lastJson: any = initialJson
     let first = immediate
@@ -2027,7 +2036,7 @@ function VideoApiTestTool() {
                   <Btn small variant="accent" disabled={c.status === 'running'} onClick={() => { c.expanded = true; runCase(c) }}>▶ 运行此用例</Btn>
                 </div>
               </div>
-              <div className="text-[11px] font-mono mb-1.5" style={{ color: 'var(--t3)' }}>{built.plan.method} {built.plan.endpoint}</div>
+              <div className="text-[11px] font-mono mb-1.5" style={{ color: 'var(--t3)' }}>{built.plan.method} {apiType === 'google-omni' ? built.plan.endpoint : videoSeedancePath(channels.find(x => x.id === activeChId)?.baseUrl ?? '', built.plan.endpoint)}</div>
               <CustomTextarea value={preview} mono rows={Math.min(16, preview.split('\n').length + 1)}
                 onChange={v => { c.editedPreview = v; setCases([...cases]) }} />
             </div>

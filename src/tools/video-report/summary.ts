@@ -14,11 +14,12 @@ export function videoClassify(r: VideoRecord): 'pass' | 'fail' | 'error' {
   return !r.ok ? 'error' : (videoVerdict(r.checks || []).level === 'ok' ? 'pass' : 'fail')
 }
 
-const VIDEO_CAPABILITY_ORDER = ['request', 'task', 'videoUrl', 'probe', 'resolution', 'duration', 'ratio', 'audio', 'reject', 'material'] as const
+const VIDEO_CAPABILITY_ORDER = ['request', 'task', 'videoUrl', 'officialHost', 'probe', 'resolution', 'duration', 'ratio', 'audio', 'reject', 'material'] as const
 const VIDEO_CAPABILITY_LABEL: Record<string, string> = {
   request: '接口连通',
   task: '任务成功',
   videoUrl: '返回视频地址',
+  officialHost: '官方成片域名',
   probe: '成片可读',
   resolution: '分辨率档位',
   duration: '时长',
@@ -32,6 +33,7 @@ function videoCapabilityKey(rawName: string): string | null {
   if (rawName.startsWith('请求成功') || rawName.startsWith('OpenAPI')) return 'request'
   if (rawName === '任务状态') return 'task'
   if (rawName === '视频地址') return 'videoUrl'
+  if (rawName === '官方域名') return 'officialHost'
   if (rawName === '成片元数据') return 'probe'
   if (rawName === '分辨率') return 'resolution'
   if (rawName === '时长') return 'duration'

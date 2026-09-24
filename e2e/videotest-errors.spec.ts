@@ -11,11 +11,11 @@ const CORS = {
 const DEFAULT_PROMPT = '海浪拍打礁石，慢动作，电影感'
 
 function isSubmit(url: string) {
-  return url.includes('/byteplus/api/v3/contents/generations/tasks') && !/\/tasks\/[^/]+$/.test(url)
+  return url.includes('/api/v3/contents/generations/tasks') && !/\/tasks\/[^/]+$/.test(url)
 }
 
 function isPoll(url: string, taskId: string) {
-  return new RegExp(`/byteplus/api/v3/contents/generations/tasks/${taskId}$`).test(url)
+  return new RegExp(`/api/v3/contents/generations/tasks/${taskId}$`).test(url)
 }
 
 async function fulfillCors(route: { request: () => { method: () => string }; fulfill: (r: object) => Promise<void> }, rest: { status: number; body: string; requestId?: string }) {

@@ -9,6 +9,14 @@ const CORS = {
   'Access-Control-Allow-Methods': '*',
 }
 
+/** 默认模型 doubao-seedance-* 的官方成片桶。mock 必须落在这里，否则「官方域名」会把用例判未通过。 */
+const OFFICIAL_CN_HOST = 'ark-acg-cn-beijing.tos-cn-beijing.volces.com'
+const officialCn = (name: string) => `https://${OFFICIAL_CN_HOST}/${name}`
+
+function routeOfficialVideo(page: import('@playwright/test').Page) {
+  return page.route(`https://${OFFICIAL_CN_HOST}/**`, route => route.fulfill({ status: 200, contentType: 'video/mp4', body: 'fake' }))
+}
+
 function installVideoMetaStub(page: import('@playwright/test').Page) {
   return page.addInitScript(() => {
     Object.defineProperty(HTMLVideoElement.prototype, 'videoWidth', { configurable: true, get() { return 1280 } })
@@ -44,6 +52,9 @@ test('视频接口测试工具冒烟：三 Tab 与最少用例', async ({ page }
   await expect(page.locator('[data-case-name="1080p · 1:1 · 5s"]').getByText('预期不支持', { exact: true })).toHaveCount(0)
 
   await page.getByText('480p · 9:16 · 4s').click()
+  const case480 = page.locator('[data-case-name="480p · 9:16 · 4s"]')
+  await expect(case480).toContainText('POST /api/v3/contents/generations/tasks')
+  await expect(case480).not.toContainText('/byteplus')
   const p480 = page.locator('[data-case-name="480p · 9:16 · 4s"] textarea')
   await expect(p480).toContainText('"resolution": "480p"')
   await expect(p480).toContainText('"ratio": "9:16"')
@@ -102,11 +113,13 @@ test('改 URL 后用例预览重写；素材开关改写成 asset://', async ({ 
 test('渠道保存、运行文生必填、历史还原、HTML 可滚动', async ({ page }) => {
   await installVideoMetaStub(page)
   const sent: any[] = []
-  await page.route(url => String(url).includes('/byteplus/api/v3/contents/generations/tasks') && !String(url).match(/tasks\/.+/), async route => {
+  const sentUrls: string[] = []
+  await page.route(url => String(url).includes('/api/v3/contents/generations/tasks') && !String(url).match(/tasks\/.+/), async route => {
     if (route.request().method() === 'OPTIONS') {
       await route.fulfill({ status: 204, headers: CORS })
       return
     }
+    sentUrls.push(route.request().url())
     sent.push(route.request().postDataJSON())
     await route.fulfill({
       status: 200,
@@ -115,14 +128,14 @@ test('渠道保存、运行文生必填、历史还原、HTML 可滚动', async 
       body: JSON.stringify({
         id: 'task_1',
         status: 'success',
-        content: { video_url: 'https://cdn.example/result.mp4' },
+        content: { video_url: officialCn('result.mp4') },
         ratio: '16:9',
         duration: 5,
         resolution: '720p',
       }),
     })
   })
-  await page.route('**/cdn.example/**', route => route.fulfill({ status: 200, contentType: 'video/mp4', body: 'fake' }))
+  await routeOfficialVideo(page)
 
   await page.goto('/tools/videotest')
   await page.getByRole('button', { name: '渠道管理', exact: true }).click()
@@ -148,11 +161,12 @@ test('渠道保存、运行文生必填、历史还原、HTML 可滚动', async 
   })
   expect(sent[0].resolution).toBeUndefined()
   expect(sent[0].camera_fixed).toBeUndefined()
+  expect(sentUrls[0]).toBe('https://mock.example/api/v3/contents/generations/tasks')
 
   const hist = await readHistoryStore(page, 'videotest')
   expect(hist.length).toBeGreaterThan(0)
   expect(hist[0].caseName).toBe('文生 · 仅必填')
-  expect(hist[0].videoUrl).toBe('https://cdn.example/result.mp4')
+  expect(hist[0].videoUrl).toBe(officialCn('result.mp4'))
 
   await page.getByRole('button', { name: /^历史记录/ }).click()
   await expect(page.getByTestId('videotest-batch')).toBeVisible()
@@ -193,7 +207,7 @@ test('素材库用例走 OpenAPI，媒体用例改写 asset://', async ({ page }
   await installVideoMetaStub(page)
   const actions: string[] = []
   const taskBodies: any[] = []
-  await page.route(url => String(url).includes('/byteplus/?') || String(url).includes('/byteplus?'), async route => {
+  await page.route(url => /[?&]Action=/.test(String(url)), async route => {
     if (route.request().method() === 'OPTIONS') {
       await route.fulfill({ status: 204, headers: CORS })
       return
@@ -216,7 +230,7 @@ test('素材库用例走 OpenAPI，媒体用例改写 asset://', async ({ page }
     }
     await route.fulfill({ status: 404, body: 'no' })
   })
-  await page.route(url => String(url).includes('/byteplus/api/v3/contents/generations/tasks'), async route => {
+  await page.route(url => String(url).includes('/api/v3/contents/generations/tasks'), async route => {
     if (route.request().method() === 'OPTIONS') {
       await route.fulfill({ status: 204, headers: CORS })
       return
@@ -226,10 +240,10 @@ test('素材库用例走 OpenAPI，媒体用例改写 asset://', async ({ page }
       status: 200,
       contentType: 'application/json',
       headers: { ...CORS, 'x-oneapi-request-id': 'vid-mat-1' },
-      body: JSON.stringify({ id: 'task_m', status: 'succeeded', content: { video_url: 'https://cdn.example/m.mp4' }, ratio: '16:9', duration: 5 }),
+      body: JSON.stringify({ id: 'task_m', status: 'succeeded', content: { video_url: officialCn('m.mp4') }, ratio: '16:9', duration: 5 }),
     })
   })
-  await page.route('**/cdn.example/**', route => route.fulfill({ status: 200, contentType: 'video/mp4', body: 'fake' }))
+  await routeOfficialVideo(page)
 
   await page.goto('/tools/videotest')
   await page.getByRole('button', { name: '渠道管理', exact: true }).click()
@@ -256,7 +270,7 @@ test('素材库用例走 OpenAPI，媒体用例改写 asset://', async ({ page }
 test('分辨率按面积档校验；拒绝与预期不支持用例反向判定；名人首帧走直链', async ({ page }) => {
   await installVideoMetaStub(page)
   const sent: any[] = []
-  await page.route(url => String(url).includes('/byteplus/api/v3/contents/generations/tasks') && !String(url).match(/tasks\/.+/), async route => {
+  await page.route(url => String(url).includes('/api/v3/contents/generations/tasks') && !String(url).match(/tasks\/.+/), async route => {
     if (route.request().method() === 'OPTIONS') {
       await route.fulfill({ status: 204, headers: CORS })
       return
@@ -271,10 +285,10 @@ test('分辨率按面积档校验；拒绝与预期不支持用例反向判定�
     }
     await route.fulfill({
       status: 200, contentType: 'application/json', headers: { ...CORS, 'x-oneapi-request-id': 'vid-res-1' },
-      body: JSON.stringify({ id: 'task_r', status: 'succeeded', content: { video_url: 'https://cdn.example/r.mp4' }, ratio: body.ratio, duration: body.duration, seed: body.seed ?? 78674 }),
+      body: JSON.stringify({ id: 'task_r', status: 'succeeded', content: { video_url: officialCn('r.mp4') }, ratio: body.ratio, duration: body.duration, seed: body.seed ?? 78674 }),
     })
   })
-  await page.route('**/cdn.example/**', route => route.fulfill({ status: 200, contentType: 'video/mp4', body: 'fake' }))
+  await routeOfficialVideo(page)
 
   await page.goto('/tools/videotest')
   await page.getByRole('button', { name: '渠道管理', exact: true }).click()
@@ -298,6 +312,10 @@ test('分辨率按面积档校验；拒绝与预期不支持用例反向判定�
   const row = (caseName: string, check: string) => page.locator(`[data-case-name="${caseName}"] tr`).filter({ hasText: check })
   await expect(row('720p · 21:9 · 5s', '分辨率')).toContainText('通过')
   await expect(row('720p · 21:9 · 5s', '分辨率')).not.toContainText('未通过')
+  await expect(row('720p · 21:9 · 5s', '官方域名')).toContainText(OFFICIAL_CN_HOST)
+  await expect(row('720p · 21:9 · 5s', '官方域名')).not.toContainText('未通过')
+  await expect(row('480p · 9:16 · 4s', '官方域名')).not.toContainText('未通过')
+  await expect(row('拒绝 · 500p', '官方域名')).toHaveCount(0)
   await expect(row('480p · 9:16 · 4s', '分辨率')).toContainText('未通过')
   await expect(row('720p · 21:9 · 5s', '音轨')).toContainText('信息')
   await expect(row('480p · 9:16 · 4s', 'seed')).toContainText('回显 42')
@@ -342,23 +360,23 @@ test('轮询中断后可手动重试查询：工作台与历史里同一条记�
   await installVideoMetaStub(page)
   let pollMode: 'abort' | 'done' = 'abort'
   let polls = 0
-  await page.route(url => String(url).includes('/byteplus/api/v3/contents/generations/tasks') && !String(url).match(/tasks\/.+/), async route => {
+  await page.route(url => String(url).includes('/api/v3/contents/generations/tasks') && !String(url).match(/tasks\/.+/), async route => {
     if (route.request().method() === 'OPTIONS') { await route.fulfill({ status: 204, headers: CORS }); return }
     await route.fulfill({
       status: 200, contentType: 'application/json', headers: { ...CORS, 'x-oneapi-request-id': 'vid-submit-1' },
       body: JSON.stringify({ id: 'task_slow', status: 'queued' }),
     })
   })
-  await page.route(url => /\/byteplus\/api\/v3\/contents\/generations\/tasks\/task_slow$/.test(String(url)), async route => {
+  await page.route(url => /\/api\/v3\/contents\/generations\/tasks\/task_slow$/.test(String(url)), async route => {
     if (route.request().method() === 'OPTIONS') { await route.fulfill({ status: 204, headers: CORS }); return }
     polls += 1
     if (pollMode === 'abort') { await route.abort('timedout'); return }
     await route.fulfill({
       status: 200, contentType: 'application/json', headers: CORS,
-      body: JSON.stringify({ id: 'task_slow', status: 'succeeded', content: { video_url: 'https://cdn.example/slow.mp4' }, ratio: '16:9', duration: 5, seed: 7 }),
+      body: JSON.stringify({ id: 'task_slow', status: 'succeeded', content: { video_url: officialCn('slow.mp4') }, ratio: '16:9', duration: 5, seed: 7 }),
     })
   })
-  await page.route('**/cdn.example/**', route => route.fulfill({ status: 200, contentType: 'video/mp4', body: 'fake' }))
+  await routeOfficialVideo(page)
 
   await page.goto('/tools/videotest')
   await page.getByRole('button', { name: '渠道管理', exact: true }).click()
@@ -391,14 +409,14 @@ test('轮询中断后可手动重试查询：工作台与历史里同一条记�
   await expect(caseBox.getByText('✓ 通过')).toBeVisible({ timeout: 20000 })
   expect(polls).toBeGreaterThan(pollsBefore)
   await expect(caseBox.getByRole('button', { name: '↻ 重试查询' })).toHaveCount(0)
-  await expect(caseBox.getByRole('link', { name: 'https://cdn.example/slow.mp4' })).toBeVisible()
+  await expect(caseBox.getByRole('link', { name: officialCn('slow.mp4') })).toBeVisible()
 
   // 历史里还是同一条（id 不变），状态更新为成功
   const histAfter = await readHistoryStore(page, 'videotest')
   expect(histAfter).toHaveLength(1)
   expect(histAfter[0].id).toBe(histBefore[0].id)
   expect(histAfter[0].ok).toBe(true)
-  expect(histAfter[0].videoUrl).toBe('https://cdn.example/slow.mp4')
+  expect(histAfter[0].videoUrl).toBe(officialCn('slow.mp4'))
   expect(histAfter[0].pollLog.some((t: any) => String(t.status).includes('手动重试查询'))).toBe(true)
   await page.getByRole('button', { name: /^历史记录/ }).click()
   await expect(page.getByRole('button', { name: '↻ 重试查询' })).toHaveCount(0)
@@ -418,7 +436,7 @@ test('一键重试错误：同批只重跑勾选的请求失败，能查只查',
     return 't2v'
   }
 
-  await page.route(url => String(url).includes('/byteplus/api/v3/contents/generations/tasks') && !String(url).match(/tasks\/.+/), async route => {
+  await page.route(url => String(url).includes('/api/v3/contents/generations/tasks') && !String(url).match(/tasks\/.+/), async route => {
     if (route.request().method() === 'OPTIONS') { await route.fulfill({ status: 204, headers: CORS }); return }
     const body = route.request().postDataJSON()
     const key = caseKey(body)
@@ -441,21 +459,21 @@ test('一键重试错误：同批只重跑勾选的请求失败，能查只查',
       status: 200, contentType: 'application/json', headers: { ...CORS, 'x-oneapi-request-id': `vid-retry-${key}` },
       body: JSON.stringify({
         id: `task_${key}`, status: 'succeeded',
-        content: { video_url: `https://cdn.example/${key}.mp4` },
+        content: { video_url: officialCn(`${key}.mp4`) },
         ratio: body.ratio, duration: body.duration, seed: body.seed,
       }),
     })
   })
-  await page.route(url => /\/byteplus\/api\/v3\/contents\/generations\/tasks\/task_retry$/.test(String(url)), async route => {
+  await page.route(url => /\/api\/v3\/contents\/generations\/tasks\/task_retry$/.test(String(url)), async route => {
     if (route.request().method() === 'OPTIONS') { await route.fulfill({ status: 204, headers: CORS }); return }
     polls += 1
     if (!allowPoll) { await route.abort('timedout'); return }
     await route.fulfill({
       status: 200, contentType: 'application/json', headers: CORS,
-      body: JSON.stringify({ id: 'task_retry', status: 'succeeded', content: { video_url: 'https://cdn.example/frames.mp4' }, ratio: '16:9', duration: 5 }),
+      body: JSON.stringify({ id: 'task_retry', status: 'succeeded', content: { video_url: officialCn('frames.mp4') }, ratio: '16:9', duration: 5 }),
     })
   })
-  await page.route('**/cdn.example/**', route => route.fulfill({ status: 200, contentType: 'video/mp4', body: 'fake' }))
+  await routeOfficialVideo(page)
 
   await page.goto('/tools/videotest')
   await page.getByRole('button', { name: '渠道管理', exact: true }).click()
@@ -555,7 +573,7 @@ test('旧版默认素材链接自动迁到官方示例；素材拉取失败不�
 
   // 网关拉不到名人图 → 火山返回 400「素材转换失败」：这不是模型拒绝，应记「请求异常」
   const sent: any[] = []
-  await page.route(url => String(url).includes('/byteplus/api/v3/contents/generations/tasks') && !String(url).match(/tasks\/.+/), async route => {
+  await page.route(url => String(url).includes('/api/v3/contents/generations/tasks') && !String(url).match(/tasks\/.+/), async route => {
     if (route.request().method() === 'OPTIONS') { await route.fulfill({ status: 204, headers: CORS }); return }
     sent.push(route.request().postDataJSON())
     await route.fulfill({
@@ -631,4 +649,55 @@ test('历史未通过可重新识别：按已有元数据重算校验，不重�
   const rec = hist.find((r: { id: string }) => r.id === 'hist-1080-fail')
   expect(rec.checks.find((c: { name: string }) => c.name === '分辨率').pass).toBe(true)
   expect(rec.pollLog.some((t: { status: string }) => String(t.status).includes('重新识别视频信息'))).toBe(true)
+})
+
+test('oinone / ainowork 带 /byteplus，末尾已有则不重复，其它根不加', async ({ page }) => {
+  const hits: string[] = []
+  await page.route(url => String(url).includes('/api/v3/contents/generations/tasks') && !/\/tasks\/.+/.test(String(url)), async route => {
+    if (route.request().method() === 'OPTIONS') {
+      await route.fulfill({ status: 204, headers: CORS })
+      return
+    }
+    hits.push(route.request().url())
+    await route.fulfill({
+      status: 400,
+      contentType: 'application/json',
+      headers: CORS,
+      body: JSON.stringify({ error: { code: 'InvalidParameter', message: 'stop' } }),
+    })
+  })
+
+  async function saveChannel(name: string, baseUrl: string) {
+    await page.getByRole('button', { name: '渠道管理', exact: true }).click()
+    await page.getByPlaceholder('例如：主线-oinone').fill(name)
+    await page.getByPlaceholder('https://api.oinone.top').fill(baseUrl)
+    await page.getByPlaceholder('sk-xxxxxxxx').fill('sk-test-1234567890')
+    await page.getByRole('button', { name: '保存渠道' }).click()
+    await page.getByRole('button', { name: '批量测试', exact: true }).click()
+  }
+
+  await page.goto('/tools/videotest')
+  await saveChannel('已带前缀', 'https://api.oinone.top/byteplus')
+  const row = page.locator('[data-case-name="文生 · 仅必填"]')
+  await row.getByText('文生 · 仅必填', { exact: true }).click()
+  await expect(row).toContainText('POST /byteplus/api/v3/contents/generations/tasks')
+  await expect(row).not.toContainText('/byteplus/byteplus')
+  await row.getByRole('button', { name: '▶ 运行此用例' }).click()
+  await expect.poll(() => hits.length).toBe(1)
+  expect(hits[0]).toBe('https://api.oinone.top/byteplus/api/v3/contents/generations/tasks')
+
+  await saveChannel('海外网关', 'https://x.AINOWORK.com')
+  await selectOption(page, '使用渠道', '海外网关')
+  await expect(row).toContainText('POST /byteplus/api/v3/contents/generations/tasks')
+  await row.getByRole('button', { name: '▶ 运行此用例' }).click()
+  await expect.poll(() => hits.length).toBe(2)
+  expect(hits[1].toLowerCase()).toBe('https://x.ainowork.com/byteplus/api/v3/contents/generations/tasks')
+
+  await saveChannel('官方根', 'https://ark.cn-beijing.volces.com')
+  await selectOption(page, '使用渠道', '官方根')
+  await expect(row).toContainText('POST /api/v3/contents/generations/tasks')
+  await expect(row).not.toContainText('/byteplus')
+  await row.getByRole('button', { name: '▶ 运行此用例' }).click()
+  await expect.poll(() => hits.length).toBe(3)
+  expect(hits[2]).toBe('https://ark.cn-beijing.volces.com/api/v3/contents/generations/tasks')
 })
