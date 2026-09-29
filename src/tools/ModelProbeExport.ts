@@ -659,6 +659,7 @@ function probeSheetDocument(payload: string, clickSelector: string, originsPaylo
   resetCopyBtn(copyBtn, '复制');
   resetCopyBtn(copyRespBtn, '复制响应体');
   function pretty(v) {
+    if (typeof v === 'string') return v;
     try { return JSON.stringify(v, null, 2); } catch (e) { return String(v == null ? '' : v); }
   }
   function labelTheme() {

@@ -37,6 +37,37 @@ export function probeTopPRangeBody(format: ProbeFormat, model: string): Record<s
   return body
 }
 
+type SettledProbeResult = {
+  format?: string
+  detail?: string
+  repro?: { body?: unknown } | null
+}
+
+const anthropicCell = (key: string, result: SettledProbeResult): boolean =>
+  result.format === 'anthropic' || key.endsWith('@anthropic')
+
+const bodyUsesMaxCompletion = (body: unknown): boolean =>
+  !!body && typeof body === 'object' && !Array.isArray(body)
+  && Object.prototype.hasOwnProperty.call(body, 'max_completion_tokens')
+
+/**
+ * 整轮跑完后 Anthropic 实际用的上限字段。
+ * 基础请求被要求改用 max_completion_tokens 时，成功体会带上这个字段，结论里也会写「已改用」。
+ * Chat 体可以同时带两个字段，不拿来判断。
+ */
+export function probeSettledAnthropicCap(
+  results: Record<string, SettledProbeResult | null | undefined> | null | undefined,
+): 'max_tokens' | 'max_completion_tokens' {
+  if (!results) return 'max_tokens'
+  let mentioned = false
+  for (const [key, result] of Object.entries(results)) {
+    if (!result) continue
+    if (anthropicCell(key, result) && bodyUsesMaxCompletion(result.repro?.body)) return 'max_completion_tokens'
+    if (typeof result.detail === 'string' && result.detail.includes('已改用 max_completion_tokens')) mentioned = true
+  }
+  return mentioned ? 'max_completion_tokens' : 'max_tokens'
+}
+
 /** 决定性响应不是 HTTP 2xx 时，正文原样留下。状态 0 是网络占位，不当成响应。 */
 export function probeNon2xxResponseBody(status: number | null, body: unknown): unknown | undefined {
   if (typeof status !== 'number' || !Number.isFinite(status) || status <= 0) return undefined

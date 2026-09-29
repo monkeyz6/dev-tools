@@ -321,5 +321,21 @@ describe('buildProbeReportHtml', () => {
     assert.equal(html.includes('接入层'), false)
     assert.match(html, /kept-body/)
     assert.match(html, /响应体/)
+    const prettyAt = html.indexOf('function pretty(v)')
+    assert.notEqual(prettyAt, -1)
+    assert.match(html.slice(prettyAt, prettyAt + 160), /if \(typeof v === 'string'\) return v;/)
+  })
+
+  it('字符串响应体在卡片脚本里按原文返回', () => {
+    const html = buildProbeReportHtml(report({
+      completedAt: '2026-09-29T01:00:01.000Z',
+      target: { baseUrl: 'https://a.example', model: 'gpt-4o', channelName: '渠道甲', overrides: {} },
+      results: {
+        'temperature@chat': cell('failed', '失败', 'upstream said: not json'),
+      },
+    }), tests, labels)
+    assert.match(html, /upstream said: not json/)
+    const prettyAt = html.indexOf('function pretty(v)')
+    assert.match(html.slice(prettyAt, prettyAt + 160), /if \(typeof v === 'string'\) return v;/)
   })
 })

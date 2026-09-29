@@ -37,7 +37,7 @@ import {
 } from './model-probe/profiles'
 import { decideOrigin, signalsFromProbeLogs } from './model-probe/origin'
 import { probeRequestIdFromHeaders, probeRequestIdFromRecord, probeRequestIdHeaders, probeShownRequestId } from './model-probe/request-id'
-import { probeKeptResponseBody, probeTopPRangeBody, scoreTopPRange } from './model-probe/negative'
+import { probeKeptResponseBody, probeSettledAnthropicCap, probeTopPRangeBody, scoreTopPRange } from './model-probe/negative'
 import { probeMatchRetryChannel, probeReplaceCellLogs } from './model-probe/cell'
 
 // ─── Tool: 模型探测 ─────────────────────────────────────────────────────────────
@@ -2598,7 +2598,8 @@ function ModelProbeTool() {
       probeLogPrefixRef.current = ''
       formatBlockerRef.current = {}
       anthropicMaxTokensRowRef.current = null
-      setProbeAnthropicCapField('max_tokens')
+      const followSettledCap = cellFormat === 'anthropic' && test.kind !== 'basic' && test.id !== 'max_tokens'
+      setProbeAnthropicCapField(followSettledCap ? probeSettledAnthropicCap(source.results) : 'max_tokens')
       profileRef.current = profileFromName(source.target.model)
       officialAnthropicRef.current = (() => {
         try { return new URL(source.target.baseUrl).hostname.toLowerCase() === 'api.anthropic.com' } catch { return false }
@@ -2639,14 +2640,11 @@ function ModelProbeTool() {
       const signals = signalsFromProbeLogs({
         requestModel: source.target.model,
         baseUrl: source.target.baseUrl,
-        logs: hadLogs ? probeOriginInput(replaced.reportLogs) : [],
+        logs: probeOriginInput(hadLogs ? replaced.reportLogs : fresh),
       })
       const family = decideFamily(signals)
       if (selectedRef.current['expect-reject']) {
-        const origin = hadLogs
-          ? decideOrigin(signals)
-          : { access: { id: 'uncertain', label: '不确定', reasons: [] } }
-        const rewritten = reclassifyExpected(key, gated, family, origin)
+        const rewritten = reclassifyExpected(key, gated, family, decideOrigin(signals))
         if (rewritten) gated = { ...gated, status: rewritten.status, detail: rewritten.detail }
       }
       const verdict = hadLogs
@@ -2669,6 +2667,7 @@ function ModelProbeTool() {
       })
       if (reportRef.current?.id === source.id) setReport(next)
       setHistory(await saveProbeHistory({ ...next, logs: [] }))
+      setTestStatus(key, gated.status, gated.detail)
     } catch (err: any) {
       const message = err?.message || '重试没有完成。'
       setRetryNotice(message)
