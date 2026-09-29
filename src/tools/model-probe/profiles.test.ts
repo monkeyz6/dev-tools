@@ -112,6 +112,7 @@ describe('gpt-6-sol 样本', () => {
     assert.ok(origin.upstream.reasons.some(r => r.includes('content_filters')))
     assert.ok(origin.upstream.reasons.some(r => r.includes('serving_pipereplica')))
     assert.ok(origin.upstream.reasons.some(r => r.includes('Azure OpenAI resource')))
+    assert.equal([...origin.access.reasons, ...origin.upstream.reasons].some(r => r.includes('响应头')), false)
   })
 
   it('temperature 被拒改写成符合预期', () => {
@@ -234,10 +235,22 @@ describe('来源边界', () => {
       }],
     }))
     assert.equal(origin.access.label, '官方直连')
-    assert.equal(origin.access.reasons.some(r => /codex/i.test(r)), false)
+    assert.ok(origin.access.reasons.some(r => r.includes('api.openai.com')))
+    assert.equal(origin.access.reasons.some(r => /codex|openai-organization|响应头/i.test(r)), false)
   })
 
-  it('Codex 注入和官方组织头打架时接入层混合', () => {
+  it('中转透传的厂商响应头不参与接入层或上游', () => {
+    const relayHeaders = {
+      'content-type': 'application/json',
+      'openai-organization': 'org-live',
+      'openai-processing-ms': '12',
+      'openai-version': '2020-10-01',
+      'request-id': 'req_openai',
+      'x-request-id': 'req_alt',
+      'x-oneapi-request-id': '2026092908573452293598',
+      'x-amzn-requestid': 'amz-1',
+      'x-goog-request-id': 'goog-1',
+    }
     const origin = decideOrigin(signalsFromProbeLogs({
       requestModel: 'gpt-5.1',
       baseUrl: 'https://proxy.example',
@@ -247,18 +260,41 @@ describe('来源边界', () => {
         resultKey: 'responses-basic',
         format: 'responses',
         requestBody: { model: 'gpt-5.1', input: 'Reply with exactly: OK' },
-        responseHeaders: { 'content-type': 'application/json', 'openai-organization': 'org-live' },
+        responseHeaders: relayHeaders,
         responseBody: { model: 'gpt-5.1' },
         usage: { input: 900 },
       }],
     }))
-    assert.equal(origin.access.label, '混合')
+    assert.equal(origin.access.label, 'Codex 反代')
     assert.ok(origin.access.reasons.some(r => r.includes('900')))
-    assert.ok(origin.access.reasons.some(r => r.includes('openai-organization')))
+    assert.equal(origin.upstream.id, 'uncertain')
+    const reasons = [...origin.access.reasons, ...origin.upstream.reasons]
+    assert.equal(reasons.some(r => /响应头|req_|openai-organization|new-api/i.test(r)), false)
   })
 
-  it('Azure 内容过滤和 OpenAI 组织头同时出现时上游混合', () => {
+  it('官方主机上的 req_ 响应头不会把上游判成 Anthropic', () => {
     const origin = decideOrigin(signalsFromProbeLogs({
+      requestModel: 'gpt-4o',
+      baseUrl: 'https://api.openai.com',
+      logs: [{
+        url: 'https://api.openai.com/v1/chat/completions',
+        status: 200,
+        resultKey: 'chat-basic',
+        format: 'chat',
+        requestBody: { model: 'gpt-4o', messages: [{ role: 'user', content: 'Reply with exactly: OK' }] },
+        responseHeaders: { 'content-type': 'application/json', 'request-id': 'req_abc', 'x-request-id': 'req_abc' },
+        responseBody: { model: 'gpt-4o', usage: { prompt_tokens: 11, completion_tokens: 2 } },
+        usage: { input: 11 },
+      }],
+    }))
+    assert.equal(origin.access.label, '官方直连')
+    assert.equal(origin.upstream.label, '不确定')
+    assert.equal(origin.upstream.id, 'uncertain')
+    assert.equal([...origin.access.reasons, ...origin.upstream.reasons].some(r => /req_|Anthropic|响应头/.test(r)), false)
+  })
+
+  it('Azure 正文不受 OpenAI 响应头影响，system_fingerprint 单独仍是 OpenAI', () => {
+    const azure = decideOrigin(signalsFromProbeLogs({
       requestModel: 'gpt-5',
       baseUrl: 'https://proxy.example',
       logs: [{
@@ -267,14 +303,53 @@ describe('来源边界', () => {
         resultKey: 'chat-basic',
         format: 'chat',
         requestBody: { model: 'gpt-5', messages: [{ role: 'user', content: 'Reply with exactly: OK' }] },
-        responseHeaders: { 'openai-organization': 'org-live', 'content-type': 'application/json' },
-        responseBody: { model: 'gpt-5', prompt_filter_results: [{}] },
+        responseHeaders: { 'openai-organization': 'org-live', 'request-id': 'req_abc', 'content-type': 'application/json' },
+        responseBody: { model: 'gpt-5', prompt_filter_results: [{}], system_fingerprint: 'fp_azure' },
         usage: { input: 11 },
       }],
     }))
-    assert.equal(origin.upstream.label, '混合')
-    assert.ok(origin.upstream.reasons.some(r => r.includes('prompt_filter_results')))
-    assert.ok(origin.upstream.reasons.some(r => r.includes('openai-organization')))
+    assert.equal(azure.upstream.label, 'Azure OpenAI')
+    assert.ok(azure.upstream.reasons.some(r => r.includes('prompt_filter_results')))
+    assert.equal(azure.upstream.reasons.some(r => /openai-organization|system_fingerprint|req_/.test(r)), false)
+
+    const fingerprint = decideOrigin(signalsFromProbeLogs({
+      requestModel: 'gpt-4o',
+      baseUrl: 'https://proxy.example',
+      logs: [{
+        url: 'https://proxy.example/v1/chat/completions',
+        status: 200,
+        resultKey: 'chat-basic',
+        format: 'chat',
+        requestBody: { model: 'gpt-4o', messages: [{ role: 'user', content: 'Reply with exactly: OK' }] },
+        responseHeaders: { 'content-type': 'application/json' },
+        responseBody: { model: 'gpt-4o', system_fingerprint: 'fp_live' },
+        usage: { input: 11 },
+      }],
+    }))
+    assert.equal(fingerprint.access.label, '不确定')
+    assert.equal(fingerprint.upstream.label, 'OpenAI 官方')
+    assert.ok(fingerprint.upstream.reasons.some(r => r.includes('fp_live')))
+  })
+
+  it('带日期的 Claude 响应模型仍判定 Anthropic，request-id 不算依据', () => {
+    const origin = decideOrigin(signalsFromProbeLogs({
+      requestModel: 'claude-opus-4-5',
+      baseUrl: 'https://proxy.example',
+      logs: [{
+        url: 'https://proxy.example/v1/messages',
+        status: 200,
+        resultKey: 'anthropic-basic',
+        format: 'anthropic',
+        requestBody: { model: 'claude-opus-4-5', max_tokens: 120 },
+        responseHeaders: { 'request-id': 'req_abc', 'content-type': 'application/json' },
+        responseBody: { model: 'claude-opus-4-5-20251101', stop_reason: 'end_turn', usage: { input_tokens: 10, output_tokens: 2 } },
+        usage: { input: 10 },
+      }],
+    }))
+    assert.equal(origin.access.label, '不确定')
+    assert.equal(origin.upstream.label, 'Anthropic 官方')
+    assert.ok(origin.upstream.reasons.some(r => r.includes('claude-opus-4-5-20251101')))
+    assert.equal(origin.upstream.reasons.some(r => /req_|响应头/.test(r)), false)
   })
 })
 

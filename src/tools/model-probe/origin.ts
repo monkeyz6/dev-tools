@@ -23,10 +23,7 @@ export interface ProbeSignals {
   basic: { chat: ProbeBasicState; responses: ProbeBasicState; anthropic: ProbeBasicState }
   chatBasicStatus: number | null
   urls: string[]
-  headerNames: string[]
-  headerHits: { name: string; value: string }[]
   flags: ProbeSignalFlags
-  successHeadersLookStripped: boolean
 }
 
 export interface ProbeOriginLog {
@@ -50,11 +47,6 @@ export interface OriginDecision {
   access: OriginLayer
   upstream: OriginLayer
 }
-
-const SAFE_HEADERS = new Set([
-  'content-type', 'content-length', 'cache-control', 'date', 'connection',
-  'transfer-encoding', 'vary', 'server', 'content-encoding',
-])
 
 const emptyFlags = (): ProbeSignalFlags => ({
   promptFilterResults: false,
@@ -123,11 +115,6 @@ const basicState = (logs: ProbeOriginLog[], key: string): ProbeBasicState => {
   return 'fail'
 }
 
-const headerValue = (hits: { name: string; value: string }[], name: string): string => {
-  const found = hits.find(hit => hit.name === name && hit.value.trim())
-  return found ? found.value.trim() : ''
-}
-
 export function signalsFromProbeLogs(input: {
   requestModel: string
   baseUrl: string
@@ -136,11 +123,7 @@ export function signalsFromProbeLogs(input: {
   const flags = emptyFlags()
   const responseModels: string[] = []
   const errors: string[] = []
-  const headerNames = new Set<string>()
-  const headerHits: { name: string; value: string }[] = []
   let shortPromptInput: number | null = null
-  let successCount = 0
-  let strippedSuccess = 0
   let chatBasicStatus: number | null = null
 
   for (const log of input.logs) {
@@ -151,16 +134,6 @@ export function signalsFromProbeLogs(input: {
     }
     errors.push(...errorMessagesOf(body))
     if (log.resultKey === 'chat-basic' && log.status != null) chatBasicStatus = log.status
-    for (const [rawName, value] of Object.entries(log.responseHeaders || {})) {
-      const name = rawName.toLowerCase()
-      headerNames.add(name)
-      headerHits.push({ name, value: String(value ?? '') })
-    }
-    if (log.status != null && log.status >= 200 && log.status < 300) {
-      successCount++
-      const exposed = Object.keys(log.responseHeaders || {}).map(name => name.toLowerCase()).filter(name => !SAFE_HEADERS.has(name))
-      if (exposed.length === 0) strippedSuccess++
-    }
     if (isShortPrompt(log.requestBody) && log.status != null && log.status >= 200 && log.status < 300) {
       const inputTokens = log.usage?.input
       if (typeof inputTokens === 'number' && (shortPromptInput == null || inputTokens < shortPromptInput)) {
@@ -184,15 +157,17 @@ export function signalsFromProbeLogs(input: {
     },
     chatBasicStatus,
     urls: input.logs.map(log => log.url).filter(Boolean),
-    headerNames: [...headerNames],
-    headerHits,
     flags,
-    successHeadersLookStripped: successCount > 0 && strippedSuccess === successCount,
   }
 }
 
 const layer = (id: string, label: string, reasons: string[]): OriginLayer => ({ id, label, reasons })
 
+/**
+ * 不使用响应头判断来源。new-api 一类中转会剥掉或改写上游头，浏览器跨域也经常读不到；
+ * `request-id: req_` 这类值官方和中转都会出现，不能区分渠道。
+ * 接入层只看错误方言、请求 URL 和配置的主机；上游只看响应体。
+ */
 export function decideOrigin(signals: ProbeSignals): OriginDecision {
   const host = hostOf(signals.baseUrl)
   const blob = `${signals.errors.join('\n')}\n${signals.urls.join('\n')}`
@@ -200,13 +175,8 @@ export function decideOrigin(signals: ProbeSignals): OriginDecision {
   if (/分组/.test(blob)) gateway.push('错误含「分组」')
   if (/无可用渠道/.test(blob)) gateway.push('错误含「无可用渠道」')
   if (/distributor/i.test(blob)) gateway.push('错误含 distributor')
-  if (/new-api|oneapi|one-api/i.test(blob) || signals.headerNames.includes('x-oneapi-request-id')) {
-    gateway.push('错误或响应头指向 new-api / oneapi')
-  }
+  if (/new-api|oneapi|one-api/i.test(blob)) gateway.push('错误或 URL 指向 new-api / oneapi')
   if (/request id:\s*\d{16,}/i.test(blob)) gateway.push('错误里的请求号是一长串数字')
-  if (gateway.length && signals.successHeadersLookStripped) {
-    gateway.push('成功响应未暴露厂商标头，可见的只有 content-type / content-length')
-  }
 
   const codex: string[] = []
   if (signals.shortPromptInput != null && signals.shortPromptInput > 80) {
@@ -220,11 +190,6 @@ export function decideOrigin(signals: ProbeSignals): OriginDecision {
   const direct: string[] = []
   if (host === 'api.openai.com') direct.push('主机是 api.openai.com')
   if (host === 'api.anthropic.com') direct.push('主机是 api.anthropic.com')
-  if (headerValue(signals.headerHits, 'openai-organization')) direct.push('响应头 openai-organization')
-  if (headerValue(signals.headerHits, 'openai-processing-ms')) direct.push('响应头 openai-processing-ms')
-  if (headerValue(signals.headerHits, 'openai-version')) direct.push('响应头 openai-version')
-  const requestId = headerValue(signals.headerHits, 'request-id') || headerValue(signals.headerHits, 'x-request-id')
-  if (/^req_/i.test(requestId)) direct.push('响应头 request-id 为 req_')
 
   let access: OriginLayer
   const accessDirect = gateway.length ? [] : direct
@@ -233,7 +198,7 @@ export function decideOrigin(signals: ProbeSignals): OriginDecision {
   else if (gateway.length) access = layer('gateway', '网关', gateway)
   else if (codex.length) access = layer('codex', 'Codex 反代', codex)
   else if (accessDirect.length) access = layer('direct', '官方直连', accessDirect)
-  else access = layer('uncertain', '不确定', ['没有网关方言、Codex 注入或官方主机/响应头'])
+  else access = layer('uncertain', '不确定', ['没有网关方言、Codex 注入或官方主机'])
 
   const azure: string[] = []
   if (signals.flags.promptFilterResults) azure.push('成功响应含 prompt_filter_results')
@@ -243,33 +208,22 @@ export function decideOrigin(signals: ProbeSignals): OriginDecision {
   if (signals.errors.some(error => /azure openai resource/i.test(error))) azure.push('错误原文含 Azure OpenAI resource')
 
   const official: string[] = []
-  if (!signals.flags.promptFilterResults && !signals.flags.contentFilters) {
-    if (headerValue(signals.headerHits, 'openai-organization')) official.push('响应头 openai-organization')
-    if (headerValue(signals.headerHits, 'openai-processing-ms')) official.push('响应头 openai-processing-ms')
-    if (headerValue(signals.headerHits, 'openai-version')) official.push('响应头 openai-version')
-    if (signals.flags.systemFingerprint) official.push(`system_fingerprint 为 ${signals.flags.systemFingerprint}`)
-  } else if (headerValue(signals.headerHits, 'openai-organization') || headerValue(signals.headerHits, 'openai-processing-ms') || signals.flags.systemFingerprint) {
-    if (headerValue(signals.headerHits, 'openai-organization')) official.push('响应头 openai-organization')
-    if (headerValue(signals.headerHits, 'openai-processing-ms')) official.push('响应头 openai-processing-ms')
-    if (headerValue(signals.headerHits, 'openai-version')) official.push('响应头 openai-version')
-    if (signals.flags.systemFingerprint) official.push(`system_fingerprint 为 ${signals.flags.systemFingerprint}`)
+  if (!signals.flags.promptFilterResults && !signals.flags.contentFilters && signals.flags.systemFingerprint) {
+    official.push(`system_fingerprint 为 ${signals.flags.systemFingerprint}`)
   }
 
   const datedClaude = signals.responseModels.find(model => /^claude-.+-\d{8}$/i.test(model))
   const anthropic: string[] = []
-  if (/^req_/i.test(requestId)) anthropic.push('响应头 request-id 为 req_')
   if (datedClaude && (signals.flags.cacheCreation || signals.flags.cacheReadField || signals.flags.stopReason)) {
     anthropic.push(`响应模型 ${datedClaude}`)
   }
 
   const bedrock: string[] = []
-  if (headerValue(signals.headerHits, 'x-amzn-requestid')) bedrock.push('响应头 x-amzn-requestid')
   if (signals.responseModels.some(model => /anthropic\.claude/i.test(model)) || /anthropic\.claude/i.test(signals.requestModel)) {
     bedrock.push('模型 id 含 anthropic.claude')
   }
 
   const vertex: string[] = []
-  if (headerValue(signals.headerHits, 'x-goog-request-id')) vertex.push('响应头 x-goog-request-id')
   if (signals.urls.some(url => /aiplatform\.googleapis\.com|publishers\/anthropic/i.test(url))) {
     vertex.push('URL 指向 Vertex AI')
   }
