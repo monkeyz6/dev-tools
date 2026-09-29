@@ -1,6 +1,6 @@
 import { describe, it } from 'node:test'
 import assert from 'node:assert/strict'
-import { probeRequestIdFromHeaders, probeRequestIdFromRecord } from './request-id.ts'
+import { probeRequestIdFromHeaders, probeRequestIdFromRecord, probeShownRequestId } from './request-id.ts'
 
 describe('probeRequestIdFromRecord', () => {
   it('四个网关头优先于旧的厂商头', () => {
@@ -39,6 +39,24 @@ describe('probeRequestIdFromRecord', () => {
       'x-log-id': 'log-9',
     }), 'log-9')
     assert.equal(probeRequestIdFromRecord({}), null)
+  })
+
+  it('弹层优先用响应头，没有头时保留已记下的 requestId', () => {
+    assert.equal(probeShownRequestId({
+      requestId: 'stale',
+      responseHeaders: {
+        'X-Oneapi-Request-Id': 'one-1',
+        'x-request-id': 'req-2',
+        'x-log-id': 'log-1',
+        'x-trace-id': 'trace-1',
+      },
+    }), 'one-1')
+    assert.equal(probeShownRequestId({
+      requestId: 'kept',
+      responseHeaders: { 'content-type': 'application/json' },
+    }), 'kept')
+    assert.equal(probeShownRequestId({ requestId: 'kept' }), 'kept')
+    assert.equal(probeShownRequestId(null), null)
   })
 
   it('Headers.get 同样按这个顺序', () => {

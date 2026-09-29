@@ -36,7 +36,7 @@ import {
   basicProtocolGate, decideFamily, nameSuggestsGpt, profileFromName, reclassifyExpected, scoreProtocolGate,
 } from './model-probe/profiles'
 import { decideOrigin, signalsFromProbeLogs } from './model-probe/origin'
-import { probeRequestIdFromHeaders } from './model-probe/request-id'
+import { probeRequestIdFromHeaders, probeRequestIdFromRecord, probeRequestIdHeaders, probeShownRequestId } from './model-probe/request-id'
 import { probeNon2xxResponseBody, probeTopPRangeBody, scoreTopPRange } from './model-probe/negative'
 import { probeMatchRetryChannel, probeReplaceCellLogs } from './model-probe/cell'
 
@@ -99,6 +99,7 @@ interface ProbeResult {
     body: any
     status: number | null
     requestId: string | null
+    responseHeaders?: Record<string, string>
     responseBody?: unknown
   } | null
 }
@@ -291,8 +292,11 @@ const probeOriginInput = (rows: ProbeLog[]) => rows.map(log => ({
   usage: log.usage,
 }))
 const probeReproOf = (log: ProbeLog): ProbeResult['repro'] => {
+  const responseHeaders = probeRequestIdHeaders(log.responseHeaders)
   const repro: NonNullable<ProbeResult['repro']> = {
-    url: log.url, headers: log.requestHeaders, body: log.requestBody, status: log.status, requestId: log.requestId,
+    url: log.url, headers: log.requestHeaders, body: log.requestBody, status: log.status,
+    requestId: probeRequestIdFromRecord(responseHeaders) ?? log.requestId,
+    ...(Object.keys(responseHeaders).length ? { responseHeaders } : {}),
   }
   const responseBody = probeNon2xxResponseBody(log.status, log.responseBody)
   if (responseBody !== undefined) repro.responseBody = responseBody
@@ -612,6 +616,7 @@ function ProbeResultDialog({ detail, onClose, onRetry, retrying, retryDisabled }
       document.body.style.overflow = prev
     }
   }, [onClose])
+  const requestId = probeShownRequestId(detail.result.repro)
   return probePortal(
     <div
       className="fixed inset-0 z-50 flex items-center justify-center p-5 ia-lightbox-enter"
@@ -679,10 +684,10 @@ function ProbeResultDialog({ detail, onClose, onRetry, retrying, retryDisabled }
             <div className="flex flex-wrap items-center gap-2 mb-3">
               <span className="font-mono text-[11px] px-1.5 py-0.5 rounded" style={{ background: 'var(--s2)', color: 'var(--text)', fontFamily: PROBE_MONO }}>POST {detail.result.repro.url}</span>
               <span className="font-mono text-[11px] px-1.5 py-0.5 rounded" style={{ background: 'var(--s2)', color: 'var(--text)', fontFamily: PROBE_MONO }}>HTTP {detail.result.repro.status ?? '—'}</span>
-              {detail.result.repro.requestId && (
+              {requestId && (
                 <span className="inline-flex items-center gap-1">
                   <span className="font-mono text-[11px]" style={{ color: 'var(--t3)', fontFamily: PROBE_MONO }}>Request ID</span>
-                  <ProbeCopyId value={detail.result.repro.requestId} />
+                  <ProbeCopyId value={requestId} />
                 </span>
               )}
             </div>
@@ -882,6 +887,7 @@ function ProbeMatrixDialog({ detail, onClose }: {
   const tokens = matrixTokenValues(detail.result.tokenValues)
   const usageLine = matrixUsageLine(detail.result.usage)
   const repro = detail.result.repro
+  const requestId = probeShownRequestId(repro)
   return probePortal(
     <div
       className="probe-matrix-scrim fixed inset-0 z-50 flex items-center justify-center p-4"
@@ -927,10 +933,10 @@ function ProbeMatrixDialog({ detail, onClose }: {
             <div className="flex flex-wrap items-center gap-2">
               <span className="rounded-md px-2 py-0.5 font-mono text-[11.5px]" style={{ background: 'color-mix(in srgb, var(--text) 5%, transparent)', color: 'var(--t2)', fontFamily: PROBE_MONO }}>POST {repro.url}</span>
               <span className="rounded-md px-2 py-0.5 font-mono text-[11.5px]" style={{ background: 'color-mix(in srgb, var(--text) 5%, transparent)', color: 'var(--t2)', fontFamily: PROBE_MONO }}>HTTP {repro.status ?? '—'}</span>
-              {repro.requestId && (
+              {requestId && (
                 <span className="inline-flex items-center gap-1">
                   <span className="font-mono text-[11px]" style={{ color: 'var(--t3)', fontFamily: PROBE_MONO }}>Request ID</span>
-                  <ProbeCopyId value={repro.requestId} />
+                  <ProbeCopyId value={requestId} />
                 </span>
               )}
             </div>
@@ -1011,7 +1017,7 @@ function ProbeMatrixView({ reports }: { reports: ProbeReport[] }) {
             variant="soft"
             className="whitespace-nowrap"
             disabled={!hasProblems}
-            title={hasProblems ? '只包含失败、异常和不支持' : '这次没有失败、异常或不支持'}
+            title={hasProblems ? '表格与导出 HTML 相同，失败、异常和不支持可看请求' : '这次没有失败、异常或不支持'}
             onClick={() => downloadProbeMatrixHtml(reports, probeCatalog(), PROBE_FORMAT_LABELS, 'problems')}
           >异常导出</Btn>
         </div>
@@ -1584,7 +1590,7 @@ function ModelProbeTool() {
         log.status = res.status
         log.statusText = res.statusText
         log.responseHeaders = probeHeadersObject(res.headers)
-        log.requestId = probeExtractRequestId(res.headers)
+        log.requestId = probeRequestIdFromRecord(log.responseHeaders) || probeExtractRequestId(res.headers)
         const rawBody = opts.stream && res.body ? await probeReadStream(res, log) : await res.text()
         let data: any
         try { data = rawBody ? JSON.parse(rawBody) : null } catch { data = rawBody }
@@ -2781,7 +2787,8 @@ function ModelProbeTool() {
         if (x.tokenValues) md += `- 每次输入 Token: ${x.tokenValues.join(', ')}\n`
         if (x.repro) {
           md += `\n复现步骤：\n\n\`\`\`\nPOST ${x.repro.url}\n`
-          if (x.repro.requestId) md += `Request ID: ${x.repro.requestId}\n`
+          const requestId = probeShownRequestId(x.repro)
+          if (requestId) md += `Request ID: ${requestId}\n`
           md += `HTTP: ${x.repro.status ?? '—'}\n`
           md += `\`\`\`\n\n请求头（密钥已脱敏）：\n\n\`\`\`json\n${probeJsonPretty(x.repro.headers)}\n\`\`\`\n\n请求体：\n\n\`\`\`json\n${probeJsonPretty(x.repro.body)}\n\`\`\`\n\n`
           if (x.repro.responseBody !== undefined) {

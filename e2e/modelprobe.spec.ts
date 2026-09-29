@@ -1911,6 +1911,7 @@ test.describe('模型探测', () => {
   })
 
   test('历史多选：先查看详情，再导出卡片或矩阵', async ({ page }) => {
+    test.setTimeout(60_000)
     await goto(page, /模型探测/)
     await page.evaluate(() => new Promise<void>((resolve, reject) => {
       const req = indexedDB.open('dev-toolkit-history')
@@ -1940,7 +1941,7 @@ test.describe('模型探测', () => {
             upstream: { label: 'OpenAI 官方', reasons: ['响应头 openai-organization'] },
           },
           results: {
-            'chat-basic': { status: 'passed', detail: '基础请求返回成功', duration: 10, format: 'chat', usage: { input: 1, output: 2, cacheRead: null, cacheWrite: null }, repro: null },
+            'chat-basic': { status: 'passed', detail: '基础请求返回成功', duration: 10, format: 'chat', usage: { input: 1, output: 2, cacheRead: null, cacheWrite: null }, repro: { url: 'https://a.example/v1/chat/completions', headers: { Authorization: 'Bearer secret' }, body: { model: 'gpt-4o' }, status: 200, requestId: 'req-e2e-pass' } },
             'temperature@chat': { status: 'skipped', detail: '用户未勾选', duration: null, format: 'chat', repro: null },
             'image-input@chat': { status: 'untested', detail: '未测', duration: null, format: 'chat', repro: null },
             'concurrency@chat': { status: 'passed', detail: '3/3 个并发请求成功', duration: 12, format: 'chat', usage: { input: 1, output: 2, cacheRead: null, cacheWrite: null }, repro: null },
@@ -2017,7 +2018,7 @@ test.describe('模型探测', () => {
     const passed = page.getByRole('dialog')
     await expect(passed).toContainText('OpenAI Chat Completions')
     await expect(passed).toContainText('通过')
-    await expect(passed).toContainText('本轮无实际请求')
+    await expect(passed).toContainText('req-e2e-pass')
     await expect(passed).toContainText('↑1')
     await expect(passed).not.toContainText('基础请求返回成功')
     await expect(passed).not.toContainText('OpenAI 系兼容')
@@ -2029,8 +2030,12 @@ test.describe('模型探测', () => {
       matrix.getByRole('button', { name: '导出 HTML' }).click(),
     ])
     expect(many.suggestedFilename()).toBe('模型探测_2.html')
-    const manyHtml = readFileSync(await many.path(), 'utf8')
-    expect(manyHtml).toContain('<span class="dot-st passed">')
+    const manyPath = await many.path()
+    const manyHtml = readFileSync(manyPath, 'utf8')
+    expect(manyHtml).toContain('class="matrix-cell dot-st passed"')
+    expect(manyHtml).toContain('aria-label="OpenAI Chat Completions 通过"')
+    expect(manyHtml).toContain('3/3 个并发请求成功')
+    expect(manyHtml).not.toContain('<span class="dot-st passed">')
     expect(manyHtml).toContain('class="matrix-cell')
     expect(manyHtml).toContain('gpt-4o · 渠道甲')
     expect(manyHtml).toContain('>deepseek-chat<')
@@ -2051,17 +2056,53 @@ test.describe('模型探测', () => {
     expect(manyHtml).not.toContain('基础请求返回成功')
     expect(manyHtml).not.toContain('模型对比')
     expect(manyHtml).not.toContain('份报告')
+    expect(manyHtml).toContain('req-e2e-pass')
     expect(manyHtml).not.toContain('"body"')
+    expect(manyHtml).not.toContain('https://a.example/v1/chat/completions')
+    expect(manyHtml).not.toContain('Bearer secret')
     const [bad] = await Promise.all([
       page.waitForEvent('download'),
       matrix.getByRole('button', { name: '异常导出' }).click(),
     ])
     expect(bad.suggestedFilename()).toBe('模型探测_异常_2.html')
-    const badHtml = readFileSync(await bad.path(), 'utf8')
+    const badPath = await bad.path()
+    const badHtml = readFileSync(badPath, 'utf8')
+    expect(badHtml).toContain('<span class="dot-st passed">')
     expect(badHtml).toContain('失败')
-    expect(badHtml).not.toContain('并发请求稳定性')
+    expect(badHtml).toContain('并发请求稳定性')
     expect(badHtml).not.toContain('基础请求返回成功')
-    expect(badHtml).not.toContain('>通过<')
+    expect(badHtml).not.toContain('req-e2e-pass')
+    expect(badHtml).not.toContain('"body"')
+
+    const preview = await page.context().newPage()
+    await preview.setContent(manyHtml, { waitUntil: 'domcontentloaded' })
+    await preview.getByRole('button', { name: 'OpenAI Chat Completions 通过' }).click()
+    const sheet = preview.getByRole('dialog')
+    await expect(sheet).toContainText('通过')
+    await expect(sheet).toContainText('OpenAI Chat Completions')
+    await expect(sheet).toContainText('10 ms')
+    await expect(sheet).toContainText('↑1')
+    await expect(sheet).toContainText('Request ID')
+    await expect(sheet).toContainText('req-e2e-pass')
+    await expect(preview.locator('#sheetBodyWrap')).toBeHidden()
+    await expect(preview.locator('#sheetRespWrap')).toBeHidden()
+    await expect(sheet).not.toContainText('基础请求返回成功')
+    await sheet.getByRole('button', { name: '关闭' }).click()
+    await expect(sheet).toBeHidden()
+    await preview.getByRole('button', { name: '并发请求稳定性 Chat Completions 通过' }).click()
+    await expect(preview.getByRole('dialog')).toContainText('3/3 个并发请求成功')
+    await preview.close()
+
+    const abnormal = await page.context().newPage()
+    await abnormal.setContent(badHtml, { waitUntil: 'domcontentloaded' })
+    await expect(abnormal.getByRole('button', { name: 'OpenAI Chat Completions 通过' })).toHaveCount(0)
+    await expect(abnormal.locator('.dot-st.passed').first()).toHaveText('通过')
+    await abnormal.getByRole('button', { name: 'OpenAI Chat Completions 失败' }).click()
+    const badSheet = abnormal.getByRole('dialog')
+    await expect(badSheet).toContainText('失败')
+    await expect(abnormal.locator('#sheetBodyWrap')).toBeHidden()
+    await expect(abnormal.locator('#sheetRespWrap')).toBeHidden()
+    await abnormal.close()
   })
 
   test('删除历史后，打开的矩阵或卡片跟着更新', async ({ page }) => {

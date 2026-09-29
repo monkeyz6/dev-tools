@@ -1,6 +1,7 @@
 // 模型探测：自包含单文件 HTML 报告（网格卡片 + 弹层，请求体可复制，不含请求头 / key）
 
 import { matrixFormatSubtitle, matrixTokenValues, presentMatrixNote, probeMatrixProblem } from './model-probe/matrix-present'
+import { probeShownRequestId } from './model-probe/request-id'
 
 export type ProbeHtmlStatus = 'passed' | 'failed' | 'abnormal' | 'unsupported' | 'skipped' | 'expected' | 'untested'
 
@@ -26,6 +27,7 @@ export interface ProbeHtmlResult {
     body: unknown
     status: number | null
     requestId: string | null
+    responseHeaders?: Record<string, string>
     responseBody?: unknown
   } | null
 }
@@ -423,7 +425,7 @@ function buildGroups(report: ProbeHtmlReport, tests: ProbeHtmlTestMeta[], format
         checks: r.checks,
         url: r.repro?.url || '',
         http: r.repro?.status ?? null,
-        requestId: r.repro?.requestId ?? null,
+        requestId: probeShownRequestId(r.repro),
         body: r.repro ? r.repro.body : null,
         responseBody: r.repro && 'responseBody' in r.repro ? r.repro.responseBody : undefined,
       })
@@ -899,7 +901,7 @@ table.matrix{
 }
 .matrix-cell:hover{background:var(--fillHover)}
 .matrix td.gap{color:var(--t3);text-align:center}
-.dot-st{display:inline-flex;align-items:center;gap:7px;white-space:nowrap;color:var(--t2)}
+.dot-st{display:inline-flex;align-items:center;gap:7px;white-space:nowrap;color:var(--t2);font-size:12.5px;font-weight:500}
 .dot-st::before{content:"";width:6px;height:6px;border-radius:50%;background:var(--c,var(--t3));flex-shrink:0}
 .dot-st.passed{--c:var(--ok)}
 .dot-st.expected{--c:var(--accent)}
@@ -1084,27 +1086,26 @@ function matrixSheetItem(name: string, subtitle: string, result: ProbeHtmlResult
     checks: result.checks ?? null,
     http: result.repro?.status ?? null,
   }
+  const requestId = probeShownRequestId(result.repro)
+  if (requestId) item.requestId = requestId
   if (kind === 'problems' && result.repro) {
     item.url = result.repro.url
-    item.requestId = result.repro.requestId
     item.body = result.repro.body
     if ('responseBody' in result.repro) item.responseBody = result.repro.responseBody
   }
   return item
 }
 
-function matrixRowKeys(id: string, reports: ProbeHtmlReport[], kind: ProbeMatrixKind): string[] {
-  const keys = unionResultKeys(id, reports)
-  if (kind === 'problems') return keys.filter(key => reports.some(report => probeMatrixProblem(report.results[key]?.status)))
-  return keys.filter(key => reports.some(report => probeMatrixCellScored(report.results[key]?.status)))
+function matrixRowKeys(id: string, reports: ProbeHtmlReport[]): string[] {
+  return unionResultKeys(id, reports).filter(key => reports.some(report => probeMatrixCellScored(report.results[key]?.status)))
 }
 
 function matrixCellHtml(name: string, subtitle: string, result: ProbeHtmlResult | undefined, kind: ProbeMatrixKind, flat: MatrixSheetItem[]): string {
-  if (!result || (kind === 'problems' ? !probeMatrixProblem(result.status) : !probeMatrixCellScored(result.status))) {
-    return '<td class="gap">—</td>'
-  }
-  if (kind === 'full' && result.status === 'passed') {
-    return `<td><span class="dot-st passed">${esc(MATRIX_STATUS.passed)}</span></td>`
+  if (!result || !probeMatrixCellScored(result.status)) return '<td class="gap">—</td>'
+  // 不点击时两份表的状态字一样。整表每个有结果的格子都能弹；异常文件里通过、符合预期不弹。
+  const opens = kind !== 'problems' || probeMatrixProblem(result.status)
+  if (!opens) {
+    return `<td><span class="dot-st ${esc(result.status)}">${esc(MATRIX_STATUS[result.status])}</span></td>`
   }
   const item = matrixSheetItem(name, subtitle, result, kind)
   const index = flat.length
@@ -1351,7 +1352,8 @@ function probeMatrixSheet(payload: string, originsPayload: string): string {
 <script>${MATRIX_SHEET_SCRIPT}</script>`
 }
 
-// 整表里「通过」只留状态字，不进弹层数据。异常文件只收失败、异常、不支持，并写入请求与非 2xx 响应。
+// 两份表静止时状态字一样。整表弹层的 Request ID 从响应头按既定顺序读取，不写请求体、响应体、地址和响应头原文。
+// 异常文件里通过和符合预期只留状态字；失败、异常、不支持的弹层再带上请求与非 2xx 响应。
 export function buildProbeMatrixHtml(
   reports: ProbeHtmlReport[],
   tests: ProbeHtmlTestMeta[],
@@ -1366,7 +1368,7 @@ export function buildProbeMatrixHtml(
   let lastGroup = ''
   const colspan = list.length + 1
   for (const test of tests) {
-    const keys = matrixRowKeys(test.id, list, kind)
+    const keys = matrixRowKeys(test.id, list)
     if (!keys.length) continue
     if (test.group !== lastGroup) {
       lastGroup = test.group

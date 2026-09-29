@@ -174,7 +174,10 @@ describe('buildProbeMatrixHtml', () => {
     assert.match(html, /OpenAI Chat Completions/)
     assert.match(html, /并发请求稳定性<span class="row-sub">Chat Completions<\/span>/)
     assert.equal(html.includes('OpenAI Chat Completions<span class="row-sub">'), false)
-    assert.match(html, /<span class="dot-st passed">通过<\/span>/)
+    assert.match(html, /<button type="button" class="matrix-cell dot-st passed" data-i="0" aria-label="OpenAI Chat Completions 通过">通过<\/button>/)
+    assert.match(html, /"status":"passed"/)
+    assert.match(html, /3\/3/)
+    assert.equal(html.includes('<span class="dot-st passed">'), false)
     assert.match(html, />失败</)
     assert.match(html, /aria-label="OpenAI Chat Completions 失败"/)
     assert.equal(html.includes('>已跳过<'), false)
@@ -192,10 +195,9 @@ describe('buildProbeMatrixHtml', () => {
     assert.equal(html.includes('接入依据'), false)
     assert.equal(html.includes('"body"'), false)
     assert.equal(html.includes('FULL-BODY'), false)
-    assert.equal(html.includes('req-1'), false)
+    assert.equal(html.split('req-1').length - 1, 3)
     assert.equal(html.includes('https://example/v1/chat/completions'), false)
     assert.equal(html.includes('基础请求返回成功'), false)
-    assert.equal(html.includes('3/3'), false)
     assert.equal(html.includes('"explain"'), false)
     assert.match(html, /data-origin="0"/)
     assert.match(html, /渠道判断 gpt-4o · 渠道甲/)
@@ -209,13 +211,16 @@ describe('buildProbeMatrixHtml', () => {
     assert.match(problems, /<title>模型探测 · 异常<\/title>/)
     assert.match(problems, /FULL-BODY/)
     assert.match(problems, /"body":\{"model":"x"\}/)
-    assert.match(problems, /req-1/)
+    assert.equal(problems.split('req-1').length - 1, 1)
     assert.match(problems, /https:\/\/example\/v1\/chat\/completions/)
+    assert.match(problems, /<span class="dot-st passed">通过<\/span>/)
+    assert.equal(problems.includes('"status":"passed"'), false)
+    assert.match(problems, /并发请求稳定性/)
     assert.match(problems, /class="gap"/)
     assert.match(problems, />失败</)
-    assert.equal(problems.includes('并发请求稳定性'), false)
     assert.equal(problems.includes('基础请求返回成功'), false)
-    assert.equal(problems.includes('>通过<'), false)
+    assert.equal(problems.includes('3/3'), false)
+    assert.equal(problems.split('"body"').length - 1, 1)
     assert.equal(problems.includes('Bearer secret'), false)
     assert.equal(probeMatrixHasProblems([left, right]), true)
     assert.equal(probeMatrixHasProblems([left]), false)
@@ -223,7 +228,43 @@ describe('buildProbeMatrixHtml', () => {
     assert.equal(probeMatrixHtmlFileName(2, 'problems'), '模型探测_异常_2.html')
   })
 
-  it('符合预期留在整表弹层里，只带原因和错误 JSON', () => {
+  it('弹层 Request ID 按响应头顺序取，不把响应头原文写进文件', () => {
+    const one = report({
+      completedAt: '2026-09-29T01:00:01.000Z',
+      target: { baseUrl: 'https://a.example', model: 'gpt-4o', channelName: '渠道甲', overrides: {} },
+      results: {
+        'chat-basic': {
+          ...cell('passed', '基础请求返回成功'),
+          repro: {
+            url: 'https://example/v1/chat/completions',
+            headers: { Authorization: 'Bearer secret' },
+            body: { model: 'x' },
+            status: 200,
+            requestId: 'stale-id',
+            responseHeaders: {
+              'X-Oneapi-Request-Id': 'one-1',
+              'x-request-id': 'req-2',
+              'x-log-id': 'log-1',
+              'x-trace-id': 'trace-1',
+              'content-type': 'application/json',
+            },
+          },
+        },
+      },
+    })
+    const html = buildProbeMatrixHtml([one], tests, labels)
+    assert.match(html, /"requestId":"one-1"/)
+    assert.equal(html.includes('stale-id'), false)
+    assert.equal(html.includes('req-2'), false)
+    assert.equal(html.includes('log-1'), false)
+    assert.equal(html.includes('trace-1'), false)
+    assert.equal(html.includes('responseHeaders'), false)
+    assert.equal(html.includes('content-type'), false)
+    assert.equal(html.includes('"body"'), false)
+    assert.equal(html.includes('Bearer secret'), false)
+  })
+
+  it('符合预期留在整表弹层里，带原因、错误 JSON 和 Request ID', () => {
     const one = report({
       completedAt: '2026-09-29T01:00:01.000Z',
       target: { baseUrl: 'https://a.example', model: 'gpt-5', channelName: '渠道甲', overrides: {} },
@@ -237,10 +278,18 @@ describe('buildProbeMatrixHtml', () => {
     assert.equal(html.includes('符合预期：'), false)
     assert.equal(html.includes('<x>'), false)
     assert.match(html, /\\u003cx>/)
+    assert.match(html, /req-1/)
     assert.equal(html.includes('https://example/v1/chat/completions'), false)
     assert.equal(html.includes('"body"'), false)
     assert.match(html, /class="matrix-cell/)
     assert.match(html, />符合预期</)
+    const problems = buildProbeMatrixHtml([one], tests, labels, undefined, 'problems')
+    assert.match(problems, /<span class="dot-st expected">符合预期<\/span>/)
+    assert.equal(problems.includes('class="matrix-cell'), false)
+    assert.equal(problems.includes('不接受 temperature'), false)
+    assert.equal(problems.includes('req-1'), false)
+    assert.equal(problems.includes('https://example/v1/chat/completions'), false)
+    assert.equal(problems.includes('"body"'), false)
   })
 })
 
