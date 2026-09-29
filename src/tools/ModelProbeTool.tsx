@@ -7,7 +7,8 @@ import { decryptLlmApiKey, encryptLlmApiKey } from '../shared/api-key-crypto'
 import { historyDbGetAll, historyDbPutOne, historyDbDeleteOne, historyDbDeleteMany, historyDbClear, historyDbMigrateFromLocalStorage } from '../shared/history-db'
 import { useDebouncedPersist } from '../shared/use-debounced-persist'
 import { uniqueCopyName } from '../shared/channel-copy'
-import { downloadProbeMatrixHtml, downloadProbeReportHtml, probeMatrixColumnLabels } from './ModelProbeExport'
+import { downloadProbeMatrixHtml, downloadProbeReportHtml, probeMatrixCellScored, probeMatrixColumnLabels, probeMatrixColumnText, probeMatrixHasProblems } from './ModelProbeExport'
+import { matrixFormatSubtitle, matrixTokenValues, presentMatrixNote } from './model-probe/matrix-present'
 import { probeHistoryNewestFirst, probeHistoryOverflow, probeLogsSince, probeNameForModel, probeSplitModels, probeUnionBuiltinCases, probeViewAfterDelete } from './model-probe/batch'
 import {
   type ProbeFormat, type ProbeSseEvent, type ProbeUsage,
@@ -35,6 +36,9 @@ import {
   basicProtocolGate, decideFamily, nameSuggestsGpt, profileFromName, reclassifyExpected, scoreProtocolGate,
 } from './model-probe/profiles'
 import { decideOrigin, signalsFromProbeLogs } from './model-probe/origin'
+import { probeRequestIdFromHeaders } from './model-probe/request-id'
+import { probeNon2xxResponseBody, probeTopPRangeBody, scoreTopPRange } from './model-probe/negative'
+import { probeMatchRetryChannel, probeReplaceCellLogs } from './model-probe/cell'
 
 // ─── Tool: 模型探测 ─────────────────────────────────────────────────────────────
 // 定位：API 渠道兼容性实验台 —— 三种协议格式 × 参数/流式/缓存/Token 计数稳定性，
@@ -43,6 +47,7 @@ import { decideOrigin, signalsFromProbeLogs } from './model-probe/origin'
 // System / 多轮核验指令；图片输入默认不勾选。
 // 厂商内置工具（kind=native）按模型名命中后追加，默认不勾，单独发请求。
 // 「预期拒绝」（kind=score）默认不勾，不发请求，只决定要不要把本该拒绝的结果改判。
+// 「top_p 越界」在基础请求上带 top_p=2，只按状态码判定。报告里每一格可以单独重试，并覆盖这一格的结论。
 
 type ProbeStatus = 'passed' | 'failed' | 'abnormal' | 'unsupported' | 'skipped' | 'expected' | 'untested'
 
@@ -88,7 +93,14 @@ interface ProbeResult {
   cache?: { hits: number; total: number; reads: number[] }
   tokenValues?: number[]
   checks?: ProbeCheck[]
-  repro: { url: string; headers: Record<string, string>; body: any; status: number | null; requestId: string | null } | null
+  repro: {
+    url: string
+    headers: Record<string, string>
+    body: any
+    status: number | null
+    requestId: string | null
+    responseBody?: unknown
+  } | null
 }
 
 interface ProbeVerdictLayer { label: string; reasons: string[] }
@@ -141,7 +153,6 @@ const PROBE_FORMAT_LABELS: Record<ProbeFormat, string> = {
   chat: 'Chat Completions', responses: 'Responses', anthropic: 'Anthropic Messages',
 }
 const PROBE_FORMAT_SHORT: Record<ProbeFormat, string> = { chat: 'chat', responses: 'responses', anthropic: 'anthropic' }
-const PROBE_REQUEST_ID_HEADERS = ['x-oneapi-request-id', 'x-request-id', 'x-openai-request-id', 'request-id', 'x-goog-request-id']
 const PROBE_STATUS_LABELS: Record<ProbeStatus, string> = {
   passed: '通过', failed: '失败', abnormal: '异常', unsupported: '不支持', skipped: '已跳过', expected: '符合预期', untested: '未测',
 }
@@ -182,6 +193,7 @@ const PROBE_TESTS: ProbeTestDef[] = [
   { id: 'expect-reject', group: '参数与特性', name: '预期拒绝', desc: '按模型档位核对本来就该拒绝的请求。默认不勾选', explain: '勾选后才改判。GPT 推理档拒绝 temperature、top_p，或 Chat 上工具与 reasoning_effort 不能同用，记为符合预期；这些请求却返回成功则记异常。Codex 产品线的 Chat Completions、Claude 官方的 Chat / Responses、Claude 的 reasoning_effort 同样处理。gpt-4o、gpt-4.1 和未识别的模型名仍按普通能力判定。不勾选时，拒绝记为不支持或失败，成功记为通过。Anthropic 被要求改用 max_completion_tokens 时，无论是否勾选都会改字段再测。', kind: 'score', defaultSelected: false },
   { id: 'temperature', group: '参数与特性', name: 'temperature', desc: '采样温度参数支持情况', explain: 'temperature 控制采样随机性。拒绝记为不支持，接受记为通过。勾选「预期拒绝」后，GPT 推理模型拒绝非默认值或不接受该参数时记为符合预期，请求成功则记异常。gpt-4o / gpt-4.1 不套这套规则。', kind: 'parameter' },
   { id: 'top_p', group: '参数与特性', name: 'top_p', desc: '核采样参数支持情况', explain: 'top_p 与 temperature 同为采样参数。默认按是否接受来判。勾选「预期拒绝」后，GPT 推理模型不接受 top_p 记为符合预期，请求成功记异常。', kind: 'parameter' },
+  { id: 'top_p_range', group: '参数与特性', name: 'top_p 越界', desc: '发送 top_p=2，只看状态码是否拒绝', explain: '三种协议都在基础请求上带 top_p=2。Anthropic 固定 max_tokens=120，不跟随本轮改成 max_completion_tokens。其它 4xx 记通过，2xx 记失败；401、403、408、429、5xx、超时和网络错误记异常。不看错误正文是否提到 top_p，也不走「预期拒绝」。', kind: 'extra', subtype: 'top-p-range' },
   { id: 'reasoning_effort', group: '参数与特性', name: 'reasoning_effort', desc: '推理强度参数支持情况', explain: 'reasoning_effort（low/medium/high）仅推理模型支持，普通模型通常会报参数错误。勾选「预期拒绝」后，Claude 拒绝该参数记为符合预期，接受则记异常。', kind: 'parameter' },
   { id: 'max_tokens', group: '参数与特性', name: 'Token 上限参数', desc: 'Chat 同时试 max_tokens 与 max_completion_tokens，并核验截断原因', explain: 'Chat Completions 在同一发里带 max_tokens 与 max_completion_tokens；其中一个被拒就丢掉该字段再试，互斥则拆开各测一次。Responses 用 max_output_tokens，Anthropic 默认用 max_tokens。推理模型若被要求改用 max_completion_tokens，会改字段再测；勾选「预期拒绝」时这一次拒绝记为符合预期。接受后再发长输出 + 很小 cap 核验截断原因。', kind: 'parameter' },
   { id: 'structured_output', group: '参数与特性', name: '结构化输出', desc: '接受 Schema 约束并校验返回 JSON', explain: 'combo 先验证 json_schema / text.format / output_config 是否被接受。接受后再发充足 cap 的 Schema 请求，解析 JSON 并校验 ok 为布尔值。Anthropic 走 output_config.format。', kind: 'parameter' },
@@ -242,13 +254,7 @@ const probeHeadersObject = (headers: Headers): Record<string, string> => {
   headers.forEach((v, k) => { out[k] = v })
   return out
 }
-const probeExtractRequestId = (headers: Headers): string | null => {
-  for (const name of PROBE_REQUEST_ID_HEADERS) {
-    const v = headers.get(name)
-    if (v) return v
-  }
-  return null
-}
+const probeExtractRequestId = (headers: Headers): string | null => probeRequestIdFromHeaders(headers)
 const probeUsageComplete = (u?: ProbeUsage | null): boolean =>
   !!u && typeof u.input === 'number' && typeof u.output === 'number'
 const probeIoText = (u?: ProbeUsage | null): string =>
@@ -274,9 +280,24 @@ const probeComboBody = (cfg: ProbeCfg, format: ProbeFormat, pending: Iterable<st
 const probeParamLabel = (id: string): string => probeTestById(id)?.name || id
 const PROBE_SEMANTIC_IDS = new Set(['max_tokens', 'tool_calling', 'structured_output'])
 const probeResult = (status: ProbeStatus, detail: string, extra: Partial<ProbeResult> = {}): ProbeResult => ({ status, detail, duration: null, repro: null, ...extra })
-const probeReproOf = (log: ProbeLog): ProbeResult['repro'] => ({
-  url: log.url, headers: log.requestHeaders, body: log.requestBody, status: log.status, requestId: log.requestId,
-})
+const probeOriginInput = (rows: ProbeLog[]) => rows.map(log => ({
+  url: log.url,
+  status: log.status,
+  resultKey: log.resultKey,
+  format: log.format,
+  requestBody: log.requestBody,
+  responseHeaders: log.responseHeaders,
+  responseBody: log.responseBody,
+  usage: log.usage,
+}))
+const probeReproOf = (log: ProbeLog): ProbeResult['repro'] => {
+  const repro: NonNullable<ProbeResult['repro']> = {
+    url: log.url, headers: log.requestHeaders, body: log.requestBody, status: log.status, requestId: log.requestId,
+  }
+  const responseBody = probeNon2xxResponseBody(log.status, log.responseBody)
+  if (responseBody !== undefined) repro.responseBody = responseBody
+  return repro
+}
 const probeMultiFormatKinds: ProbeTestDef['kind'][] = ['parameter', 'token', 'stream', 'extra', 'native']
 const PROBE_STREAM_MAX_TOKENS = PROBE_DEFAULT_CAP
 const PROBE_PURE_STREAM_PROMPT = '讲个笑话'
@@ -464,6 +485,11 @@ const PROBE_CHECK_SVG = (
     <path d="M3 8.5l3.2 3.2L13 4.8" />
   </svg>
 )
+const PROBE_CLOSE_SVG = (
+  <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" aria-hidden="true">
+    <path d="M4 4l8 8M12 4l-8 8" />
+  </svg>
+)
 
 function ProbeCopyIconBtn({ text }: { text: string }) {
   const [copied, setCopied] = useState(false)
@@ -536,28 +562,21 @@ function ProbeIoChip({ usage }: { usage?: ProbeUsage | null }) {
 }
 
 function ProbeVerdictBlock({ verdict }: { verdict: ProbeVerdict }) {
-  const rows: { label: string; layer: ProbeVerdictLayer }[] = [
-    { label: '家族', layer: verdict.family },
-    { label: '接入层', layer: verdict.access },
-    { label: '上游', layer: verdict.upstream },
-  ]
+  const layer = verdict.upstream
+  if (!layer) return null
   return (
-    <div className="mt-4 grid gap-2">
-      {rows.map(row => (
-        <div key={row.label} className="grid items-baseline gap-x-3" style={{ gridTemplateColumns: '4.5rem minmax(0,1fr)' }}>
-          <div className="text-xs font-semibold leading-5" style={{ color: 'var(--t3)' }}>{row.label}</div>
-          <div className="min-w-0">
-            <div className="text-sm font-semibold leading-5" style={{ color: 'var(--text)' }}>{row.layer.label}</div>
-            {row.layer.reasons.length > 0 && (
-              <ul className="mt-0.5 space-y-0.5">
-                {row.layer.reasons.map(reason => (
-                  <li key={reason} className="text-xs leading-5 break-words" style={{ color: 'var(--t2)' }}>{reason}</li>
-                ))}
-              </ul>
-            )}
-          </div>
-        </div>
-      ))}
+    <div className="mt-4 grid items-baseline gap-x-3" style={{ gridTemplateColumns: '4.5rem minmax(0,1fr)' }}>
+      <div className="text-xs font-semibold leading-5" style={{ color: 'var(--t3)' }}>渠道判断</div>
+      <div className="min-w-0">
+        <div className="text-sm font-semibold leading-5" style={{ color: 'var(--text)' }}>{layer.label}</div>
+        {layer.reasons.length > 0 && (
+          <ul className="mt-0.5 space-y-0.5">
+            {layer.reasons.map(reason => (
+              <li key={reason} className="text-xs leading-5 break-words" style={{ color: 'var(--t2)' }}>{reason}</li>
+            ))}
+          </ul>
+        )}
+      </div>
     </div>
   )
 }
@@ -576,9 +595,12 @@ function ProbeStatusBadge({ status }: { status: ProbeStatus }) {
   )
 }
 
-function ProbeResultDialog({ detail, onClose }: {
+function ProbeResultDialog({ detail, onClose, onRetry, retrying, retryDisabled }: {
   detail: { test: ProbeTestDef; key: string; result: ProbeResult }
   onClose: () => void
+  onRetry?: (key: string) => void
+  retrying?: boolean
+  retryDisabled?: boolean
 }) {
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') onClose() }
@@ -590,7 +612,7 @@ function ProbeResultDialog({ detail, onClose }: {
       document.body.style.overflow = prev
     }
   }, [onClose])
-  return (
+  return probePortal(
     <div
       className="fixed inset-0 z-50 flex items-center justify-center p-5 ia-lightbox-enter"
       style={{ background: 'color-mix(in srgb, var(--bg) 78%, transparent)', backdropFilter: 'blur(10px)' }}
@@ -616,7 +638,18 @@ function ProbeResultDialog({ detail, onClose }: {
             <h2 className="text-lg font-bold mt-2" style={{ color: 'var(--text)', letterSpacing: '-0.014em' }}>{detail.test.name}</h2>
             <p className="text-xs mt-1 leading-5 break-words" style={{ color: 'var(--t3)' }}>{detail.test.explain}</p>
           </div>
-          <Btn small variant="ghost" className="shrink-0" onClick={onClose}>关闭</Btn>
+          <div className="flex shrink-0 items-center gap-2">
+            {onRetry && (
+              <button
+                type="button"
+                className="probe-retry"
+                aria-label={`重试 ${detail.test.name}${probeFormatOfKey(detail.key) ? ` ${PROBE_FORMAT_LABELS[probeFormatOfKey(detail.key)!]}` : ''}`}
+                disabled={retryDisabled || retrying}
+                onClick={() => onRetry(detail.key)}
+              >{retrying ? '重试中' : '重试'}</button>
+            )}
+            <Btn small variant="ghost" className="shrink-0" onClick={onClose}>关闭</Btn>
+          </div>
         </div>
         <p className="text-sm mt-3 leading-6 break-words" style={{ color: 'var(--text)' }}>{detail.result.detail}</p>
         {detail.result.checks && detail.result.checks.length > 0 && (
@@ -653,21 +686,29 @@ function ProbeResultDialog({ detail, onClose }: {
                 </span>
               )}
             </div>
-            <div className="grid gap-3 xl:grid-cols-2">
-              <ProbeCodeBlock title="请求头（密钥已脱敏）" children={probeJsonPretty(detail.result.repro.headers)} />
+            <ProbeCodeBlock title="请求头（密钥已脱敏）" children={probeJsonPretty(detail.result.repro.headers)} />
+            <div className="mt-3 grid gap-3 xl:grid-cols-2">
               <ProbeCodeBlock title="请求体" children={probeJsonPretty(detail.result.repro.body)} />
+              {detail.result.repro.responseBody !== undefined && (
+                <ProbeCodeBlock title="响应体" children={typeof detail.result.repro.responseBody === 'string' ? detail.result.repro.responseBody : probeJsonPretty(detail.result.repro.responseBody)} />
+              )}
             </div>
           </div>
         ) : (
           <p className="text-xs mt-4" style={{ color: 'var(--t3)' }}>本轮无实际请求。</p>
         )}
       </div>
-    </div>
+    </div>,
   )
 }
 
-function ProbeReportTiles({ report }: { report: ProbeReport }) {
-  const [detail, setDetail] = useState<{ test: ProbeTestDef; key: string; result: ProbeResult } | null>(null)
+function ProbeReportTiles({ report, onRetry, retryingKey, retryDisabled }: {
+  report: ProbeReport
+  onRetry?: (key: string) => void
+  retryingKey: string | null
+  retryDisabled: boolean
+}) {
+  const [detailKey, setDetailKey] = useState<string | null>(null)
 
   const groups: { title: string; items: { test: ProbeTestDef; key: string; result: ProbeResult }[] }[] = []
   let skipped = 0
@@ -684,6 +725,9 @@ function ProbeReportTiles({ report }: { report: ProbeReport }) {
     }
     g.items.push(...executed)
   }
+  const detailItem = detailKey
+    ? groups.flatMap(group => group.items).find(item => item.key === detailKey) ?? null
+    : null
 
   let tileIndex = 0
   return (
@@ -696,41 +740,56 @@ function ProbeReportTiles({ report }: { report: ProbeReport }) {
               const fmt = probeFormatOfKey(item.key)
               const st = item.result.status
               const i = Math.min(tileIndex++, 12)
+              const retrying = retryingKey === item.key
+              const formatLabel = fmt ? PROBE_FORMAT_LABELS[fmt] : ''
               return (
-                <button
-                  key={item.key}
-                  type="button"
-                  className="probe-tile text-left rounded-2xl px-4 py-3.5"
-                  style={{ '--i': i } as React.CSSProperties}
-                  onClick={() => setDetail(item)}
-                >
-                  <div className="flex items-center justify-between gap-2">
-                    <span className={`probe-status-text is-${st}`}>{PROBE_STATUS_LABELS[st]}</span>
-                    <span className="font-mono text-[11px] tabular-nums" style={{ color: 'var(--t3)', fontFamily: PROBE_MONO }}>
-                      {item.result.duration != null ? `${item.result.duration} ms` : ''}
-                    </span>
-                  </div>
-                  <div className="mt-2 text-sm font-semibold" style={{ color: 'var(--text)', letterSpacing: '-0.011em' }}>{item.test.name}</div>
-                  {fmt && (
-                    <div className="mt-1.5">
-                      <span className="rounded-full px-2 py-0.5 text-[11px]" style={{ background: 'var(--s2)', color: 'var(--t2)' }}>{PROBE_FORMAT_LABELS[fmt]}</span>
+                <div key={item.key} className="relative">
+                  <button
+                    type="button"
+                    data-probe-tile=""
+                    data-probe-key={item.key}
+                    className="probe-tile w-full text-left rounded-2xl px-4 py-3.5"
+                    style={{ '--i': i } as React.CSSProperties}
+                    onClick={() => setDetailKey(item.key)}
+                  >
+                    <div className="flex items-center justify-between gap-2 pr-14">
+                      <span className={`probe-status-text is-${st}`}>{PROBE_STATUS_LABELS[st]}</span>
+                      <span className="font-mono text-[11px] tabular-nums" style={{ color: 'var(--t3)', fontFamily: PROBE_MONO }}>
+                        {item.result.duration != null ? `${item.result.duration} ms` : ''}
+                      </span>
                     </div>
-                  )}
-                  <div className="mt-2 text-xs line-clamp-2 leading-5" style={{ color: 'var(--t2)' }}>{item.result.detail}</div>
-                  {item.result.checks && item.result.checks.length > 0 && (
-                    <div className="mt-2 flex flex-wrap gap-1">
-                      {item.result.checks.map(c => (
-                        <span key={c.id} className="rounded-full px-1.5 py-0.5 text-[10px]" style={{
-                          background: c.passed ? 'var(--okBg)' : 'var(--errBg)',
-                          color: c.passed ? 'var(--ok)' : 'var(--err)',
-                        }}>{c.passed ? '✓' : '✗'} {c.id}</span>
-                      ))}
+                    <div className="mt-2 text-sm font-semibold" style={{ color: 'var(--text)', letterSpacing: '-0.011em' }}>{item.test.name}</div>
+                    {fmt && (
+                      <div className="mt-1.5">
+                        <span className="rounded-full px-2 py-0.5 text-[11px]" style={{ background: 'var(--s2)', color: 'var(--t2)' }}>{formatLabel}</span>
+                      </div>
+                    )}
+                    <div className="mt-2 text-xs line-clamp-2 leading-5" style={{ color: 'var(--t2)' }}>{item.result.detail}</div>
+                    {item.result.checks && item.result.checks.length > 0 && (
+                      <div className="mt-2 flex flex-wrap gap-1">
+                        {item.result.checks.map(c => (
+                          <span key={c.id} className="rounded-full px-1.5 py-0.5 text-[10px]" style={{
+                            background: c.passed ? 'var(--okBg)' : 'var(--errBg)',
+                            color: c.passed ? 'var(--ok)' : 'var(--err)',
+                          }}>{c.passed ? '✓' : '✗'} {c.id}</span>
+                        ))}
+                      </div>
+                    )}
+                    <div className="mt-2">
+                      <ProbeIoChip usage={item.result.usage} />
                     </div>
+                  </button>
+                  {onRetry && (
+                    <button
+                      type="button"
+                      data-probe-retry=""
+                      className="probe-retry absolute top-3.5 right-4"
+                      aria-label={`重试 ${item.test.name}${formatLabel ? ` ${formatLabel}` : ''}`}
+                      disabled={retryDisabled || retrying}
+                      onClick={e => { e.stopPropagation(); onRetry(item.key) }}
+                    >{retrying ? '重试中' : '重试'}</button>
                   )}
-                  <div className="mt-2">
-                    <ProbeIoChip usage={item.result.usage} />
-                  </div>
-                </button>
+                </div>
               )
             })}
           </div>
@@ -739,89 +798,296 @@ function ProbeReportTiles({ report }: { report: ProbeReport }) {
       {skipped > 0 && (
         <p className="mt-5 text-xs" style={{ color: 'var(--t3)' }}>另有 {skipped} 项未执行。</p>
       )}
-      {detail && <ProbeResultDialog detail={detail} onClose={() => setDetail(null)} />}
+      {detailItem && (
+        <ProbeResultDialog
+          detail={detailItem}
+          onClose={() => setDetailKey(null)}
+          onRetry={onRetry}
+          retrying={retryingKey === detailItem.key}
+          retryDisabled={retryDisabled}
+        />
+      )}
     </>
+  )
+}
+
+function ProbeMatrixCopy({ text, label = '复制' }: { text: string; label?: string }) {
+  const [copied, setCopied] = useState(false)
+  return (
+    <button
+      type="button"
+      className={`probe-matrix-icon is-inline${copied ? ' is-ok' : ''}`}
+      aria-label={copied ? '已复制' : label}
+      title={copied ? '已复制' : label}
+      onClick={e => {
+        e.stopPropagation()
+        navigator.clipboard.writeText(text).then(() => { setCopied(true); setTimeout(() => setCopied(false), 1500) })
+      }}
+    >
+      {copied ? PROBE_CHECK_SVG : PROBE_COPY_SVG}
+    </button>
+  )
+}
+
+function ProbeMatrixCode({ title, text, copyLabel }: { title: string; text: string; copyLabel?: string }) {
+  return (
+    <div className="mt-5 min-w-0">
+      <div className="mb-1.5 flex items-center justify-between">
+        <div className="text-xs" style={{ color: 'var(--t3)' }}>{title}</div>
+        <ProbeMatrixCopy text={text} label={copyLabel} />
+      </div>
+      <pre className="overflow-auto rounded-[10px] p-3 font-mono text-[12px] leading-6" style={{ background: 'var(--code)', color: 'var(--text)', maxHeight: 320, fontFamily: PROBE_MONO }}>
+        <code dangerouslySetInnerHTML={{ __html: highlightJson(text) || ' ' }} />
+      </pre>
+    </div>
+  )
+}
+
+function matrixUsageLine(usage?: ProbeUsage | null): string | null {
+  if (!usage) return null
+  const n = (v: number | null) => (v == null ? '—' : String(v))
+  const parts = [`↑${n(usage.input)}`, `↓${n(usage.output)}`]
+  if (usage.cacheRead != null) parts.push(`缓存读 ${usage.cacheRead}`)
+  if (usage.cacheWrite != null) parts.push(`写 ${usage.cacheWrite}`)
+  return parts.join(' ')
+}
+
+function matrixRawFormat(key: string, reports: ProbeReport[]): string {
+  for (const report of reports) {
+    const result = report.results[key]
+    const fmt = result?.format || probeFormatOfKey(key)
+    if (fmt) return PROBE_FORMAT_LABELS[fmt] || fmt
+  }
+  const fmt = probeFormatOfKey(key)
+  return fmt ? (PROBE_FORMAT_LABELS[fmt] || '') : ''
+}
+
+function ProbeMatrixDialog({ detail, onClose }: {
+  detail: { test: ProbeTestDef; key: string; result: ProbeResult }
+  onClose: () => void
+}) {
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') onClose() }
+    window.addEventListener('keydown', onKey)
+    const prev = document.body.style.overflow
+    document.body.style.overflow = 'hidden'
+    return () => {
+      window.removeEventListener('keydown', onKey)
+      document.body.style.overflow = prev
+    }
+  }, [onClose])
+  const fmt = probeFormatOfKey(detail.key) || detail.result.format || null
+  const subtitle = matrixFormatSubtitle(detail.test.name, fmt ? (PROBE_FORMAT_LABELS[fmt] || '') : '')
+  const note = presentMatrixNote(detail.result.detail || '')
+  const tokens = matrixTokenValues(detail.result.tokenValues)
+  const usageLine = matrixUsageLine(detail.result.usage)
+  const repro = detail.result.repro
+  return probePortal(
+    <div
+      className="probe-matrix-scrim fixed inset-0 z-50 flex items-center justify-center p-4"
+      onClick={e => { if (e.target === e.currentTarget) onClose() }}
+    >
+      <div
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="probe-matrix-sheet-title"
+        className="probe-matrix-sheet w-full max-w-3xl max-h-[86vh] overflow-y-auto"
+        onClick={e => e.stopPropagation()}
+      >
+        <div className="flex items-start justify-between gap-3">
+          <div className="flex min-w-0 flex-wrap items-center gap-x-2.5 gap-y-1">
+            <ProbeStatusBadge status={detail.result.status} />
+            <h2 id="probe-matrix-sheet-title" className="text-lg font-semibold" style={{ color: 'var(--text)', letterSpacing: '-0.01em' }}>{detail.test.name}</h2>
+            {subtitle && <span className="text-xs" style={{ color: 'var(--t3)' }}>{subtitle}</span>}
+          </div>
+          <button type="button" className="probe-matrix-icon" aria-label="关闭" title="关闭" onClick={onClose}>{PROBE_CLOSE_SVG}</button>
+        </div>
+        {note.detail && <p className="mt-3.5 text-sm leading-6 break-words" style={{ color: 'var(--text)' }}>{note.detail}</p>}
+        {note.errBody && <pre className="probe-matrix-err font-mono" style={{ fontFamily: PROBE_MONO }}>{note.errBody}</pre>}
+        {detail.result.checks && detail.result.checks.length > 0 && (
+          <div className="mt-3 flex flex-wrap gap-1.5">
+            {detail.result.checks.map(c => (
+              <span key={c.id} className="rounded-md px-2 py-0.5 text-[11px]" style={{
+                background: c.passed ? 'var(--okBg)' : 'var(--errBg)',
+                color: c.passed ? 'var(--ok)' : 'var(--err)',
+              }}>{c.passed ? '✓' : '✗'} {c.detail}</span>
+            ))}
+          </div>
+        )}
+        {(detail.result.duration != null || usageLine || detail.result.cache || tokens) && (
+          <div className="mt-4 flex flex-wrap gap-x-5 gap-y-1 text-[12.5px]" style={{ color: 'var(--text)' }}>
+            {detail.result.duration != null && <span><span style={{ color: 'var(--t3)' }}>耗时 </span>{detail.result.duration} ms</span>}
+            {usageLine && <span><span style={{ color: 'var(--t3)' }}>用量 </span><span className="font-mono" style={{ fontFamily: PROBE_MONO }}>{usageLine}</span></span>}
+            {detail.result.cache && <span><span style={{ color: 'var(--t3)' }}>缓存 </span>{detail.result.cache.hits}/{detail.result.cache.total} 次命中</span>}
+            {tokens && <span><span style={{ color: 'var(--t3)' }}>输入 Token </span>{tokens.join(', ')}</span>}
+          </div>
+        )}
+        {repro ? (
+          <div className="mt-4">
+            <div className="flex flex-wrap items-center gap-2">
+              <span className="rounded-md px-2 py-0.5 font-mono text-[11.5px]" style={{ background: 'color-mix(in srgb, var(--text) 5%, transparent)', color: 'var(--t2)', fontFamily: PROBE_MONO }}>POST {repro.url}</span>
+              <span className="rounded-md px-2 py-0.5 font-mono text-[11.5px]" style={{ background: 'color-mix(in srgb, var(--text) 5%, transparent)', color: 'var(--t2)', fontFamily: PROBE_MONO }}>HTTP {repro.status ?? '—'}</span>
+              {repro.requestId && (
+                <span className="inline-flex items-center gap-1">
+                  <span className="font-mono text-[11px]" style={{ color: 'var(--t3)', fontFamily: PROBE_MONO }}>Request ID</span>
+                  <ProbeCopyId value={repro.requestId} />
+                </span>
+              )}
+            </div>
+            <ProbeMatrixCode title="请求头（密钥已脱敏）" text={probeJsonPretty(repro.headers)} />
+            <div className="grid gap-3 xl:grid-cols-2">
+              <ProbeMatrixCode title="请求体" text={probeJsonPretty(repro.body)} />
+              {repro.responseBody !== undefined && (
+                <ProbeMatrixCode title="响应体" text={typeof repro.responseBody === 'string' ? repro.responseBody : probeJsonPretty(repro.responseBody)} copyLabel="复制响应体" />
+              )}
+            </div>
+          </div>
+        ) : (
+          <p className="mt-4 text-xs" style={{ color: 'var(--t3)' }}>本轮无实际请求。</p>
+        )}
+      </div>
+    </div>,
+  )
+}
+
+function ProbeOriginDialog({ origin, onClose }: { origin: { column: string; label: string; reasons: string[] }; onClose: () => void }) {
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') onClose() }
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+  }, [onClose])
+  return probePortal(
+    <div className="probe-matrix-scrim fixed inset-0 z-50 flex items-center justify-center p-4" onClick={e => { if (e.target === e.currentTarget) onClose() }}>
+      <div role="dialog" aria-modal="true" aria-labelledby="probe-origin-title" className="probe-matrix-sheet w-full max-w-lg" onClick={e => e.stopPropagation()}>
+        <div className="flex items-start justify-between gap-3">
+          <div className="min-w-0">
+            <h2 id="probe-origin-title" className="text-lg font-semibold" style={{ color: 'var(--text)', letterSpacing: '-0.01em' }}>渠道判断</h2>
+            <p className="mt-1 text-xs break-words" style={{ color: 'var(--t3)' }}>{origin.column}</p>
+          </div>
+          <button type="button" className="probe-matrix-icon" aria-label="关闭" title="关闭" onClick={onClose}>{PROBE_CLOSE_SVG}</button>
+        </div>
+        <p className="mt-3 text-sm font-semibold" style={{ color: 'var(--text)' }}>{origin.label}</p>
+        {origin.reasons.length > 0 ? (
+          <ul className="mt-2 space-y-1">
+            {origin.reasons.map(reason => <li key={reason} className="text-sm leading-6" style={{ color: 'var(--t2)' }}>{reason}</li>)}
+          </ul>
+        ) : (
+          <p className="mt-2 text-sm" style={{ color: 'var(--t3)' }}>没有更多依据。</p>
+        )}
+      </div>
+    </div>,
   )
 }
 
 function ProbeMatrixView({ reports }: { reports: ProbeReport[] }) {
   const [detail, setDetail] = useState<{ test: ProbeTestDef; key: string; result: ProbeResult } | null>(null)
+  const [origin, setOrigin] = useState<{ column: string; label: string; reasons: string[] } | null>(null)
   const labels = probeMatrixColumnLabels(reports)
-  const groups: { title: string; rows: { test: ProbeTestDef; key: string; formatLabel: string }[] }[] = []
+  const hasProblems = probeMatrixHasProblems(reports)
+  const groups: { title: string; rows: { test: ProbeTestDef; key: string; subtitle: string }[] }[] = []
   for (const test of probeCatalog()) {
     const keySet = new Set<string>()
     for (const report of reports) {
       for (const key of probeResultKeysOf(test, report.results)) keySet.add(key)
     }
-    const keys = [...keySet].sort((a, b) => a.localeCompare(b))
+    const keys = [...keySet].sort((a, b) => a.localeCompare(b)).filter(key => reports.some(report => probeMatrixCellScored(report.results[key]?.status)))
     if (!keys.length) continue
     let group = groups.find(item => item.title === test.group)
     if (!group) {
       group = { title: test.group, rows: [] }
       groups.push(group)
     }
-    for (const key of keys) {
-      const fmt = probeFormatOfKey(key)
-      group.rows.push({ test, key, formatLabel: fmt ? PROBE_FORMAT_LABELS[fmt] : '' })
-    }
+    for (const key of keys) group.rows.push({ test, key, subtitle: matrixFormatSubtitle(test.name, matrixRawFormat(key, reports)) })
   }
   const colspan = reports.length + 1
   return (
-    <div className="p-6" data-testid="probe-matrix-view">
-      <div className="surface-card rounded-2xl p-5" style={{ background: 'var(--bg)', border: '1px solid var(--border)', boxShadow: 'var(--shadow)' }}>
-        <div className="text-xs font-semibold uppercase" style={{ color: 'var(--accent)', letterSpacing: '0.12em' }}>模型对比</div>
-        <h3 className="text-xl font-bold mt-1" style={{ color: 'var(--text)', letterSpacing: '-0.02em' }}>模型对比</h3>
-        <p className="text-sm mt-1" style={{ color: 'var(--t2)' }}>{reports.length} 份报告</p>
-        <div className="mt-4">
-          <Btn small variant="soft" onClick={() => downloadProbeMatrixHtml(reports, probeCatalog(), PROBE_FORMAT_LABELS)}>导出 HTML</Btn>
+    <div className="flex min-h-0 flex-1 flex-col" data-testid="probe-matrix-view">
+      <div className="flex shrink-0 items-center justify-between gap-3 overflow-x-auto px-4 py-3 sm:px-6" style={{ borderBottom: '1px solid color-mix(in srgb, var(--text) 8%, transparent)' }}>
+        <h3 className="shrink-0 whitespace-nowrap text-sm font-semibold" style={{ color: 'var(--text)' }}>模型探测</h3>
+        <div className="flex shrink-0 gap-2">
+          <Btn small variant="soft" className="whitespace-nowrap" onClick={() => downloadProbeMatrixHtml(reports, probeCatalog(), PROBE_FORMAT_LABELS)}>导出 HTML</Btn>
+          <Btn
+            small
+            variant="soft"
+            className="whitespace-nowrap"
+            disabled={!hasProblems}
+            title={hasProblems ? '只包含失败、异常和不支持' : '这次没有失败、异常或不支持'}
+            onClick={() => downloadProbeMatrixHtml(reports, probeCatalog(), PROBE_FORMAT_LABELS, 'problems')}
+          >异常导出</Btn>
         </div>
       </div>
-      <table className="probe-matrix mt-6">
-        <thead>
-          <tr>
-            <th className="probe-matrix-rowh" scope="col">测试项</th>
-            {labels.map(label => <th key={label} scope="col">{label}</th>)}
-          </tr>
-        </thead>
-        <tbody>
-          {groups.map(group => (
-            <React.Fragment key={group.title}>
-              <tr className="probe-matrix-group">
-                <td colSpan={colspan}>{group.title}</td>
-              </tr>
-              {group.rows.map(row => (
-                <tr key={row.key}>
-                  <th className="probe-matrix-rowh" scope="row">
-                    <div>{row.test.name}</div>
-                    {row.formatLabel && (
-                      <span className="mt-1 inline-block rounded-full px-2 py-0.5 text-[11px] font-normal normal-case tracking-normal" style={{ background: 'var(--s2)', color: 'var(--t2)', letterSpacing: '0' }}>{row.formatLabel}</span>
-                    )}
+      <div className="probe-matrix-scroll min-h-0 flex-1 overflow-auto">
+        <table className="probe-matrix">
+          <thead>
+            <tr>
+              <th className="probe-matrix-rowh" scope="col">测试项</th>
+              {reports.map((report, index) => {
+                const column = labels[index]
+                const text = probeMatrixColumnText(column)
+                const upstream = report.verdict?.upstream
+                const lines = (
+                  <>
+                    <span className="probe-matrix-model">{column.model}</span>
+                    {column.source ? <span className="probe-matrix-source">{column.source}</span> : null}
+                    {upstream ? <span className="probe-matrix-source">{upstream.label}</span> : null}
+                  </>
+                )
+                return (
+                  <th key={report.id} scope="col">
+                    {upstream ? (
+                      <button
+                        type="button"
+                        className="probe-matrix-col"
+                        aria-label={`渠道判断 ${text}`}
+                        onClick={() => setOrigin({ column: text, label: upstream.label, reasons: upstream.reasons })}
+                      >
+                        {lines}
+                      </button>
+                    ) : lines}
                   </th>
-                  {reports.map(report => {
-                    const result = report.results[row.key]
-                    if (!result) return <td key={report.id} className="probe-matrix-gap">—</td>
-                    const statusLabel = PROBE_STATUS_LABELS[result.status]
-                    const aria = `${row.test.name} ${row.formatLabel} ${statusLabel}`.replace(/\s+/g, ' ').trim()
-                    return (
-                      <td key={report.id}>
-                        <button
-                          type="button"
-                          className="probe-matrix-cell"
-                          aria-label={aria}
-                          onClick={() => setDetail({ test: row.test, key: row.key, result })}
-                        >
-                          <span className={`probe-status-text is-${result.status}`}>{statusLabel}</span>
-                        </button>
-                      </td>
-                    )
-                  })}
+                )
+              })}
+            </tr>
+          </thead>
+          <tbody>
+            {groups.map(group => (
+              <React.Fragment key={group.title}>
+                <tr className="probe-matrix-group">
+                  <td colSpan={colspan}><span>{group.title}</span></td>
                 </tr>
-              ))}
-            </React.Fragment>
-          ))}
-        </tbody>
-      </table>
-      {detail && <ProbeResultDialog detail={detail} onClose={() => setDetail(null)} />}
+                {group.rows.map(row => (
+                  <tr key={row.key}>
+                    <th className="probe-matrix-rowh" scope="row">
+                      <div>{row.test.name}</div>
+                      {row.subtitle && <span className="probe-matrix-sub">{row.subtitle}</span>}
+                    </th>
+                    {reports.map(report => {
+                      const result = report.results[row.key]
+                      if (!result || !probeMatrixCellScored(result.status)) return <td key={report.id} className="probe-matrix-gap">—</td>
+                      const statusLabel = PROBE_STATUS_LABELS[result.status]
+                      const aria = [row.test.name, row.subtitle, statusLabel].filter(Boolean).join(' ')
+                      return (
+                        <td key={report.id}>
+                          <button
+                            type="button"
+                            className="probe-matrix-cell"
+                            aria-label={aria}
+                            onClick={() => setDetail({ test: row.test, key: row.key, result })}
+                          >
+                            <span className={`probe-matrix-status is-${result.status}`}>{statusLabel}</span>
+                          </button>
+                        </td>
+                      )
+                    })}
+                  </tr>
+                ))}
+              </React.Fragment>
+            ))}
+          </tbody>
+        </table>
+      </div>
+      {detail && <ProbeMatrixDialog detail={detail} onClose={() => setDetail(null)} />}
+      {origin && <ProbeOriginDialog origin={origin} onClose={() => setOrigin(null)} />}
     </div>
   )
 }
@@ -873,6 +1139,11 @@ function ProbeFormatCard({ t, checked, disabled, status, onChange }: {
 
 type ProbeChFormState = { name: string; baseUrl: string; timeoutSec: string; chatUrl: string; responsesUrl: string; anthropicUrl: string; apiKey: string }
 type ProbeConnResult = { ok: boolean; status: number | null; ms: number; err: string } | null
+
+function probePortal(node: React.ReactNode) {
+  if (typeof document === 'undefined') return null
+  return createPortal(node, document.querySelector('.app-shell') || document.body)
+}
 
 function ProbeHelpTip({ text }: { text: string }) {
   const [open, setOpen] = useState(false)
@@ -1199,6 +1470,9 @@ function ModelProbeTool() {
 
   const [pane, setPane] = useState<'live' | 'logs' | 'report' | 'history' | 'channels'>('live')
   const [running, setRunning] = useState(false)
+  const [retryingKey, setRetryingKey] = useState<string | null>(null)
+  const retryingKeyRef = useRef<string | null>(null)
+  const [retryNotice, setRetryNotice] = useState('')
   const [nameModal, setNameModal] = useState(false)
   const [testName, setTestName] = useState('')
   const [report, setReport] = useState<ProbeReport | null>(null)
@@ -1809,6 +2083,22 @@ function ModelProbeTool() {
       const blocked = untestedBecauseBlocked(format)
       if (blocked) return blocked
     }
+    if (subtype === 'top-p-range') {
+      const body = probeTopPRangeBody(format, cfgRef.current!.model)
+      const log = probeNewLog('top_p_range', 'top_p 越界', format)
+      try {
+        const r = await probeRequest(log, format, body)
+        const scored = scoreTopPRange(r.status, 'http')
+        return probeResult(scored.status, scored.detail, {
+          format, duration: r.log.duration, usage: r.log.usage, repro: probeReproOf(r.log),
+        })
+      } catch (e: any) {
+        if (stopRef.current) return probeResult('skipped', PROBE_STOP_DETAIL, { format, repro: probeReproOf(log) })
+        const timedOut = e?.name === 'TimeoutError'
+        const scored = scoreTopPRange(log.status, timedOut ? 'timeout' : 'network')
+        return probeResult(scored.status, scored.detail, { format, duration: log.duration, repro: probeReproOf(log) })
+      }
+    }
     if (subtype === 'error') {
       const log = probeNewLog('error-shape', '错误码规范性', format)
       const body = { ...probeBaseBody(cfgRef.current!, format), model: 'modelprobe-intentionally-invalid-model' }
@@ -2027,6 +2317,7 @@ function ModelProbeTool() {
   testConnectionRef.current = testConnection
 
   const runProbe = async (name: string) => {
+    if (retryingKeyRef.current) return
     const ch = activeChannel
     const models = probeSplitModels(model)
     const errs: string[] = []
@@ -2050,6 +2341,7 @@ function ModelProbeTool() {
     if (errs.length) { setStartErr(errs.join('\n')); return }
     if (!ch) return
     setStartErr('')
+    setRetryNotice('')
 
     stopRef.current = false
     probeLogPrefixRef.current = ''
@@ -2226,16 +2518,7 @@ function ModelProbeTool() {
       const signals = signalsFromProbeLogs({
         requestModel: cfg.model,
         baseUrl: cfg.baseUrl,
-        logs: modelLogs.map(log => ({
-          url: log.url,
-          status: log.status,
-          resultKey: log.resultKey,
-          format: log.format,
-          requestBody: log.requestBody,
-          responseHeaders: log.responseHeaders,
-          responseBody: log.responseBody,
-          usage: log.usage,
-        })),
+        logs: probeOriginInput(modelLogs),
       })
       const family = decideFamily(signals)
       const origin = decideOrigin(signals)
@@ -2267,6 +2550,128 @@ function ModelProbeTool() {
       setProgress({ done: total, total, label: `${probeProgressTagRef.current} · ${stopRef.current ? '已停止' : '完成'}` })
       return rep.id
     }
+    }
+  }
+
+  const retryProbeCell = async (key: string) => {
+    if (running || retryingKeyRef.current) return
+    const source = reportRef.current
+    if (!source?.results[key]) {
+      setRetryNotice('这份报告里没有这一格，不能重试。')
+      return
+    }
+    const matched = probeMatchRetryChannel(source.target, channels, activeChId)
+    if ('error' in matched) {
+      setRetryNotice(matched.error)
+      setStartErr(matched.error)
+      return
+    }
+    const at = key.lastIndexOf('@')
+    const testId = at > 0 ? key.slice(0, at) : key
+    const keyFormat = at > 0 ? key.slice(at + 1) : ''
+    const test = probeTestById(testId)
+    const needsFormat = !!test && probeMultiFormatKinds.includes(test.kind)
+    const cellFormat = (needsFormat ? keyFormat : (test?.format || keyFormat)) as ProbeFormat
+    if (!test || test.kind === 'score' || (needsFormat && !(cellFormat in PROBE_FORMAT_LABELS))) {
+      setRetryNotice('这一格没有对应的用例，不能重试。')
+      return
+    }
+    retryingKeyRef.current = key
+    setRetryingKey(key)
+    setRetryNotice('')
+    setStartErr('')
+    try {
+      const apiKey = await decryptLlmApiKey(matched.channel.apiKeyEnc)
+      if (!apiKey.trim()) {
+        const message = `渠道「${matched.channel.name}」的 API Key 解密失败，请重新编辑并保存。`
+        setRetryNotice(message)
+        setStartErr(message)
+        return
+      }
+      stopRef.current = false
+      probeLogPrefixRef.current = ''
+      formatBlockerRef.current = {}
+      anthropicMaxTokensRowRef.current = null
+      setProbeAnthropicCapField('max_tokens')
+      profileRef.current = profileFromName(source.target.model)
+      officialAnthropicRef.current = (() => {
+        try { return new URL(source.target.baseUrl).hostname.toLowerCase() === 'api.anthropic.com' } catch { return false }
+      })()
+      const timeoutMs = (Number(matched.channel.timeoutSec) || 60) * 1000
+      const base = source.target.baseUrl
+      const overrides = source.target.overrides || { chat: null, responses: null, anthropic: null }
+      cfgRef.current = {
+        baseUrl: base,
+        apiKey,
+        model: source.target.model,
+        timeoutMs,
+        urlOf: {
+          chat: probeJoinUrl((overrides.chat || '').trim() || base, PROBE_ENDPOINTS.chat),
+          responses: probeJoinUrl((overrides.responses || '').trim() || base, PROBE_ENDPOINTS.responses),
+          anthropic: probeJoinUrl((overrides.anthropic || '').trim() || base, PROBE_ENDPOINTS.anthropic),
+        },
+      }
+      const beforeIds = new Set(logsRef.current.map(item => item.id))
+      const started = Date.now()
+      let out: ProbeResult | null = null
+      if (test.kind === 'basic') out = await runProbeBasic(test)
+      else if (test.kind === 'parameter') out = (await runProbeParamSuite(cellFormat, [test.id]))[key] ?? null
+      else if (test.kind === 'token') {
+        const count = Math.max(2, Math.min(10, Number(tokenRuns) || 3))
+        out = await runProbeToken(cellFormat, count, randomString.trim())
+      } else if (test.kind === 'stream') out = await runProbeStream(test, cellFormat)
+      else if (test.kind === 'extra') out = await runProbeExtra(test.subtype || '', cellFormat)
+      else if (test.kind === 'native') out = await runProbeNative(test)
+      else if (test.kind === 'cache' && test.format) out = await runProbeCache(test.format)
+      if (!out || out.status === 'skipped') return
+      let gated = probeApplyUsageGate(out)
+      const hadLogs = (source.logs || []).length > 0
+      const fresh = logsRef.current.filter(item => !beforeIds.has(item.id))
+      const replaced = probeReplaceCellLogs(logsRef.current, source.logs || [], key, fresh)
+      logsRef.current = replaced.session
+      setLogs([...logsRef.current])
+      const signals = signalsFromProbeLogs({
+        requestModel: source.target.model,
+        baseUrl: source.target.baseUrl,
+        logs: hadLogs ? probeOriginInput(replaced.reportLogs) : [],
+      })
+      const family = decideFamily(signals)
+      if (selectedRef.current['expect-reject']) {
+        const origin = hadLogs
+          ? decideOrigin(signals)
+          : { access: { id: 'uncertain', label: '不确定', reasons: [] } }
+        const rewritten = reclassifyExpected(key, gated, family, origin)
+        if (rewritten) gated = { ...gated, status: rewritten.status, detail: rewritten.detail }
+      }
+      const verdict = hadLogs
+        ? (() => {
+            const origin = decideOrigin(signals)
+            return {
+              family: { label: family.label, reasons: family.reasons },
+              access: { label: origin.access.label, reasons: origin.access.reasons },
+              upstream: { label: origin.upstream.label, reasons: origin.upstream.reasons },
+            }
+          })()
+        : source.verdict
+      const next = probeSanitizeReport({
+        ...source,
+        completedAt: new Date().toISOString(),
+        durationMs: source.durationMs + (Date.now() - started),
+        results: { ...source.results, [key]: gated },
+        logs: replaced.reportLogs,
+        verdict,
+      })
+      if (reportRef.current?.id === source.id) setReport(next)
+      setHistory(await saveProbeHistory({ ...next, logs: [] }))
+    } catch (err: any) {
+      const message = err?.message || '重试没有完成。'
+      setRetryNotice(message)
+      setStartErr(message)
+    } finally {
+      setProbeAnthropicCapField('max_tokens')
+      retryingKeyRef.current = null
+      setRetryingKey(null)
+      stopRef.current = false
     }
   }
 
@@ -2354,12 +2759,9 @@ function ModelProbeTool() {
     if (r.target.overrides.anthropic) md += `- Anthropic Base URL: ${r.target.overrides.anthropic}\n`
     md += `- 模型: ${r.target.model}\n`
     md += `- 通过: ${r.summary.passed} · 失败: ${r.summary.failed} · 异常: ${r.summary.abnormal || 0} · 不支持: ${r.summary.unsupported} · 符合预期: ${r.summary.expected} · 未测: ${r.summary.untested} · 跳过: ${r.summary.skipped}\n`
-    if (r.verdict) {
-      const layerLine = (label: string, layer: ProbeVerdictLayer) =>
-        `- ${label}: ${layer.label}${layer.reasons.length ? `（${layer.reasons.join('；')}）` : ''}\n`
-      md += layerLine('家族', r.verdict.family)
-      md += layerLine('接入层', r.verdict.access)
-      md += layerLine('上游', r.verdict.upstream)
+    if (r.verdict?.upstream) {
+      const layer = r.verdict.upstream
+      md += `- 渠道判断: ${layer.label}${layer.reasons.length ? `（${layer.reasons.join('；')}）` : ''}\n`
     }
     md += '\n'
     for (const t of probeCatalog()) {
@@ -2382,6 +2784,9 @@ function ModelProbeTool() {
           if (x.repro.requestId) md += `Request ID: ${x.repro.requestId}\n`
           md += `HTTP: ${x.repro.status ?? '—'}\n`
           md += `\`\`\`\n\n请求头（密钥已脱敏）：\n\n\`\`\`json\n${probeJsonPretty(x.repro.headers)}\n\`\`\`\n\n请求体：\n\n\`\`\`json\n${probeJsonPretty(x.repro.body)}\n\`\`\`\n\n`
+          if (x.repro.responseBody !== undefined) {
+            md += `响应体：\n\n\`\`\`json\n${typeof x.repro.responseBody === 'string' ? x.repro.responseBody : probeJsonPretty(x.repro.responseBody)}\n\`\`\`\n\n`
+          }
         }
       }
     }
@@ -2469,6 +2874,8 @@ function ModelProbeTool() {
   }
 
   const filteredLogs = logFilter === 'all' ? logs : logs.filter(l => l.resultKey === logFilter || l.resultKey.startsWith(logFilter + '@'))
+  const busy = running || retryingKey !== null
+  const matrixOpen = pane === 'report' && !!matrixReports && matrixReports.length > 1
 
   const groups = [...new Set(visibleTests.map(t => t.group))]
   const uiActiveFormats = useMemo(() => (['chat', 'responses', 'anthropic'] as ProbeFormat[]).filter(f => selected[`${f}-basic`]), [selected])
@@ -2479,7 +2886,7 @@ function ModelProbeTool() {
       <div className="glass flex items-center px-6 py-3 flex-shrink-0" style={{ borderBottom: '1px solid var(--border)' }}>
         <SectionTitle>模型探测</SectionTitle>
         <div className="ml-auto flex gap-2">
-          {running ? (
+          {busy ? (
             <Btn variant="danger" onClick={() => { stopRef.current = true; activeAbortRef.current?.abort() }}>⏹ 停止</Btn>
           ) : (
             <Btn variant="primary" onClick={() => { setTestName(probeNowName()); setNameModal(true) }} disabled={!activeChannel || probeSplitModels(model).length === 0}>▶ 开始测试</Btn>
@@ -2495,7 +2902,7 @@ function ModelProbeTool() {
           randomString={randomString} onRandomString={setRandomString} onRegenRandom={regenRandom}
           tokenRuns={tokenRuns} onTokenRuns={setTokenRuns}
           includeStreamUsage={includeStreamUsage} onIncludeStreamUsage={setIncludeStreamUsage}
-          running={running} connRunning={connRunning} connResults={connResults}
+          running={busy} connRunning={connRunning} connResults={connResults}
           startErr={startErr} onTestConnection={onTestConnection}
         />
 
@@ -2511,7 +2918,7 @@ function ModelProbeTool() {
             ]} />
           </div>
 
-          <div className="flex-1 overflow-y-auto">
+          <div className={matrixOpen ? 'flex min-h-0 flex-1 flex-col overflow-hidden' : 'flex-1 overflow-y-auto'}>
             {pane === 'live' && (
               <div className="flex flex-col">
                 <div className="flex flex-col gap-2 px-6 pt-4 pb-3 flex-shrink-0 lg:flex-row lg:items-start lg:justify-between">
@@ -2520,9 +2927,9 @@ function ModelProbeTool() {
                     <p className="text-xs mt-1 leading-5 lg:mt-0.5" style={{ color: 'var(--t3)' }}>参数、流式、缓存与补充场景只对已勾选的基础格式执行；「纯流式」仅 Chat；「预期拒绝」「图片输入」与「原生工具调用」默认不勾选。原生工具可能单独计费，没执行却返回成功时记为异常</p>
                   </div>
                   <div className="flex items-center gap-3 text-xs flex-shrink-0">
-                    <button onClick={() => { setSelected(prev => ({ ...prev, ...Object.fromEntries(visibleTests.map(t => [t.id, true])) })) }} disabled={running} className="cursor-pointer border-0 outline-none font-semibold" style={{ background: 'transparent', color: 'var(--accent)', fontFamily: 'inherit' }}>全选</button>
+                    <button onClick={() => { setSelected(prev => ({ ...prev, ...Object.fromEntries(visibleTests.map(t => [t.id, true])) })) }} disabled={busy} className="cursor-pointer border-0 outline-none font-semibold" style={{ background: 'transparent', color: 'var(--accent)', fontFamily: 'inherit' }}>全选</button>
                     <span style={{ color: 'var(--borderHard)' }}>|</span>
-                    <button onClick={() => { setSelected(prev => ({ ...prev, ...Object.fromEntries(visibleTests.map(t => [t.id, false])) })) }} disabled={running} className="cursor-pointer border-0 outline-none font-semibold" style={{ background: 'transparent', color: 'var(--t2)', fontFamily: 'inherit' }}>全不选</button>
+                    <button onClick={() => { setSelected(prev => ({ ...prev, ...Object.fromEntries(visibleTests.map(t => [t.id, false])) })) }} disabled={busy} className="cursor-pointer border-0 outline-none font-semibold" style={{ background: 'transparent', color: 'var(--t2)', fontFamily: 'inherit' }}>全不选</button>
                   </div>
                 </div>
 
@@ -2549,13 +2956,13 @@ function ModelProbeTool() {
                               key={t.id}
                               t={t}
                               checked={!!selected[t.id]}
-                              disabled={running}
+                              disabled={busy}
                               status={statusOf(t)}
                               onChange={() => setSelected(prev => ({ ...prev, [t.id]: !prev[t.id] }))}
                             />
                           ))}
                         </div>
-                        {!running && uiActiveFormats.length === 0 && (
+                        {!busy && uiActiveFormats.length === 0 && (
                           <p className="px-6 pb-3 text-xs" style={{ color: 'var(--warn)' }}>至少勾选一个协议基础测试，才能运行测试或测试连接。</p>
                         )}
                       </div>
@@ -2567,7 +2974,7 @@ function ModelProbeTool() {
                       const desc = formatDisabled ? `已随「${PROBE_FORMAT_LABELS[t.format!]}」基础测试禁用` : (st.detail || t.desc)
                       return (
                         <div key={t.id} className="flex items-center gap-3 px-6 py-3" style={{ borderBottom: '1px solid var(--border)', opacity: formatDisabled ? 0.5 : 1 }}>
-                          <input type="checkbox" data-id={t.id} checked={!!selected[t.id]} disabled={running || formatDisabled} onChange={() => setSelected(prev => ({ ...prev, [t.id]: !prev[t.id] }))}
+                          <input type="checkbox" data-id={t.id} checked={!!selected[t.id]} disabled={busy || formatDisabled} onChange={() => setSelected(prev => ({ ...prev, [t.id]: !prev[t.id] }))}
                             className="h-4 w-4 flex-shrink-0 cursor-pointer accent-[var(--accent)]" aria-label={`选择 ${t.name}`} />
                           <div className="min-w-0 flex-1">
                             <div className="text-sm font-semibold truncate" style={{ color: 'var(--text)' }}>{t.name}</div>
@@ -2591,8 +2998,8 @@ function ModelProbeTool() {
                     <option value="all">全部测试项</option>
                     {visibleTests.map(t => <option key={t.id} value={t.id}>{t.name}</option>)}
                   </select>
-                  <Btn small variant="soft" disabled={running} title={running ? '测试进行中，日志还要用来判定本轮' : undefined} onClick={() => {
-                    if (running) return
+                  <Btn small variant="soft" disabled={busy} title={busy ? '测试进行中，日志还要用来判定本轮' : undefined} onClick={() => {
+                    if (busy) return
                     logsEpochRef.current += 1
                     logsRef.current = []
                     setLogs([])
@@ -2640,8 +3047,11 @@ function ModelProbeTool() {
                       <Btn small variant="soft" onClick={exportMd}>导出 Markdown</Btn>
                       <Btn small variant="soft" onClick={exportHtml}>导出 HTML</Btn>
                     </div>
+                    {retryNotice && (
+                      <p className="mt-3 text-sm leading-6" data-testid="probe-retry-notice" style={{ color: 'var(--err)' }}>{retryNotice}</p>
+                    )}
                   </div>
-                  <ProbeReportTiles report={report} />
+                  <ProbeReportTiles report={report} onRetry={retryProbeCell} retryingKey={retryingKey} retryDisabled={busy} />
                 </div>
               )
             )}
@@ -2729,7 +3139,7 @@ function ModelProbeTool() {
         </div>
       </div>
 
-      {nameModal && (
+      {nameModal && probePortal(
         <div className="fixed inset-0 z-50 flex items-center justify-center p-5 ia-lightbox-enter"
           style={{ background: 'color-mix(in srgb, var(--bg) 85%, transparent)', backdropFilter: 'blur(8px)' }}
           onClick={e => { if (e.target === e.currentTarget) setNameModal(false) }}>
@@ -2743,7 +3153,7 @@ function ModelProbeTool() {
               <Btn variant="primary" onClick={() => { const name = testName.trim() || probeNowName(); setNameModal(false); runProbe(name) }}>确认并开始</Btn>
             </div>
           </div>
-        </div>
+        </div>,
       )}
     </div>
   )

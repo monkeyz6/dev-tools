@@ -1,5 +1,7 @@
 // 模型探测：自包含单文件 HTML 报告（网格卡片 + 弹层，请求体可复制，不含请求头 / key）
 
+import { matrixFormatSubtitle, matrixTokenValues, presentMatrixNote, probeMatrixProblem } from './model-probe/matrix-present'
+
 export type ProbeHtmlStatus = 'passed' | 'failed' | 'abnormal' | 'unsupported' | 'skipped' | 'expected' | 'untested'
 
 export interface ProbeHtmlVerdictLayer { label: string; reasons: string[] }
@@ -24,6 +26,7 @@ export interface ProbeHtmlResult {
     body: unknown
     status: number | null
     requestId: string | null
+    responseBody?: unknown
   } | null
 }
 
@@ -70,6 +73,7 @@ interface ProbeHtmlItem {
   http: number | null
   requestId: string | null
   body: unknown
+  responseBody?: unknown
 }
 
 interface ProbeHtmlGroup { title: string; items: ProbeHtmlItem[] }
@@ -369,7 +373,7 @@ function formatOfKey(key: string): string | null {
   return at > 0 ? key.slice(at + 1) : null
 }
 
-function isHiddenResult(key: string, r?: ProbeHtmlResult): boolean {
+function isHiddenResult(key: string, r?: { detail?: string | null } | null): boolean {
   return key === 'structured_output@anthropic' && !!r?.detail?.includes('无原生 response_format')
 }
 
@@ -421,6 +425,7 @@ function buildGroups(report: ProbeHtmlReport, tests: ProbeHtmlTestMeta[], format
         http: r.repro?.status ?? null,
         requestId: r.repro?.requestId ?? null,
         body: r.repro ? r.repro.body : null,
+        responseBody: r.repro && 'responseBody' in r.repro ? r.repro.responseBody : undefined,
       })
     }
   }
@@ -432,9 +437,10 @@ function statClass(kind: 'ok' | 'err' | 'abn' | 'warn' | 'info', n: number): str
 }
 
 function renderOrigin(verdict?: ProbeHtmlVerdict | null): string {
-  if (!verdict) return ''
-  const row = (label: string, layer: ProbeHtmlVerdictLayer) => `<div class="origin-row"><div class="origin-k">${esc(label)}</div><div><div class="origin-v">${esc(layer.label)}</div>${layer.reasons.length ? `<ul class="origin-r">${layer.reasons.map(reason => `<li>${esc(reason)}</li>`).join('')}</ul>` : ''}</div></div>`
-  return `<div class="origin">${row('家族', verdict.family)}${row('接入层', verdict.access)}${row('上游', verdict.upstream)}</div>`
+  const layer = verdict?.upstream
+  if (!layer) return ''
+  const reasons = layer.reasons.length ? `<ul class="origin-r">${layer.reasons.map(reason => `<li>${esc(reason)}</li>`).join('')}</ul>` : ''
+  return `<div class="origin"><div class="origin-row"><div class="origin-k">渠道判断</div><div><div class="origin-v">${esc(layer.label)}</div>${reasons}</div></div></div>`
 }
 
 function ioParts(usage?: ProbeHtmlResult['usage']): { inn: string; out: string; innEmpty: boolean; outEmpty: boolean } {
@@ -523,6 +529,7 @@ export function buildProbeReportHtml(
     http: item.http,
     requestId: item.requestId,
     body: item.body,
+    responseBody: item.responseBody,
   }))).replace(/</g, '\\u003c')
 
   return `<!doctype html>
@@ -595,7 +602,7 @@ ${probeSheetDocument(payload, '.tile')}
 </html>`
 }
 
-function probeSheetDocument(payload: string, clickSelector: string): string {
+function probeSheetDocument(payload: string, clickSelector: string, originsPayload = '[]'): string {
   return `<div class="overlay" id="overlay" hidden>
   <div class="sheet" role="dialog" aria-modal="true" aria-labelledby="sheetTitle">
     <div class="sheet-head">
@@ -620,24 +627,35 @@ function probeSheetDocument(payload: string, clickSelector: string): string {
         <pre class="mono" id="sheetBody"></pre>
       </div>
     </div>
+    <div class="block" id="sheetRespWrap" hidden>
+      <div class="lbl">响应体</div>
+      <div class="codewrap">
+        <button type="button" class="copy" id="copyRespBtn" aria-label="复制响应体" title="复制"></button>
+        <pre class="mono" id="sheetResp"></pre>
+      </div>
+    </div>
   </div>
 </div>
-<script>window.__PROBE_ITEMS = ${payload}</script>
+<script>window.__PROBE_ITEMS = ${payload};window.__PROBE_ORIGINS = ${originsPayload}</script>
 <script>
 (function () {
   var items = window.__PROBE_ITEMS || [];
+  var origins = window.__PROBE_ORIGINS || [];
   var overlay = document.getElementById('overlay');
   var btn = document.getElementById('themeBtn');
   var copyBtn = document.getElementById('copyBtn');
+  var copyRespBtn = document.getElementById('copyRespBtn');
   var openIndex = -1;
   var COPY_ICON = '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="5.5" y="5.5" width="8" height="8" rx="1.6"/><path d="M10.5 5.5V4a1.5 1.5 0 0 0-1.5-1.5H4A1.5 1.5 0 0 0 2.5 4v5A1.5 1.5 0 0 0 4 10.5h1.5"/></svg>';
   var CHECK_ICON = '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 8.5l3.2 3.2L13 4.8"/></svg>';
-  function resetCopyBtn() {
-    copyBtn.innerHTML = COPY_ICON;
-    copyBtn.classList.remove('is-ok');
-    copyBtn.setAttribute('aria-label', '复制');
+  function resetCopyBtn(button, label) {
+    if (!button) return;
+    button.innerHTML = COPY_ICON;
+    button.classList.remove('is-ok');
+    button.setAttribute('aria-label', label);
   }
-  resetCopyBtn();
+  resetCopyBtn(copyBtn, '复制');
+  resetCopyBtn(copyRespBtn, '复制响应体');
   function pretty(v) {
     try { return JSON.stringify(v, null, 2); } catch (e) { return String(v == null ? '' : v); }
   }
@@ -709,14 +727,44 @@ function probeSheetDocument(payload: string, clickSelector: string): string {
     else {
       wrap.hidden = false;
       document.getElementById('sheetBody').textContent = pretty(item.body);
-      resetCopyBtn();
+      resetCopyBtn(copyBtn, '复制');
     }
+    var respWrap = document.getElementById('sheetRespWrap');
+    if (item.responseBody === undefined) respWrap.hidden = true;
+    else {
+      respWrap.hidden = false;
+      document.getElementById('sheetResp').textContent = pretty(item.responseBody);
+      resetCopyBtn(copyRespBtn, '复制响应体');
+    }
+    overlay.hidden = false;
+    overlay.classList.add('is-on');
+    document.body.style.overflow = 'hidden';
+  }
+  function openOrigin(i) {
+    var item = origins[i];
+    if (!item) return;
+    openIndex = -1;
+    document.getElementById('sheetTitle').textContent = '渠道判断';
+    document.getElementById('sheetExplain').textContent = item.column || '';
+    document.getElementById('sheetDetail').textContent = (item.reasons || []).join('\\n');
+    document.getElementById('sheetChecks').textContent = '';
+    document.getElementById('sheetFacts').textContent = '';
+    document.getElementById('sheetMeta').textContent = '';
+    var pill = document.getElementById('sheetPill');
+    pill.className = 'pill';
+    pill.textContent = item.label || '';
+    document.getElementById('sheetFmt').hidden = true;
+    document.getElementById('sheetBodyWrap').hidden = true;
+    document.getElementById('sheetRespWrap').hidden = true;
     overlay.hidden = false;
     overlay.classList.add('is-on');
     document.body.style.overflow = 'hidden';
   }
   document.querySelectorAll(${JSON.stringify(clickSelector)}).forEach(function (el) {
     el.addEventListener('click', function () { openSheet(Number(el.getAttribute('data-i'))); });
+  });
+  document.querySelectorAll('[data-origin]').forEach(function (el) {
+    el.addEventListener('click', function () { openOrigin(Number(el.getAttribute('data-origin'))); });
   });
   overlay.addEventListener('click', function (e) { if (e.target === overlay) closeSheet(); });
   document.getElementById('sheetClose').addEventListener('click', closeSheet);
@@ -729,7 +777,20 @@ function probeSheetDocument(payload: string, clickSelector: string): string {
       copyBtn.innerHTML = CHECK_ICON;
       copyBtn.classList.add('is-ok');
       copyBtn.setAttribute('aria-label', '已复制');
-      setTimeout(resetCopyBtn, 1500);
+      setTimeout(function () { resetCopyBtn(copyBtn, '复制'); }, 1500);
+    };
+    if (navigator.clipboard && navigator.clipboard.writeText) navigator.clipboard.writeText(text).then(done).catch(done);
+    else done();
+  });
+  copyRespBtn.addEventListener('click', function () {
+    var item = items[openIndex];
+    if (!item || item.responseBody === undefined) return;
+    var text = pretty(item.responseBody);
+    var done = function () {
+      copyRespBtn.innerHTML = CHECK_ICON;
+      copyRespBtn.classList.add('is-ok');
+      copyRespBtn.setAttribute('aria-label', '已复制');
+      setTimeout(function () { resetCopyBtn(copyRespBtn, '复制响应体'); }, 1500);
     };
     if (navigator.clipboard && navigator.clipboard.writeText) navigator.clipboard.writeText(text).then(done).catch(done);
     else done();
@@ -738,41 +799,214 @@ function probeSheetDocument(payload: string, clickSelector: string): string {
 </script>`
 }
 
-const MATRIX_CSS = `
-.matrix-bleed{width:max-content;min-width:100%;padding:0 clamp(16px,4vw,36px) clamp(56px,8vw,96px)}
-table.matrix{border-collapse:separate;border-spacing:0;width:max-content;min-width:100%}
-.matrix th,.matrix td{padding:10px 14px;border-bottom:1px solid var(--border);vertical-align:middle;background:var(--bg);white-space:nowrap}
-.matrix thead th{position:sticky;top:48px;z-index:2;font-size:12px;font-weight:600;color:var(--text);text-align:left;box-shadow:inset 0 -1px 0 var(--border)}
-.matrix .rowh{position:sticky;left:0;z-index:1;min-width:14rem;text-align:left;font-size:13px;font-weight:600;color:var(--text)}
-.matrix thead .rowh{z-index:3}
-.matrix .mx-group td{position:static;font-size:11px;font-weight:700;letter-spacing:.08em;text-transform:uppercase;color:var(--t3);background:var(--s1);text-align:left}
-.matrix-cell{appearance:none;border:0;background:transparent;padding:0;font:inherit;font-size:12px;font-weight:600;cursor:pointer;color:inherit}
+const MATRIX_PAGE_CSS = `
+*,*::before,*::after{box-sizing:border-box}
+html,body{height:auto!important;min-height:100%;margin:0;overflow:visible!important}
+html.is-locked{overflow:hidden!important}
+html{
+  --pad:clamp(16px,4vw,36px);--topH:52px;--measure:1120px;
+  -webkit-font-smoothing:antialiased;-moz-osx-font-smoothing:grayscale;text-size-adjust:100%;
+  background:var(--bg);background-image:var(--bgGrad);background-attachment:fixed;
+  color-scheme:light;scrollbar-gutter:stable;
+}
+html[data-theme="light"]{
+  --bg:#f5f7fb;--text:#182033;--t2:#5b6475;--t3:#7d8598;
+  --line:rgba(24,32,51,.075);--fill:rgba(24,32,51,.045);--fillHover:rgba(24,32,51,.08);
+  --accent:#2563eb;--accentSub:rgba(37,99,235,.08);
+  --ok:#15803d;--okBg:rgba(21,128,61,.09);
+  --err:#dc2626;--errBg:rgba(220,38,38,.08);
+  --warn:#b45309;--warnBg:rgba(180,83,9,.09);
+  --code:#eff2f8;--sheet:#fff;--scrim:rgba(20,28,48,.30);
+  --shadowMd:0 24px 60px -24px rgba(20,28,48,.35),0 2px 8px rgba(20,28,48,.06);
+  --bgGrad:radial-gradient(1200px 700px at 80% -10%,rgba(37,99,235,.06),transparent 60%);
+  --sceneA:rgba(47,128,255,.20);--sceneB:rgba(167,96,255,.14);--sceneC:rgba(47,200,168,.11);
+}
+html[data-theme="dark"]{
+  color-scheme:dark;
+  --bg:#0b0d14;--text:#e9ebf2;--t2:#9aa3b4;--t3:#7a849a;
+  --line:rgba(255,255,255,.08);--fill:rgba(255,255,255,.055);--fillHover:rgba(255,255,255,.09);
+  --accent:#ff7a45;--accentSub:rgba(255,122,69,.14);
+  --ok:#34d399;--okBg:rgba(52,211,153,.11);
+  --err:#ff6b81;--errBg:rgba(255,107,129,.11);
+  --warn:#ffc24b;--warnBg:rgba(255,194,75,.11);
+  --code:#11141d;--sheet:#131622;--scrim:rgba(0,0,0,.55);
+  --shadowMd:0 24px 60px -20px rgba(0,0,0,.7),0 2px 8px rgba(0,0,0,.4);
+  --bgGrad:radial-gradient(900px 560px at 12% -8%,rgba(255,122,69,.10),transparent 58%),radial-gradient(820px 560px at 96% 8%,rgba(124,108,255,.11),transparent 56%);
+  --sceneA:rgba(255,113,66,.18);--sceneB:rgba(110,96,255,.20);--sceneC:rgba(58,199,214,.10);
+}
+body{
+  background:transparent;color:var(--text);
+  font:15px/1.55 Inter,-apple-system,BlinkMacSystemFont,"PingFang SC","Hiragino Sans GB","Microsoft YaHei",system-ui,sans-serif;
+}
+.mono{font-family:ui-monospace,"SF Mono","JetBrains Mono",Menlo,Consolas,monospace}
+.ambient{position:fixed;inset:0;z-index:-1;overflow:hidden;pointer-events:none}
+.ambient i{position:absolute;border-radius:50%;filter:blur(82px);opacity:.7}
+.orb-a{width:min(58vw,860px);height:min(58vw,860px);top:-34%;left:12%;background:radial-gradient(circle at 42% 42%,var(--sceneA),transparent 68%)}
+.orb-b{width:min(52vw,760px);height:min(52vw,760px);top:-8%;right:-18%;background:radial-gradient(circle at 50% 45%,var(--sceneB),transparent 70%)}
+.orb-c{width:min(46vw,680px);height:min(46vw,680px);bottom:-30%;left:38%;background:radial-gradient(circle at 50% 50%,var(--sceneC),transparent 70%)}
+.top{
+  position:sticky;top:0;left:0;z-index:20;width:100vw;height:var(--topH);
+  display:flex;align-items:center;justify-content:space-between;gap:16px;
+  padding:0 var(--pad);
+  background:color-mix(in srgb,var(--bg) 78%,transparent);
+  backdrop-filter:saturate(160%) blur(16px);-webkit-backdrop-filter:saturate(160%) blur(16px);
+  border-bottom:1px solid var(--line);
+}
+.brand{font-size:13px;font-weight:600;letter-spacing:.02em;color:var(--t2)}
+.icon-btn{
+  appearance:none;display:inline-grid;place-items:center;flex-shrink:0;
+  width:32px;height:32px;padding:0;border:0;border-radius:8px;
+  background:transparent;color:var(--t3);cursor:pointer;
+  transition:background-color .15s ease,color .15s ease;
+}
+.icon-btn:hover{background:var(--fill);color:var(--text)}
+.icon-btn:active{background:var(--fillHover)}
+.icon-btn svg{width:16px;height:16px;display:block}
+.icon-btn.is-ok{color:var(--ok)}
+:where(.icon-btn,.matrix-cell,.matrix-col):focus-visible{outline:2px solid color-mix(in srgb,var(--accent) 55%,transparent);outline-offset:1px}
+html[data-theme="dark"] .i-moon,html:not([data-theme="dark"]) .i-sun{display:none}
+.matrix-bleed{width:max-content;min-width:100%;padding:12px var(--pad) clamp(56px,8vw,96px)}
+table.matrix{
+  border-collapse:separate;border-spacing:0;width:max-content;margin:0 auto;
+  min-width:min(calc(var(--measure) - 2 * var(--pad)),100%);
+}
+.matrix th,.matrix td{padding:13px 16px;border-bottom:1px solid var(--line);vertical-align:middle;text-align:left;white-space:nowrap;background:var(--bg)}
+.matrix tbody tr:last-child>*{border-bottom:0}
+.matrix thead th{
+  position:sticky;top:var(--topH);z-index:2;padding-top:10px;padding-bottom:12px;
+  background:color-mix(in srgb,var(--bg) 92%,transparent);
+  backdrop-filter:blur(12px);-webkit-backdrop-filter:blur(12px);
+  font-weight:400;vertical-align:bottom;
+}
+.col-model{display:block;font-size:13px;font-weight:600;color:var(--text)}
+.col-src{display:block;margin-top:1px;font-size:12px;font-weight:400;color:var(--t3)}
+.matrix-col{appearance:none;display:block;width:100%;border:0;background:transparent;padding:0;font:inherit;color:inherit;cursor:pointer;text-align:left}
+.matrix thead .rowh{z-index:3;font-size:12px;font-weight:500;color:var(--t3);vertical-align:bottom}
+.matrix .rowh{
+  position:sticky;left:0;z-index:1;min-width:14rem;
+  font-size:13px;font-weight:500;color:var(--text);
+  background:color-mix(in srgb,var(--bg) 92%,transparent);
+}
+.row-sub{display:block;margin-top:2px;font-size:11px;font-weight:400;color:var(--t3)}
+.matrix tbody tr:not(.mx-group):hover>*{background-image:linear-gradient(var(--fill),var(--fill))}
+.matrix .mx-group td{padding:26px 16px 8px;border-bottom:0;font-size:12px;font-weight:600;color:var(--t2);background:var(--bg)}
+.matrix .mx-group:first-child td{padding-top:8px}
+.matrix .mx-group span{position:sticky;left:16px;z-index:1;background:var(--bg);padding-right:12px}
+.matrix-cell{
+  appearance:none;border:0;background:transparent;font:inherit;font-size:12.5px;font-weight:500;color:inherit;
+  margin:-5px -9px;padding:5px 9px;border-radius:8px;cursor:pointer;
+  transition:background-color .15s ease;
+}
+.matrix-cell:hover{background:var(--fillHover)}
 .matrix td.gap{color:var(--t3);text-align:center}
-.matrix .row-sub{display:block;margin-top:4px}
-.dot-st.skipped{color:var(--t3)}
-.pill.skipped{background:var(--s2);color:var(--t3)}
+.dot-st{display:inline-flex;align-items:center;gap:7px;white-space:nowrap;color:var(--t2)}
+.dot-st::before{content:"";width:6px;height:6px;border-radius:50%;background:var(--c,var(--t3));flex-shrink:0}
+.dot-st.passed{--c:var(--ok)}
+.dot-st.expected{--c:var(--accent)}
+.dot-st.failed{--c:var(--err);color:var(--err)}
+.dot-st.abnormal{--c:color-mix(in srgb,var(--err) 55%,var(--warn));color:var(--c)}
+.dot-st.unsupported{--c:var(--warn);color:var(--warn)}
+.dot-st.untested,.dot-st.skipped{--c:var(--t3);color:var(--t3)}
+.dot-st.skipped::before{background:transparent;box-shadow:inset 0 0 0 1.5px var(--t3)}
+.pill{display:inline-flex;align-items:center;padding:2px 8px;border-radius:6px;font-size:12px;font-weight:600;flex-shrink:0;background:var(--fill);color:var(--text)}
+.pill.passed{background:var(--okBg);color:var(--ok)}
+.pill.failed{background:var(--errBg);color:var(--err)}
+.pill.abnormal{background:color-mix(in srgb,var(--err) 12%,transparent);color:color-mix(in srgb,var(--err) 55%,var(--warn))}
+.pill.unsupported{background:var(--warnBg);color:var(--warn)}
+.pill.expected{background:var(--accentSub);color:var(--accent)}
+.pill.untested,.pill.skipped{background:var(--fill);color:var(--t3)}
+.overlay{
+  position:fixed;inset:0;z-index:40;display:none;align-items:center;justify-content:center;
+  padding:24px 16px;background:var(--scrim);
+  backdrop-filter:blur(4px);-webkit-backdrop-filter:blur(4px);
+}
+.overlay.is-on{display:flex;animation:fade-in .18s ease-out}
+.sheet{
+  width:min(720px,100%);max-height:min(86vh,840px);overflow:auto;
+  padding:22px 24px 24px;border-radius:16px;
+  background:var(--sheet);border:1px solid var(--line);box-shadow:var(--shadowMd);
+  animation:sheet-in .22s cubic-bezier(.22,1,.36,1);
+}
+.sheet-head{display:flex;align-items:flex-start;justify-content:space-between;gap:12px}
+.sheet-title{display:flex;flex-wrap:wrap;align-items:center;gap:6px 10px;min-width:0}
+.sheet-title h2{margin:0;font-size:18px;font-weight:600;letter-spacing:-.01em;line-height:1.4}
+.fmt{font-size:12px;color:var(--t3)}
+.sheet-head .icon-btn{margin:-4px -8px 0 0}
+.detail{margin:14px 0 0;font-size:14px;line-height:1.6;color:var(--text);white-space:pre-line}
+.checks{display:flex;flex-wrap:wrap;gap:6px;margin-top:12px}
+.check{display:inline-flex;align-items:center;gap:5px;padding:3px 9px 3px 7px;border-radius:6px;font-size:12px;line-height:1.5}
+.check svg{width:12px;height:12px;flex-shrink:0}
+.check.ok{background:var(--okBg);color:var(--ok)}
+.check.err{background:var(--errBg);color:var(--err)}
+.facts{display:flex;flex-wrap:wrap;gap:4px 20px;margin-top:16px;font-size:12.5px;color:var(--text)}
+.facts em{font-style:normal;color:var(--t3);margin-right:6px}
+.meta-line{display:flex;flex-wrap:wrap;gap:6px;margin-top:16px}
+.tag{padding:3px 8px;border-radius:6px;background:var(--fill);color:var(--t2);font-size:11.5px;line-height:1.5;overflow-wrap:anywhere}
+.block{margin-top:20px}
+.block-head{display:flex;align-items:center;justify-content:space-between;margin-bottom:6px}
+.block-head .lbl{font-size:12px;font-weight:500;color:var(--t3)}
+.block-head .icon-btn{width:28px;height:28px;margin-right:-6px}
+pre{
+  margin:0;max-height:320px;overflow:auto;padding:12px 14px;border-radius:10px;
+  background:var(--code);color:var(--text);
+  font-size:12px;line-height:1.6;white-space:pre-wrap;word-break:break-word;
+}
+pre.err-body{margin-top:12px;max-height:200px;color:var(--t2)}
+[hidden]{display:none!important}
+@keyframes fade-in{from{opacity:0}to{opacity:1}}
+@keyframes sheet-in{from{opacity:0;transform:translateY(8px)}to{opacity:1;transform:none}}
+@media (max-width:720px){
+  .matrix .rowh{min-width:11rem}
+  .matrix th,.matrix td{padding:12px}
+  .sheet{padding:18px 18px 20px}
+}
+@media (prefers-reduced-transparency:reduce){
+  .top,.overlay,.matrix thead th{backdrop-filter:none;-webkit-backdrop-filter:none}
+  .top,.matrix thead th,.matrix .rowh,.matrix .mx-group span{background:var(--bg)}
+  .ambient{opacity:.08}
+}
+@media (prefers-reduced-motion:reduce){
+  *,*::before,*::after{transition:none!important;animation:none!important}
+}
 @media print{
-  .matrix thead th,.matrix .rowh{position:static}
+  .top,.overlay,.ambient{display:none!important}
+  html,body{background:#fff;color:#111}
+  .matrix thead th,.matrix .rowh,.matrix .mx-group span{position:static}
 }
 `
 
-function matrixChannelOf(report: ProbeHtmlReport): string {
+export interface ProbeMatrixColumn {
+  model: string
+  source: string
+}
+
+interface MatrixColumnReport {
+  completedAt: string
+  target: { baseUrl: string; model: string; channelName?: string }
+}
+
+export function probeMatrixColumnText(column: ProbeMatrixColumn): string {
+  return column.source ? `${column.model} · ${column.source}` : column.model
+}
+
+function matrixChannelOf(report: MatrixColumnReport): string {
   return (report.target.channelName || '').trim() || report.target.baseUrl || ''
 }
 
-export function probeMatrixColumnLabels(reports: ProbeHtmlReport[]): string[] {
+export function probeMatrixColumnLabels(reports: MatrixColumnReport[]): ProbeMatrixColumn[] {
   const mixed = new Set(reports.map(matrixChannelOf)).size > 1
-  const base = reports.map(report => {
-    const model = report.target.model || '未命名模型'
-    const channel = matrixChannelOf(report)
-    return mixed && channel ? `${model} · ${channel}` : model
-  })
+  const base = reports.map(report => ({
+    model: report.target.model || '未命名模型',
+    source: mixed ? matrixChannelOf(report) : '',
+  }))
+  const keyOf = (column: ProbeMatrixColumn) => `${column.model}\0${column.source}`
   const counts = new Map<string, number>()
-  for (const label of base) counts.set(label, (counts.get(label) ?? 0) + 1)
+  for (const column of base) counts.set(keyOf(column), (counts.get(keyOf(column)) ?? 0) + 1)
   return reports.map((report, index) => {
-    const label = base[index]
-    if ((counts.get(label) ?? 0) < 2) return label
-    return `${label} · ${fmtTime(report.completedAt)}`
+    const column = base[index]
+    if ((counts.get(keyOf(column)) ?? 0) < 2) return column
+    const time = fmtTime(report.completedAt)
+    return { model: column.model, source: column.source ? `${column.source} · ${time}` : time }
   })
 }
 
@@ -795,113 +1029,386 @@ function formatLabelOfKey(key: string, reports: ProbeHtmlReport[], formatLabels:
   return fmt ? (formatLabels[fmt] || fmt) : ''
 }
 
-function matrixItemPayload(item: ProbeHtmlItem) {
-  return {
-    name: item.name,
-    explain: item.explain,
-    formatLabel: item.formatLabel,
-    status: item.status,
-    statusLabel: MATRIX_STATUS[item.status],
-    detail: item.detail,
-    duration: item.duration,
-    usage: item.usage || null,
-    cache: item.cache || null,
-    tokenValues: item.tokenValues || null,
-    checks: item.checks || null,
-    url: item.url,
-    http: item.http,
-    requestId: item.requestId,
-    body: item.body,
-  }
+function embedJson(value: unknown): string {
+  return JSON.stringify(value).replace(/</g, '\\u003c').replace(/\$\{/g, () => '$\\u007b')
 }
 
+export type ProbeMatrixKind = 'full' | 'problems'
+
+export function probeMatrixHasProblems(reports: { results?: Record<string, { status?: string | null; detail?: string | null } | null> | null }[]): boolean {
+  for (const report of reports) {
+    for (const [key, result] of Object.entries(report.results || {})) {
+      if (!result || isHiddenResult(key, result)) continue
+      if (probeMatrixProblem(result.status)) return true
+    }
+  }
+  return false
+}
+
+export function probeMatrixCellScored(status: string | null | undefined): boolean {
+  return status === 'passed' || status === 'failed' || status === 'abnormal' || status === 'unsupported' || status === 'expected'
+}
+
+interface MatrixSheetItem {
+  name: string
+  formatLabel: string
+  status: ProbeHtmlStatus
+  statusLabel: string
+  detail: string
+  errBody: string
+  duration: number | null
+  usage: ProbeHtmlResult['usage'] | null
+  cache: ProbeHtmlResult['cache'] | null
+  tokenValues: number[] | null
+  checks: ProbeHtmlResult['checks'] | null
+  http: number | null
+  url?: string
+  requestId?: string | null
+  body?: unknown
+  responseBody?: unknown
+}
+
+function matrixSheetItem(name: string, subtitle: string, result: ProbeHtmlResult, kind: ProbeMatrixKind): MatrixSheetItem {
+  const note = presentMatrixNote(result.detail || '')
+  const item: MatrixSheetItem = {
+    name,
+    formatLabel: subtitle,
+    status: result.status,
+    statusLabel: MATRIX_STATUS[result.status],
+    detail: note.detail,
+    errBody: note.errBody,
+    duration: result.duration,
+    usage: result.usage ?? null,
+    cache: result.cache ?? null,
+    tokenValues: matrixTokenValues(result.tokenValues),
+    checks: result.checks ?? null,
+    http: result.repro?.status ?? null,
+  }
+  if (kind === 'problems' && result.repro) {
+    item.url = result.repro.url
+    item.requestId = result.repro.requestId
+    item.body = result.repro.body
+    if ('responseBody' in result.repro) item.responseBody = result.repro.responseBody
+  }
+  return item
+}
+
+function matrixRowKeys(id: string, reports: ProbeHtmlReport[], kind: ProbeMatrixKind): string[] {
+  const keys = unionResultKeys(id, reports)
+  if (kind === 'problems') return keys.filter(key => reports.some(report => probeMatrixProblem(report.results[key]?.status)))
+  return keys.filter(key => reports.some(report => probeMatrixCellScored(report.results[key]?.status)))
+}
+
+function matrixCellHtml(name: string, subtitle: string, result: ProbeHtmlResult | undefined, kind: ProbeMatrixKind, flat: MatrixSheetItem[]): string {
+  if (!result || (kind === 'problems' ? !probeMatrixProblem(result.status) : !probeMatrixCellScored(result.status))) {
+    return '<td class="gap">—</td>'
+  }
+  if (kind === 'full' && result.status === 'passed') {
+    return `<td><span class="dot-st passed">${esc(MATRIX_STATUS.passed)}</span></td>`
+  }
+  const item = matrixSheetItem(name, subtitle, result, kind)
+  const index = flat.length
+  flat.push(item)
+  const aria = [name, subtitle, item.statusLabel].filter(Boolean).join(' ')
+  return `<td><button type="button" class="matrix-cell dot-st ${esc(result.status)}" data-i="${index}" aria-label="${esc(aria)}">${esc(item.statusLabel)}</button></td>`
+}
+
+function matrixColumnHead(column: ProbeMatrixColumn, upstream: { label: string } | null | undefined, index: number): string {
+  const lines = `<span class="col-model">${esc(column.model)}</span>${column.source ? `<span class="col-src">${esc(column.source)}</span>` : ''}${upstream ? `<span class="col-src">${esc(upstream.label)}</span>` : ''}`
+  if (!upstream) return `<th scope="col">${lines}</th>`
+  return `<th scope="col"><button type="button" class="matrix-col" data-origin="${index}" aria-label="${esc(`渠道判断 ${probeMatrixColumnText(column)}`)}">${lines}</button></th>`
+}
+
+const MATRIX_SHEET_SCRIPT = `
+(function () {
+  var items = window.__PROBE_ITEMS || [];
+  var origins = window.__PROBE_ORIGINS || [];
+  var $ = function (id) { return document.getElementById(id); };
+  var root = document.documentElement;
+  var overlay = $('overlay');
+  var themeBtn = $('themeBtn');
+  var copyBtn = $('copyBtn');
+  var copyRespBtn = $('copyRespBtn');
+  var openIndex = -1;
+  var lastFocus = null;
+  var ICON_COPY = '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="5.5" y="5.5" width="8" height="8" rx="1.6"/><path d="M10.5 5.5V4a1.5 1.5 0 0 0-1.5-1.5H4A1.5 1.5 0 0 0 2.5 4v5A1.5 1.5 0 0 0 4 10.5h1.5"/></svg>';
+  var ICON_CHECK = '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 8.5l3.2 3.2L13 4.8"/></svg>';
+  var ICON_X = '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" aria-hidden="true"><path d="M4.5 4.5l7 7M11.5 4.5l-7 7"/></svg>';
+
+  function pretty(v) {
+    if (typeof v === 'string') return v;
+    try { return JSON.stringify(v, null, 2); } catch (e) { return String(v == null ? '' : v); }
+  }
+  function resetCopy(button, label) {
+    if (!button) return;
+    button.innerHTML = ICON_COPY;
+    button.classList.remove('is-ok');
+    button.setAttribute('aria-label', label);
+    button.title = label;
+  }
+  resetCopy(copyBtn, '复制');
+  resetCopy(copyRespBtn, '复制响应体');
+
+  function labelTheme() {
+    var label = root.getAttribute('data-theme') === 'dark' ? '切换到浅色模式' : '切换到深色模式';
+    themeBtn.setAttribute('aria-label', label);
+    themeBtn.title = label;
+  }
+  labelTheme();
+  themeBtn.addEventListener('click', function () {
+    var next = root.getAttribute('data-theme') === 'dark' ? 'light' : 'dark';
+    root.setAttribute('data-theme', next);
+    try { localStorage.setItem('modelprobe-report-theme', next); } catch (e) {}
+    labelTheme();
+  });
+
+  function closeSheet() {
+    overlay.classList.remove('is-on');
+    overlay.hidden = true;
+    root.classList.remove('is-locked');
+    openIndex = -1;
+    if (lastFocus && lastFocus.focus) lastFocus.focus();
+  }
+  function hideExtras() {
+    $('sheetDetail').hidden = true;
+    $('sheetErr').hidden = true;
+    $('sheetChecks').textContent = '';
+    $('sheetChecks').hidden = true;
+    $('sheetFacts').textContent = '';
+    $('sheetFacts').hidden = true;
+    $('sheetMeta').textContent = '';
+    $('sheetMeta').hidden = true;
+    $('sheetBodyWrap').hidden = true;
+    $('sheetRespWrap').hidden = true;
+    $('sheetFmt').hidden = true;
+  }
+  function showOverlay() {
+    overlay.hidden = false;
+    overlay.classList.add('is-on');
+    root.classList.add('is-locked');
+    var sheet = overlay.firstElementChild;
+    if (sheet) sheet.scrollTop = 0;
+    $('sheetClose').focus();
+  }
+  function addFact(facts, label, text) {
+    var s = document.createElement('span');
+    var em = document.createElement('em');
+    em.textContent = label;
+    s.appendChild(em);
+    s.appendChild(document.createTextNode(text));
+    facts.appendChild(s);
+  }
+  function addTag(meta, text) {
+    var s = document.createElement('span');
+    s.className = 'tag mono';
+    s.textContent = text;
+    meta.appendChild(s);
+  }
+  function openSheet(i) {
+    var item = items[i];
+    if (!item) return;
+    openIndex = i;
+    hideExtras();
+    $('sheetTitle').textContent = item.name;
+    var pill = $('sheetPill');
+    pill.className = 'pill ' + item.status;
+    pill.textContent = item.statusLabel;
+    var fmt = $('sheetFmt');
+    fmt.hidden = !item.formatLabel;
+    fmt.textContent = item.formatLabel || '';
+    var detail = $('sheetDetail');
+    detail.textContent = item.detail || '';
+    detail.hidden = !item.detail;
+    var err = $('sheetErr');
+    err.textContent = item.errBody || '';
+    err.hidden = !item.errBody;
+    var checksEl = $('sheetChecks');
+    (item.checks || []).forEach(function (c) {
+      var s = document.createElement('span');
+      s.className = 'check ' + (c.passed ? 'ok' : 'err');
+      s.innerHTML = c.passed ? ICON_CHECK : ICON_X;
+      s.appendChild(document.createTextNode(' ' + c.detail));
+      checksEl.appendChild(s);
+    });
+    checksEl.hidden = !checksEl.children.length;
+    var facts = $('sheetFacts');
+    if (item.duration != null) addFact(facts, '耗时', item.duration + ' ms');
+    var u = item.usage;
+    if (u) {
+      var parts = ['↑' + (u.input != null ? u.input : '—'), '↓' + (u.output != null ? u.output : '—')];
+      if (u.cacheRead != null) parts.push('缓存读 ' + u.cacheRead);
+      if (u.cacheWrite != null) parts.push('写 ' + u.cacheWrite);
+      addFact(facts, '用量', parts.join(' '));
+    }
+    if (item.cache) addFact(facts, '缓存', item.cache.hits + '/' + item.cache.total + ' 次命中');
+    if (item.tokenValues && item.tokenValues.length) addFact(facts, '输入 Token', item.tokenValues.join(', '));
+    facts.hidden = !facts.children.length;
+    var meta = $('sheetMeta');
+    if (item.url) addTag(meta, 'POST ' + item.url);
+    if (item.http != null) addTag(meta, 'HTTP ' + item.http);
+    if (item.requestId) addTag(meta, 'Request ID ' + item.requestId);
+    meta.hidden = !meta.children.length;
+    if (item.body != null) {
+      $('sheetBodyWrap').hidden = false;
+      $('sheetBody').textContent = pretty(item.body);
+      resetCopy(copyBtn, '复制');
+    }
+    if (item.responseBody !== undefined) {
+      $('sheetRespWrap').hidden = false;
+      $('sheetResp').textContent = pretty(item.responseBody);
+      resetCopy(copyRespBtn, '复制响应体');
+    }
+    showOverlay();
+  }
+  function openOrigin(i) {
+    var item = origins[i];
+    if (!item) return;
+    openIndex = -1;
+    hideExtras();
+    $('sheetTitle').textContent = '渠道判断';
+    var pill = $('sheetPill');
+    pill.className = 'pill';
+    pill.textContent = item.label || '';
+    var fmt = $('sheetFmt');
+    fmt.hidden = !item.column;
+    fmt.textContent = item.column || '';
+    var detail = $('sheetDetail');
+    var reasons = item.reasons || [];
+    detail.textContent = reasons.join('\\n');
+    detail.hidden = !reasons.length;
+    showOverlay();
+  }
+  document.querySelectorAll('.matrix-cell').forEach(function (el) {
+    el.addEventListener('click', function () {
+      lastFocus = el;
+      openSheet(Number(el.getAttribute('data-i')));
+    });
+  });
+  document.querySelectorAll('[data-origin]').forEach(function (el) {
+    el.addEventListener('click', function () {
+      lastFocus = el;
+      openOrigin(Number(el.getAttribute('data-origin')));
+    });
+  });
+  overlay.addEventListener('click', function (e) { if (e.target === overlay) closeSheet(); });
+  $('sheetClose').addEventListener('click', closeSheet);
+  document.addEventListener('keydown', function (e) { if (e.key === 'Escape' && !overlay.hidden) closeSheet(); });
+  function copyFrom(button, label, present) {
+    if (!button) return;
+    button.addEventListener('click', function () {
+      var item = items[openIndex];
+      if (!item || !present(item)) return;
+      var text = pretty(present(item));
+      var done = function () {
+        button.innerHTML = ICON_CHECK;
+        button.classList.add('is-ok');
+        button.setAttribute('aria-label', '已复制');
+        button.title = '已复制';
+        setTimeout(function () { resetCopy(button, label); }, 1500);
+      };
+      if (navigator.clipboard && navigator.clipboard.writeText) navigator.clipboard.writeText(text).then(done).catch(done);
+      else done();
+    });
+  }
+  copyFrom(copyBtn, '复制', function (item) { return item.body != null ? item.body : null; });
+  copyFrom(copyRespBtn, '复制响应体', function (item) { return item.responseBody !== undefined ? item.responseBody : null; });
+})();
+`
+
+function probeMatrixSheet(payload: string, originsPayload: string): string {
+  return `<div class="overlay" id="overlay" hidden>
+  <div class="sheet" role="dialog" aria-modal="true" aria-labelledby="sheetTitle">
+    <div class="sheet-head">
+      <div class="sheet-title">
+        <span class="pill" id="sheetPill"></span>
+        <h2 id="sheetTitle"></h2>
+        <span class="fmt" id="sheetFmt" hidden></span>
+      </div>
+      <button type="button" class="icon-btn" id="sheetClose" aria-label="关闭" title="关闭"><svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" aria-hidden="true"><path d="M4 4l8 8M12 4l-8 8"/></svg></button>
+    </div>
+    <p class="detail" id="sheetDetail" hidden></p>
+    <pre class="mono err-body" id="sheetErr" hidden></pre>
+    <div class="checks" id="sheetChecks" hidden></div>
+    <div class="facts" id="sheetFacts" hidden></div>
+    <div class="meta-line" id="sheetMeta" hidden></div>
+    <div class="block" id="sheetBodyWrap" hidden>
+      <div class="block-head">
+        <div class="lbl">请求体</div>
+        <button type="button" class="icon-btn" id="copyBtn" aria-label="复制" title="复制"></button>
+      </div>
+      <pre class="mono" id="sheetBody"></pre>
+    </div>
+    <div class="block" id="sheetRespWrap" hidden>
+      <div class="block-head">
+        <div class="lbl">响应体</div>
+        <button type="button" class="icon-btn" id="copyRespBtn" aria-label="复制响应体" title="复制"></button>
+      </div>
+      <pre class="mono" id="sheetResp"></pre>
+    </div>
+  </div>
+</div>
+<script>window.__PROBE_ITEMS = ${payload};window.__PROBE_ORIGINS = ${originsPayload}</script>
+<script>${MATRIX_SHEET_SCRIPT}</script>`
+}
+
+// 整表里「通过」只留状态字，不进弹层数据。异常文件只收失败、异常、不支持，并写入请求与非 2xx 响应。
 export function buildProbeMatrixHtml(
   reports: ProbeHtmlReport[],
   tests: ProbeHtmlTestMeta[],
   formatLabels: Record<string, string>,
   theme?: ProbeHtmlTheme,
+  kind: ProbeMatrixKind = 'full',
 ): string {
   const list = reports.map(sanitizeHtmlReport)
   const labels = probeMatrixColumnLabels(list)
-  const flat: ProbeHtmlItem[] = []
+  const flat: MatrixSheetItem[] = []
   let rows = ''
   let lastGroup = ''
   const colspan = list.length + 1
   for (const test of tests) {
-    const keys = unionResultKeys(test.id, list)
+    const keys = matrixRowKeys(test.id, list, kind)
     if (!keys.length) continue
     if (test.group !== lastGroup) {
       lastGroup = test.group
-      rows += `<tr class="mx-group"><td colspan="${colspan}">${esc(test.group)}</td></tr>`
+      rows += `<tr class="mx-group"><td colspan="${colspan}"><span>${esc(test.group)}</span></td></tr>`
     }
     for (const key of keys) {
-      const formatLabel = formatLabelOfKey(key, list, formatLabels)
-      const cells = list.map(report => {
-        const result = report.results[key]
-        if (!result) return '<td class="gap">—</td>'
-        const fmt = result.format || formatOfKey(key)
-        const item: ProbeHtmlItem = {
-          name: test.name,
-          explain: test.explain,
-          formatLabel: fmt ? (formatLabels[fmt] || fmt) : formatLabel,
-          status: result.status,
-          detail: result.detail,
-          duration: result.duration,
-          usage: result.usage,
-          cache: result.cache,
-          tokenValues: result.tokenValues,
-          checks: result.checks,
-          url: result.repro?.url || '',
-          http: result.repro?.status ?? null,
-          requestId: result.repro?.requestId ?? null,
-          body: result.repro ? result.repro.body : null,
-        }
-        const index = flat.length
-        flat.push(item)
-        const statusLabel = MATRIX_STATUS[result.status]
-        return `<td><button type="button" class="matrix-cell dot-st ${esc(result.status)}" data-i="${index}" aria-label="${esc(`${test.name} ${formatLabel} ${statusLabel}`)}">${esc(statusLabel)}</button></td>`
-      }).join('')
-      rows += `<tr><th class="rowh" scope="row">${esc(test.name)}${formatLabel ? `<span class="chip row-sub">${esc(formatLabel)}</span>` : ''}</th>${cells}</tr>`
+      const subtitle = matrixFormatSubtitle(test.name, formatLabelOfKey(key, list, formatLabels))
+      const cells = list.map(report => matrixCellHtml(test.name, subtitle, report.results[key], kind, flat)).join('')
+      rows += `<tr><th class="rowh" scope="row">${esc(test.name)}${subtitle ? `<span class="row-sub">${esc(subtitle)}</span>` : ''}</th>${cells}</tr>`
     }
   }
-  const head = labels.map(label => `<th scope="col">${esc(label)}</th>`).join('')
-  const payload = JSON.stringify(flat.map(matrixItemPayload)).replace(/</g, '\\u003c')
+  const origins = list.map((report, index) => {
+    const upstream = report.verdict?.upstream
+    if (!upstream) return null
+    return { column: probeMatrixColumnText(labels[index]), label: upstream.label, reasons: upstream.reasons }
+  })
+  const head = labels.map((column, index) => matrixColumnHead(column, list[index]?.verdict?.upstream, index)).join('')
   const initial = theme?.initialTheme === 'dark' ? 'dark' : 'light'
-  const liveStyle = theme?.liveCss ? ` style="${esc(theme.liveCss)}"` : ''
-  const css = REPORT_CSS.split('.tile').join('.x-card') + MATRIX_CSS
+  const docTitle = kind === 'problems' ? '模型探测 · 异常' : '模型探测'
   return `<!doctype html>
-<html lang="zh-CN" data-theme="${initial}"${liveStyle}>
+<html lang="zh-CN" data-theme="${initial}">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>模型对比</title>
+<title>${esc(docTitle)}</title>
 <script>
 (function () {
   try {
     var t = localStorage.getItem('modelprobe-report-theme');
-    if (t === 'light' || t === 'dark') {
-      document.documentElement.removeAttribute('style');
-      document.documentElement.setAttribute('data-theme', t);
-    }
+    if (t === 'light' || t === 'dark') document.documentElement.setAttribute('data-theme', t);
   } catch (e) {}
 })();
 </script>
-<style>${css}</style>
+<style>${MATRIX_PAGE_CSS}</style>
 </head>
 <body>
 <div class="ambient" aria-hidden="true"><i class="orb-a"></i><i class="orb-b"></i><i class="orb-c"></i></div>
 <header class="top">
   <div class="brand">模型探测</div>
-  <button type="button" class="theme-btn" id="themeBtn">深色模式</button>
+  <button type="button" class="icon-btn" id="themeBtn"><svg class="i-moon" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M13.3 9.4A5.6 5.6 0 0 1 6.6 2.7a5.6 5.6 0 1 0 6.7 6.7z"/></svg><svg class="i-sun" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" aria-hidden="true"><circle cx="8" cy="8" r="2.8"/><path d="M8 1.6v1.5M8 12.9v1.5M1.6 8h1.5M12.9 8h1.5M3.5 3.5l1.05 1.05M11.45 11.45l1.05 1.05M12.5 3.5l-1.05 1.05M4.55 11.45l-1.05 1.05"/></svg></button>
 </header>
 <main>
-  <div class="wrap">
-    <section class="hero">
-      <div class="eyebrow">模型对比</div>
-      <h1>模型对比</h1>
-      <p class="sub">${list.length} 份报告</p>
-    </section>
-  </div>
   <div class="matrix-bleed">
     <table class="matrix">
       <thead><tr><th class="rowh" scope="col">测试项</th>${head}</tr></thead>
@@ -909,7 +1416,7 @@ export function buildProbeMatrixHtml(
     </table>
   </div>
 </main>
-${probeSheetDocument(payload, '.matrix-cell')}
+${probeMatrixSheet(embedJson(flat), embedJson(origins))}
 </body>
 </html>`
 }
@@ -938,21 +1445,22 @@ export function downloadProbeReportHtml(
   setTimeout(() => URL.revokeObjectURL(url), 1000)
 }
 
-export function probeMatrixHtmlFileName(count: number): string {
-  return probeReportHtmlFileName(`模型对比_${count}`)
+export function probeMatrixHtmlFileName(count: number, kind: ProbeMatrixKind = 'full'): string {
+  return probeReportHtmlFileName(kind === 'problems' ? `模型探测_异常_${count}` : `模型探测_${count}`)
 }
 
 export function downloadProbeMatrixHtml(
   reports: ProbeHtmlReport[],
   tests: ProbeHtmlTestMeta[],
   formatLabels: Record<string, string>,
+  kind: ProbeMatrixKind = 'full',
 ): void {
-  const html = buildProbeMatrixHtml(reports, tests, formatLabels, captureProbeExportTheme())
+  const html = buildProbeMatrixHtml(reports, tests, formatLabels, captureProbeExportTheme(), kind)
   const blob = new Blob([html], { type: 'text/html;charset=utf-8' })
   const url = URL.createObjectURL(blob)
   const a = document.createElement('a')
   a.href = url
-  a.download = probeMatrixHtmlFileName(reports.length)
+  a.download = probeMatrixHtmlFileName(reports.length, kind)
   document.body.appendChild(a)
   a.click()
   a.remove()

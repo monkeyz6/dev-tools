@@ -151,9 +151,9 @@ test.describe('模型探测', () => {
     await expect(main).toContainText('OpenAI Responses')
     await expect(main).toContainText('Anthropic Messages')
     await expect(main).toContainText('通过 3')
-    await expect(main.getByRole('button', { name: /OpenAI Chat Completions/ })).toContainText('↑12 ↓5')
-    await expect(main.getByRole('button', { name: /OpenAI Responses/ })).toContainText('↑10 ↓4')
-    await expect(main.getByRole('button', { name: /Anthropic Messages/ })).toContainText('↑8 ↓3')
+    await expect(main.locator('[data-probe-tile]').filter({ hasText: /OpenAI Chat Completions/ })).toContainText('↑12 ↓5')
+    await expect(main.locator('[data-probe-tile]').filter({ hasText: /OpenAI Responses/ })).toContainText('↑10 ↓4')
+    await expect(main.locator('[data-probe-tile]').filter({ hasText: /Anthropic Messages/ })).toContainText('↑8 ↓3')
 
     // 请求日志：token 用量、缓存读写、request id 一键复制
     await page.getByRole('button', { name: /请求日志/ }).click()
@@ -184,14 +184,15 @@ test.describe('模型探测', () => {
     await setupRun(page, 'e2e-参数降级')
 
     const main = page.locator('main')
-    await expect(main.getByRole('button', { name: /temperature/ })).toBeVisible({ timeout: 10000 })
-    await main.getByRole('button', { name: /temperature/ }).click()
+    await expect(main.locator('[data-probe-tile]').filter({ hasText: /temperature/ })).toBeVisible({ timeout: 10000 })
+    await main.locator('[data-probe-tile]').filter({ hasText: /temperature/ }).click()
     const dialog = page.getByRole('dialog')
     await expect(dialog).toContainText('unknown parameter: temperature')
-    // 请求头 / 请求体两个代码块右上角各有一个复制图标
-    await expect(dialog.getByRole('button', { name: '复制' })).toHaveCount(2)
+    await expect(dialog).toContainText('响应体')
+    // 请求头、请求体、响应体三个代码块右上角各有一个复制图标
+    await expect(dialog.getByRole('button', { name: '复制' })).toHaveCount(3)
     await dialog.getByRole('button', { name: '关闭' }).click()
-    await main.getByRole('button', { name: /top_p/ }).click()
+    await main.locator('[data-probe-tile]').filter({ hasText: /top_p(?! 越界)/ }).click()
     await expect(page.getByRole('dialog')).toContainText('组合请求通过')
   })
 
@@ -220,7 +221,7 @@ test.describe('模型探测', () => {
     await page.getByRole('button', { name: '确认并开始' }).click()
     await openFinishedReport(page, 'e2e-预期拒绝关闭')
 
-    const tile = page.locator('main').getByRole('button', { name: /temperature/ })
+    const tile = page.locator('main').locator('[data-probe-tile]').filter({ hasText: /temperature/ })
     await expect(tile).toContainText('不支持', { timeout: 10000 })
     await expect(tile).not.toContainText('符合预期')
     await expect(tile).not.toContainText('异常')
@@ -251,7 +252,7 @@ test.describe('模型探测', () => {
     await page.getByRole('button', { name: '确认并开始' }).click()
     await openFinishedReport(page, 'e2e-预期拒绝开启')
 
-    const tile = page.locator('main').getByRole('button', { name: /temperature/ })
+    const tile = page.locator('main').locator('[data-probe-tile]').filter({ hasText: /temperature/ })
     await expect(tile).toContainText('符合预期', { timeout: 10000 })
     await expect(tile).toContainText('不接受该 temperature')
 
@@ -264,7 +265,7 @@ test.describe('模型探测', () => {
     await page.getByRole('dialog').locator('input').fill('e2e-预期拒绝却成功')
     await page.getByRole('button', { name: '确认并开始' }).click()
     await openFinishedReport(page, 'e2e-预期拒绝却成功')
-    const again = page.locator('main').getByRole('button', { name: /temperature/ })
+    const again = page.locator('main').locator('[data-probe-tile]').filter({ hasText: /temperature/ })
     await expect(again).toContainText('异常', { timeout: 10000 })
     await expect(again).toContainText('不应接受 temperature')
   })
@@ -296,7 +297,7 @@ test.describe('模型探测', () => {
     await setupRun(page, 'e2e-工具调用形状')
 
     const main = page.locator('main')
-    await expect(main.getByRole('button', { name: /工具调用/ })).toHaveCount(3, { timeout: 10000 })
+    await expect(main.locator('[data-probe-tile]').filter({ hasText: /工具调用/ })).toHaveCount(3, { timeout: 10000 })
     await expect(main).toContainText('已调用 get_weather')
 
     await page.getByRole('button', { name: /请求日志/ }).click()
@@ -378,7 +379,7 @@ test.describe('模型探测', () => {
     for (const id of ['chat-basic', 'responses-basic', 'anthropic-basic', 'tool_calling']) await check(page, id)
     await setupRun(page, 'e2e-thinking强制tool_choice降级')
 
-    const tiles = page.locator('main').getByRole('button', { name: /工具调用/ })
+    const tiles = page.locator('main').locator('[data-probe-tile]').filter({ hasText: /工具调用/ })
     await expect(tiles).toHaveCount(3, { timeout: 10000 })
     await expect(tiles.filter({ hasText: 'Chat Completions' })).toContainText('通过')
     await expect(tiles.filter({ hasText: 'Responses' })).toContainText('通过')
@@ -429,7 +430,7 @@ test.describe('模型探测', () => {
     await check(page, 'tool_calling')
     await setupRun(page, 'e2e-tool_choice不支持不降级')
 
-    const tile = page.locator('main').getByRole('button', { name: /工具调用/ })
+    const tile = page.locator('main').locator('[data-probe-tile]').filter({ hasText: /工具调用/ })
     await expect(tile).toContainText('失败', { timeout: 10000 })
     await expect(page.locator('main')).not.toContainText('已用 auto 核验')
     expect(chatBodies.filter(b => extractPrompt(b).includes('must call the get_weather'))).toHaveLength(1)
@@ -461,7 +462,7 @@ test.describe('模型探测', () => {
     await check(page, 'tool_calling')
     await setupRun(page, 'e2e-中文思考模式tool_choice降级')
 
-    const tile = page.locator('main').getByRole('button', { name: /工具调用/ })
+    const tile = page.locator('main').locator('[data-probe-tile]').filter({ hasText: /工具调用/ })
     await expect(tile).toContainText('通过', { timeout: 10000 })
     await expect(page.locator('main')).toContainText('已用 auto 核验')
     expect(chatBodies.find(b => b.tool_choice === 'auto' && extractPrompt(b).includes('must call the get_weather'))).toBeTruthy()
@@ -523,8 +524,8 @@ test.describe('模型探测', () => {
     await setupRun(page, 'e2e-token稳定性')
 
     const main = page.locator('main')
-    await expect(main.getByRole('button', { name: /Token 计算稳定性/ })).toBeVisible({ timeout: 10000 })
-    await main.getByRole('button', { name: /Token 计算稳定性/ }).click()
+    await expect(main.locator('[data-probe-tile]').filter({ hasText: /Token 计算稳定性/ })).toBeVisible({ timeout: 10000 })
+    await main.locator('[data-probe-tile]').filter({ hasText: /Token 计算稳定性/ }).click()
     await expect(page.getByRole('dialog')).toContainText('3 次输入 Token 均为 10')
   })
 
@@ -821,7 +822,7 @@ test.describe('模型探测', () => {
     const main = page.locator('main')
     await expect(main).toContainText('失败 1', { timeout: 10000 })
     await expect(main).toContainText('计费无法落地')
-    await expect(main.getByRole('button', { name: /OpenAI Chat Completions/ })).toContainText('↑— ↓—')
+    await expect(main.locator('[data-probe-tile]').filter({ hasText: /OpenAI Chat Completions/ })).toContainText('↑— ↓—')
   })
 
   test('纯流式请求体为 Chat 最小体，且不请求其它协议', async ({ page }) => {
@@ -843,8 +844,8 @@ test.describe('模型探测', () => {
     await setupRun(page, 'e2e-纯流式请求体')
 
     const main = page.locator('main')
-    await expect(main.getByRole('button', { name: /纯流式/ })).toBeVisible({ timeout: 10000 })
-    await expect(main.getByRole('button', { name: /纯流式/ })).toContainText('↑9 ↓40')
+    await expect(main.locator('[data-probe-tile]').filter({ hasText: /纯流式/ })).toBeVisible({ timeout: 10000 })
+    await expect(main.locator('[data-probe-tile]').filter({ hasText: /纯流式/ })).toContainText('↑9 ↓40')
     expect(responsesCalls).toBe(0)
     expect(anthropicCalls).toBe(0)
     const streamBody = chatBodies.find(b => b.stream === true)
@@ -896,10 +897,10 @@ test.describe('模型探测', () => {
     await setupRun(page, 'e2e-流式上限对照')
 
     const main = page.locator('main')
-    await expect(main.getByRole('button', { name: /纯流式/ })).toBeVisible({ timeout: 10000 })
-    await expect(main.getByRole('button', { name: /纯流式/ })).toContainText('失败')
-    await expect(main.getByRole('button', { name: /纯流式/ })).toContainText('↑— ↓—')
-    const sseTiles = main.getByRole('button', { name: /SSE 流式响应/ })
+    await expect(main.locator('[data-probe-tile]').filter({ hasText: /纯流式/ })).toBeVisible({ timeout: 10000 })
+    await expect(main.locator('[data-probe-tile]').filter({ hasText: /纯流式/ })).toContainText('失败')
+    await expect(main.locator('[data-probe-tile]').filter({ hasText: /纯流式/ })).toContainText('↑— ↓—')
+    const sseTiles = main.locator('[data-probe-tile]').filter({ hasText: /SSE 流式响应/ })
     await expect(sseTiles).toHaveCount(2)
     await expect(sseTiles.filter({ hasText: 'Chat Completions' })).toContainText('通过')
     await expect(sseTiles.filter({ hasText: 'Chat Completions' })).toContainText('↑11 ↓6')
@@ -933,9 +934,9 @@ test.describe('模型探测', () => {
     await setupRun(page, 'e2e-流式只回一端')
 
     const main = page.locator('main')
-    await expect(main.getByRole('button', { name: /SSE 流式响应/ })).toContainText('失败', { timeout: 10000 })
+    await expect(main.locator('[data-probe-tile]').filter({ hasText: /SSE 流式响应/ })).toContainText('失败', { timeout: 10000 })
     await expect(main).toContainText('计费无法落地')
-    await expect(main.getByRole('button', { name: /SSE 流式响应/ })).toContainText('↑— ↓8')
+    await expect(main.locator('[data-probe-tile]').filter({ hasText: /SSE 流式响应/ })).toContainText('↑— ↓8')
   })
 
   test('打开 include_usage 后 Chat 两套流式都注入 stream_options', async ({ page }) => {
@@ -962,7 +963,7 @@ test.describe('模型探测', () => {
     await check(page, 'stream-pure')
     await setupRun(page, 'e2e-注入include_usage')
 
-    await expect(page.locator('main').getByRole('button', { name: /纯流式/ })).toBeVisible({ timeout: 10000 })
+    await expect(page.locator('main').locator('[data-probe-tile]').filter({ hasText: /纯流式/ })).toBeVisible({ timeout: 10000 })
     expect(streamBodies).toHaveLength(2)
     for (const b of streamBodies) {
       expect(b.stream_options).toEqual({ include_usage: true })
@@ -989,7 +990,7 @@ test.describe('模型探测', () => {
     await setupRun(page, 'e2e-错误码无usage')
 
     const main = page.locator('main')
-    await expect(main.getByRole('button', { name: /错误码规范性/ })).toContainText('通过', { timeout: 10000 })
+    await expect(main.locator('[data-probe-tile]').filter({ hasText: /错误码规范性/ })).toContainText('通过', { timeout: 10000 })
   })
 
   test('未勾选 Chat 基础时纯流式跳过且不发请求', async ({ page }) => {
@@ -1009,7 +1010,7 @@ test.describe('模型探测', () => {
 
     const main = page.locator('main')
     await expect(main).toContainText('通过 1', { timeout: 10000 })
-    await expect(main.getByRole('button', { name: /纯流式/ })).toHaveCount(0)
+    await expect(main.locator('[data-probe-tile]').filter({ hasText: /纯流式/ })).toHaveCount(0)
     expect(chatCalls).toBe(0)
   })
 
@@ -1051,7 +1052,7 @@ test.describe('模型探测', () => {
     await check(page, 'stream-true')
     await setupRun(page, 'e2e-Anthropic流式用量')
 
-    const tile = page.locator('main').getByRole('button', { name: /SSE 流式响应/ })
+    const tile = page.locator('main').locator('[data-probe-tile]').filter({ hasText: /SSE 流式响应/ })
     await expect(tile).toContainText('通过', { timeout: 10000 })
     await expect(tile).toContainText('↑8 ↓3')
     const streamed = bodies.find(b => b.stream === true)
@@ -1077,7 +1078,7 @@ test.describe('模型探测', () => {
     await check(page, 'stream-true')
     await setupRun(page, 'e2e-Anthropic流式占位0')
 
-    const tile = page.locator('main').getByRole('button', { name: /SSE 流式响应/ })
+    const tile = page.locator('main').locator('[data-probe-tile]').filter({ hasText: /SSE 流式响应/ })
     await expect(tile).toContainText('失败', { timeout: 10000 })
     await expect(tile).toContainText('计费无法落地')
     await expect(tile).toContainText('↑8 ↓—')
@@ -1105,7 +1106,7 @@ test.describe('模型探测', () => {
     const main = page.locator('main')
     await expect(main).toContainText('通过 4', { timeout: 10000 })
     await expect(main).not.toContainText('无原生 response_format')
-    const soTiles = main.getByRole('button', { name: /结构化输出/ })
+    const soTiles = main.locator('[data-probe-tile]').filter({ hasText: /结构化输出/ })
     await expect(soTiles).toHaveCount(2)
     await expect(soTiles.filter({ hasText: 'Chat Completions' })).toContainText('JSON 符合 Schema')
     await expect(soTiles.filter({ hasText: 'Anthropic' })).toContainText('JSON 符合 Schema')
@@ -1173,9 +1174,9 @@ test.describe('模型探测', () => {
     await main.getByRole('button', { name: '查看', exact: true }).click()
     await expect(main).toContainText('通过 1')
     await expect(main).not.toContainText('不支持 1')
-    await expect(main.getByRole('button', { name: /结构化输出/ })).toHaveCount(0)
+    await expect(main.locator('[data-probe-tile]').filter({ hasText: /结构化输出/ })).toHaveCount(0)
     await expect(main).not.toContainText('无原生 response_format')
-    await expect(main.getByRole('button', { name: /Anthropic Messages/ })).toBeVisible()
+    await expect(main.locator('[data-probe-tile]').filter({ hasText: /Anthropic Messages/ })).toBeVisible()
   })
 
   test('429 后重试成功：等 6s 再发，日志只留最终一发', async ({ page }) => {
@@ -1251,7 +1252,7 @@ test.describe('模型探测', () => {
     await setupRun(page, 'e2e-并发不重试429')
 
     const main = page.locator('main')
-    await expect(main.getByRole('button', { name: /并发请求稳定性/ })).toContainText('0/3', { timeout: 10000 })
+    await expect(main.locator('[data-probe-tile]').filter({ hasText: /并发请求稳定性/ })).toContainText('0/3', { timeout: 10000 })
     expect(limited).toBe(3)
   })
 
@@ -1277,7 +1278,7 @@ test.describe('模型探测', () => {
     await setupRun(page, 'e2e-错误码429')
 
     const main = page.locator('main')
-    await expect(main.getByRole('button', { name: /错误码规范性/ })).toContainText('全程限流', { timeout: 25000 })
+    await expect(main.locator('[data-probe-tile]').filter({ hasText: /错误码规范性/ })).toContainText('全程限流', { timeout: 25000 })
     expect(invalidCalls).toBe(3)
   })
 
@@ -1328,7 +1329,7 @@ test.describe('模型探测', () => {
     await setupRun(page, 'e2e-截断原因')
 
     const main = page.locator('main')
-    const tiles = main.getByRole('button', { name: /Token 上限参数/ })
+    const tiles = main.locator('[data-probe-tile]').filter({ hasText: /Token 上限参数/ })
     await expect(tiles).toHaveCount(3, { timeout: 10000 })
     await expect(tiles.filter({ hasText: 'Chat Completions' })).toContainText('length')
     await expect(tiles.filter({ hasText: 'Responses' })).toContainText('max_output_tokens')
@@ -1355,7 +1356,7 @@ test.describe('模型探测', () => {
     await check(page, 'system-prompt')
     await setupRun(page, 'e2e-system未遵循')
 
-    const tile = page.locator('main').getByRole('button', { name: /System 提示词/ })
+    const tile = page.locator('main').locator('[data-probe-tile]').filter({ hasText: /System 提示词/ })
     await expect(tile).toContainText('失败', { timeout: 10000 })
     await expect(tile).toContainText('未遵循')
   })
@@ -1374,7 +1375,7 @@ test.describe('模型探测', () => {
     await check(page, 'multi-turn')
     await setupRun(page, 'e2e-多轮两跳')
 
-    const tile = page.locator('main').getByRole('button', { name: /多轮对话/ })
+    const tile = page.locator('main').locator('[data-probe-tile]').filter({ hasText: /多轮对话/ })
     await expect(tile).toContainText('ORBIT', { timeout: 10000 })
     const turns = bodies.filter(b => Array.isArray(b.messages) && b.messages.length >= 2)
     expect(turns.length).toBeGreaterThanOrEqual(1)
@@ -1405,8 +1406,8 @@ test.describe('模型探测', () => {
     await setupRun(page, 'e2e-默认cap120')
 
     const main = page.locator('main')
-    await expect(main.getByRole('button', { name: /System 提示词/ })).toHaveCount(2, { timeout: 10000 })
-    await expect(main.getByRole('button', { name: /多轮对话/ })).toHaveCount(2)
+    await expect(main.locator('[data-probe-tile]').filter({ hasText: /System 提示词/ })).toHaveCount(2, { timeout: 10000 })
+    await expect(main.locator('[data-probe-tile]').filter({ hasText: /多轮对话/ })).toHaveCount(2)
 
     const anthSystem = anthropicBodies.find(b => typeof b.system === 'string' && b.system.includes('SYSTEM_OK'))
     expect(anthSystem?.max_tokens).toBe(120)
@@ -1436,7 +1437,7 @@ test.describe('模型探测', () => {
     await check(page, 'image-input')
     await setupRun(page, 'e2e-图片输入')
 
-    const tile = page.locator('main').getByRole('button', { name: /图片输入/ })
+    const tile = page.locator('main').locator('[data-probe-tile]').filter({ hasText: /图片输入/ })
     await expect(tile).toContainText('识别为主色红', { timeout: 10000 })
     const img = chatBodies.find(b => hasImage(b))
     expect(img).toBeTruthy()
@@ -1463,7 +1464,7 @@ test.describe('模型探测', () => {
     await check(page, 'image-input')
     await setupRun(page, 'e2e-图片不支持')
 
-    const tile = page.locator('main').getByRole('button', { name: /图片输入/ })
+    const tile = page.locator('main').locator('[data-probe-tile]').filter({ hasText: /图片输入/ })
     await expect(tile).toContainText('不支持', { timeout: 10000 })
   })
 
@@ -1486,7 +1487,7 @@ test.describe('模型探测', () => {
     await check(page, 'image-input')
     await setupRun(page, 'e2e-图片泛化不支持')
 
-    const tile = page.locator('main').getByRole('button', { name: /图片输入/ })
+    const tile = page.locator('main').locator('[data-probe-tile]').filter({ hasText: /图片输入/ })
     await expect(tile).toContainText('失败', { timeout: 10000 })
     await expect(tile).not.toContainText('不支持')
   })
@@ -1510,7 +1511,7 @@ test.describe('模型探测', () => {
     await check(page, 'image-input')
     await setupRun(page, 'e2e-图片already误判')
 
-    const tile = page.locator('main').getByRole('button', { name: /图片输入/ })
+    const tile = page.locator('main').locator('[data-probe-tile]').filter({ hasText: /图片输入/ })
     await expect(tile).toContainText('失败', { timeout: 10000 })
     await expect(tile).toContainText('未识别出红色')
   })
@@ -1534,7 +1535,7 @@ test.describe('模型探测', () => {
     await check(page, 'max_tokens')
     await setupRun(page, 'e2e-语义invalid信封')
 
-    const tile = page.locator('main').getByRole('button', { name: /Token 上限参数/ })
+    const tile = page.locator('main').locator('[data-probe-tile]').filter({ hasText: /Token 上限参数/ })
     await expect(tile).toContainText('失败', { timeout: 10000 })
     await expect(tile).not.toContainText('不支持')
   })
@@ -1556,7 +1557,7 @@ test.describe('模型探测', () => {
     await check(page, 'structured_output')
     await setupRun(page, 'e2e-schema非法JSON')
 
-    const tile = page.locator('main').getByRole('button', { name: /结构化输出/ })
+    const tile = page.locator('main').locator('[data-probe-tile]').filter({ hasText: /结构化输出/ })
     await expect(tile).toContainText('失败', { timeout: 10000 })
     await expect(tile).toContainText('不是可解析的 JSON')
   })
@@ -1573,7 +1574,7 @@ test.describe('模型探测', () => {
     await check(page, 'system-prompt')
     await setupRun(page, 'e2e-system遵循')
 
-    const tile = page.locator('main').getByRole('button', { name: /System 提示词/ })
+    const tile = page.locator('main').locator('[data-probe-tile]').filter({ hasText: /System 提示词/ })
     await expect(tile).toContainText('通过', { timeout: 10000 })
     await expect(tile).toContainText('SYSTEM_OK')
   })
@@ -1599,7 +1600,7 @@ test.describe('模型探测', () => {
     await check(page, 'max_tokens')
     await setupRun(page, 'e2e-max_tokens被拒')
 
-    const tile = page.locator('main').getByRole('button', { name: /Token 上限参数/ })
+    const tile = page.locator('main').locator('[data-probe-tile]').filter({ hasText: /Token 上限参数/ })
     await expect(tile).toContainText('通过', { timeout: 10000 })
     await expect(tile).toContainText('max_completion_tokens')
     await expect(tile).toContainText('已排除 max_tokens')
@@ -1631,7 +1632,7 @@ test.describe('模型探测', () => {
     await check(page, 'max_tokens')
     await setupRun(page, 'e2e-max_completion被拒')
 
-    const tile = page.locator('main').getByRole('button', { name: /Token 上限参数/ })
+    const tile = page.locator('main').locator('[data-probe-tile]').filter({ hasText: /Token 上限参数/ })
     await expect(tile).toContainText('通过', { timeout: 10000 })
     await expect(tile).toContainText('接受 max_tokens')
     await expect(tile).toContainText('已排除 max_completion_tokens')
@@ -1662,7 +1663,7 @@ test.describe('模型探测', () => {
     await check(page, 'max_tokens')
     await setupRun(page, 'e2e-max字段互斥')
 
-    const tile = page.locator('main').getByRole('button', { name: /Token 上限参数/ })
+    const tile = page.locator('main').locator('[data-probe-tile]').filter({ hasText: /Token 上限参数/ })
     await expect(tile).toContainText('通过', { timeout: 10000 })
     await expect(tile).toContainText('max_completion_tokens')
     await expect(tile).toContainText('max_tokens')
@@ -1686,7 +1687,7 @@ test.describe('模型探测', () => {
     await check(page, 'max_tokens')
     await setupRun(page, 'e2e-截断未生效')
 
-    const tile = page.locator('main').getByRole('button', { name: /Token 上限参数/ })
+    const tile = page.locator('main').locator('[data-probe-tile]').filter({ hasText: /Token 上限参数/ })
     await expect(tile).toContainText('失败', { timeout: 10000 })
     await expect(tile).toContainText('不是截断')
   })
@@ -1702,7 +1703,7 @@ test.describe('模型探测', () => {
     await check(page, 'tool_calling')
     await setupRun(page, 'e2e-工具未真正调用')
 
-    const tile = page.locator('main').getByRole('button', { name: /工具调用/ })
+    const tile = page.locator('main').locator('[data-probe-tile]').filter({ hasText: /工具调用/ })
     await expect(tile).toContainText('失败', { timeout: 10000 })
     await expect(tile).toContainText('没有工具调用')
   })
@@ -1732,7 +1733,7 @@ test.describe('模型探测', () => {
     for (const id of ['chat-basic', 'responses-basic', 'anthropic-basic', 'image-input']) await check(page, id)
     await setupRun(page, 'e2e-三协议图片')
 
-    const tiles = page.locator('main').getByRole('button', { name: /图片输入/ })
+    const tiles = page.locator('main').locator('[data-probe-tile]').filter({ hasText: /图片输入/ })
     await expect(tiles).toHaveCount(3, { timeout: 10000 })
     await expect(tiles.filter({ hasText: 'Chat Completions' })).toContainText('识别为主色红')
     await expect(tiles.filter({ hasText: 'Responses' })).toContainText('识别为主色红')
@@ -1814,7 +1815,7 @@ test.describe('模型探测', () => {
     await page.getByRole('button', { name: '确认并开始' }).click()
     await openFinishedReport(page, 'e2e-原生联网')
 
-    const tile = page.locator('main').getByRole('button', { name: /OpenAI 联网搜索/ })
+    const tile = page.locator('main').locator('[data-probe-tile]').filter({ hasText: /OpenAI 联网搜索/ })
     await expect(tile).toContainText('已调用 web_search', { timeout: 10000 })
 
     const nativeReq = responsesBodies.find(b => extractPrompt(b).includes('hosted web search tool'))
@@ -1848,7 +1849,7 @@ test.describe('模型探测', () => {
     await page.getByRole('button', { name: '确认并开始' }).click()
     await openFinishedReport(page, 'e2e-原生明确不支持')
 
-    const tile = page.locator('main').getByRole('button', { name: /OpenAI 联网搜索/ })
+    const tile = page.locator('main').locator('[data-probe-tile]').filter({ hasText: /OpenAI 联网搜索/ })
     await expect(tile).toContainText('不支持', { timeout: 10000 })
     await expect(tile).not.toContainText('异常')
   })
@@ -1873,7 +1874,7 @@ test.describe('模型探测', () => {
     await page.getByRole('button', { name: '确认并开始' }).click()
     await openFinishedReport(page, 'e2e-原生无证据')
 
-    const tile = page.locator('main').getByRole('button', { name: /OpenAI 联网搜索/ })
+    const tile = page.locator('main').locator('[data-probe-tile]').filter({ hasText: /OpenAI 联网搜索/ })
     await expect(tile).toContainText('异常', { timeout: 10000 })
     await expect(tile).toContainText('没有 web_search 的调用或结果证据')
   })
@@ -1933,9 +1934,16 @@ test.describe('模型探测', () => {
           name: 'e2e-卡片甲',
           completedAt: '2026-09-29T01:00:01.000Z',
           target: { baseUrl: 'https://a.example', model: 'gpt-4o', channelName: '渠道甲', overrides: { chat: null, responses: null, anthropic: null } },
+          verdict: {
+            family: { label: 'GPT 经典', reasons: ['名字命中 GPT 经典'] },
+            access: { label: '网关', reasons: ['主机不像官方'] },
+            upstream: { label: 'OpenAI 官方', reasons: ['响应头 openai-organization'] },
+          },
           results: {
             'chat-basic': { status: 'passed', detail: '基础请求返回成功', duration: 10, format: 'chat', usage: { input: 1, output: 2, cacheRead: null, cacheWrite: null }, repro: null },
             'temperature@chat': { status: 'skipped', detail: '用户未勾选', duration: null, format: 'chat', repro: null },
+            'image-input@chat': { status: 'untested', detail: '未测', duration: null, format: 'chat', repro: null },
+            'concurrency@chat': { status: 'passed', detail: '3/3 个并发请求成功', duration: 12, format: 'chat', usage: { input: 1, output: 2, cacheRead: null, cacheWrite: null }, repro: null },
           },
         })
         os.put({
@@ -1946,6 +1954,7 @@ test.describe('模型探测', () => {
           target: { baseUrl: 'https://b.example', model: 'deepseek-chat', channelName: '渠道乙', overrides: { chat: null, responses: null, anthropic: null } },
           results: {
             'chat-basic': { status: 'failed', detail: '失败', duration: 10, format: 'chat', usage: { input: 1, output: 2, cacheRead: null, cacheWrite: null }, repro: null },
+            'concurrency@chat': { status: 'skipped', detail: '用户未勾选', duration: null, format: 'chat', repro: null },
           },
         })
         tx.oncomplete = () => resolve()
@@ -1963,7 +1972,12 @@ test.describe('模型探测', () => {
     await page.getByRole('checkbox', { name: '选择 e2e-卡片甲' }).check()
     await viewBtn.click()
     await expect(page.getByRole('heading', { name: 'e2e-卡片甲' })).toBeVisible()
-    await expect(page.getByRole('button', { name: /OpenAI Chat Completions/ })).toBeVisible()
+    await expect(page.locator('main')).toContainText('渠道判断')
+    await expect(page.locator('main')).toContainText('OpenAI 官方')
+    await expect(page.locator('main')).toContainText('响应头 openai-organization')
+    await expect(page.locator('main')).not.toContainText('接入层')
+    await expect(page.locator('main')).not.toContainText('家族')
+    await expect(page.locator('[data-probe-tile]').filter({ hasText: /OpenAI Chat Completions/ })).toBeVisible()
     const [one] = await Promise.all([
       page.waitForEvent('download'),
       page.getByRole('button', { name: '导出 HTML' }).click(),
@@ -1971,33 +1985,83 @@ test.describe('模型探测', () => {
     expect(one.suggestedFilename()).toBe('e2e-卡片甲.html')
     const oneHtml = readFileSync(await one.path(), 'utf8')
     expect(oneHtml).toContain('class="tile"')
+    expect(oneHtml).toContain('渠道判断')
+    expect(oneHtml).toContain('OpenAI 官方')
+    expect(oneHtml).not.toContain('接入层')
+    expect(oneHtml).not.toContain('家族')
 
     await page.getByRole('button', { name: /历史/ }).click()
     await page.getByRole('checkbox', { name: '选择 e2e-卡片乙' }).check()
     await viewBtn.click()
     const matrix = page.getByTestId('probe-matrix-view')
     await expect(matrix).toBeVisible()
-    await expect(matrix).toContainText('gpt-4o · 渠道甲')
-    await expect(matrix).toContainText('deepseek-chat · 渠道乙')
-    await expect(matrix).toContainText('已跳过')
+    await expect(matrix).toContainText('gpt-4o')
+    await expect(matrix).toContainText('渠道甲')
+    await expect(matrix).toContainText('deepseek-chat')
+    await expect(matrix).toContainText('渠道乙')
+    await expect(matrix).toContainText('OpenAI 官方')
+    await expect(matrix).toContainText('并发请求稳定性')
+    await expect(matrix).toContainText('—')
+    await expect(matrix).not.toContainText('已跳过')
+    await expect(matrix).not.toContainText('未测')
+    await expect(matrix).not.toContainText('temperature')
+    await expect(matrix).not.toContainText('图片输入')
     await expect(matrix.locator('.probe-matrix-gap')).toBeVisible()
     await expect(matrix.locator('.probe-tile')).toHaveCount(0)
-    await matrix.getByRole('button', { name: 'temperature Chat Completions 已跳过' }).click()
-    await expect(page.getByRole('dialog')).toContainText('用户未勾选')
+    await expect(matrix.locator('[data-probe-retry]')).toHaveCount(0)
+    await matrix.getByRole('button', { name: '渠道判断 gpt-4o · 渠道甲' }).click()
+    await expect(page.getByRole('dialog')).toContainText('OpenAI 官方')
+    await expect(page.getByRole('dialog')).toContainText('响应头 openai-organization')
     await page.getByRole('dialog').getByRole('button', { name: '关闭' }).click()
+    await matrix.getByRole('button', { name: 'OpenAI Chat Completions 通过' }).click()
+    const passed = page.getByRole('dialog')
+    await expect(passed).toContainText('OpenAI Chat Completions')
+    await expect(passed).toContainText('通过')
+    await expect(passed).toContainText('本轮无实际请求')
+    await expect(passed).toContainText('↑1')
+    await expect(passed).not.toContainText('基础请求返回成功')
+    await expect(passed).not.toContainText('OpenAI 系兼容')
+    await expect(passed).not.toContainText('缓存读')
+    await expect(passed.locator('[data-probe-retry]')).toHaveCount(0)
+    await passed.getByRole('button', { name: '关闭' }).click()
     const [many] = await Promise.all([
       page.waitForEvent('download'),
       matrix.getByRole('button', { name: '导出 HTML' }).click(),
     ])
-    expect(many.suggestedFilename()).toBe('模型对比_2.html')
+    expect(many.suggestedFilename()).toBe('模型探测_2.html')
     const manyHtml = readFileSync(await many.path(), 'utf8')
+    expect(manyHtml).toContain('<span class="dot-st passed">')
     expect(manyHtml).toContain('class="matrix-cell')
     expect(manyHtml).toContain('gpt-4o · 渠道甲')
-    expect(manyHtml).toContain('deepseek-chat · 渠道乙')
-    expect(manyHtml).toContain('已跳过')
+    expect(manyHtml).toContain('>deepseek-chat<')
+    expect(manyHtml).toContain('>渠道乙<')
+    expect(manyHtml).toContain('data-origin="1"')
+    expect(manyHtml).toContain('渠道判断 gpt-4o · 渠道甲')
+    expect(manyHtml).toContain('OpenAI 官方')
+    expect(manyHtml).toContain('响应头 openai-organization')
+    expect(manyHtml).not.toContain('data-origin="0"')
+    expect(manyHtml).not.toContain('>已跳过<')
+    expect(manyHtml).not.toContain('>未测<')
+    expect(manyHtml).not.toContain('temperature')
+    expect(manyHtml).not.toContain('图片输入')
+    expect(manyHtml).toContain('并发请求稳定性')
     expect(manyHtml).toContain('class="gap"')
     expect(manyHtml).not.toContain('.tile')
     expect(manyHtml).not.toContain('class="tile"')
+    expect(manyHtml).not.toContain('基础请求返回成功')
+    expect(manyHtml).not.toContain('模型对比')
+    expect(manyHtml).not.toContain('份报告')
+    expect(manyHtml).not.toContain('"body"')
+    const [bad] = await Promise.all([
+      page.waitForEvent('download'),
+      matrix.getByRole('button', { name: '异常导出' }).click(),
+    ])
+    expect(bad.suggestedFilename()).toBe('模型探测_异常_2.html')
+    const badHtml = readFileSync(await bad.path(), 'utf8')
+    expect(badHtml).toContain('失败')
+    expect(badHtml).not.toContain('并发请求稳定性')
+    expect(badHtml).not.toContain('基础请求返回成功')
+    expect(badHtml).not.toContain('>通过<')
   })
 
   test('删除历史后，打开的矩阵或卡片跟着更新', async ({ page }) => {
@@ -2033,12 +2097,14 @@ test.describe('模型探测', () => {
     for (const item of reports) await page.getByRole('checkbox', { name: `选择 ${item.name}` }).check()
     await page.getByRole('button', { name: '查看所选' }).click()
     const matrix = page.getByTestId('probe-matrix-view')
-    await expect(matrix).toContainText('3 份报告')
+    await expect(matrix).toContainText('model-甲')
+    await expect(matrix).toContainText('model-乙')
+    await expect(matrix).toContainText('model-丙')
 
     await page.getByRole('button', { name: /历史/ }).click()
     await page.locator('[data-testid="probe-history-row"]').filter({ hasText: 'e2e-删除甲' }).getByRole('button', { name: '删除', exact: true }).click()
     await page.getByRole('button', { name: '测试报告' }).click()
-    await expect(matrix).toContainText('2 份报告')
+    await expect(matrix).toContainText('model-乙')
     await expect(matrix).not.toContainText('model-甲')
     await expect(matrix).toContainText('model-丙')
 
@@ -2104,5 +2170,297 @@ test.describe('模型探测', () => {
     expect(stored).toHaveLength(20)
     const missing = models.filter(model => !stored.some(item => item.name === `上限 · ${model}`))
     expect(missing).toHaveLength(1)
+  })
+
+  test('top_p 越界默认勾选', async ({ page }) => {
+    await goto(page, /模型探测/)
+    await expect(page.locator('input[data-id="top_p_range"]')).toBeChecked()
+    await expect(page.locator('input[data-id="image-input"]')).not.toBeChecked()
+    await expect(page.locator('input[data-id="expect-reject"]')).not.toBeChecked()
+  })
+
+  test('top_p 越界只看状态码，非 2xx 正文和 Request ID 留在详情与导出', async ({ page }) => {
+    await page.route('**/v1/chat/completions', async route => {
+      const body = route.request().postDataJSON()
+      if (body?.top_p === 2) {
+        await route.fulfill({
+          status: 400,
+          contentType: 'application/json',
+          headers: {
+            'x-log-id': 'log-range-9',
+            'x-openai-request-id': 'oai-should-lose',
+            'access-control-expose-headers': '*',
+          },
+          body: JSON.stringify({ error: { message: 'top_p out of range', tail: 'FULL-RANGE' } }),
+        })
+        return
+      }
+      await route.fulfill({ status: 200, contentType: 'application/json', body: CHAT_OK(12) })
+    })
+
+    await goto(page, /模型探测/)
+    await page.getByRole('button', { name: '全不选' }).click()
+    await check(page, 'chat-basic')
+    await check(page, 'top_p_range')
+    await setupRun(page, 'e2e-越界通过')
+
+    const tile = page.locator('[data-probe-tile][data-probe-key="top_p_range@chat"]')
+    await expect(tile).toContainText('通过', { timeout: 10000 })
+    await expect(tile).toContainText('非法 top_p 返回 HTTP 400')
+    await tile.click()
+    const dialog = page.getByRole('dialog')
+    await expect(dialog).toContainText('响应体')
+    await expect(dialog).toContainText('FULL-RANGE')
+    await expect(dialog).toContainText('log-range-9')
+    await expect(dialog).not.toContainText('oai-should-lose')
+    await expect(dialog.getByRole('button', { name: '复制' })).toHaveCount(3)
+    await dialog.getByRole('button', { name: '关闭' }).click()
+
+    const stored = await readHistoryStore(page, 'modelprobe')
+    expect(stored).toHaveLength(1)
+    const cell = stored[0].results['top_p_range@chat']
+    expect(cell.status).toBe('passed')
+    expect(cell.repro.requestId).toBe('log-range-9')
+    expect(cell.repro.responseBody.error.tail).toBe('FULL-RANGE')
+    expect(stored[0].results['chat-basic'].repro.responseBody).toBeUndefined()
+
+    const [md] = await Promise.all([
+      page.waitForEvent('download'),
+      page.getByRole('button', { name: '导出 Markdown' }).click(),
+    ])
+    const markdown = readFileSync(await md.path(), 'utf8')
+    expect(markdown).toContain('响应体')
+    expect(markdown).toContain('FULL-RANGE')
+    expect(markdown).toContain('Request ID: log-range-9')
+
+    const [htmlFile] = await Promise.all([
+      page.waitForEvent('download'),
+      page.getByRole('button', { name: '导出 HTML' }).click(),
+    ])
+    const html = readFileSync(await htmlFile.path(), 'utf8')
+    expect(html).toContain('FULL-RANGE')
+    expect(html).toContain('log-range-9')
+    expect(html).toContain('响应体')
+  })
+
+  test('预期拒绝不改判 top_p 越界', async ({ page }) => {
+    await page.route('**/v1/chat/completions', async route => {
+      const body = route.request().postDataJSON()
+      if (body?.top_p === 2) {
+        await route.fulfill({
+          status: 400,
+          contentType: 'application/json',
+          body: JSON.stringify({ error: { message: 'top_p is not supported' } }),
+        })
+        return
+      }
+      await route.fulfill({ status: 200, contentType: 'application/json', body: CHAT_OK(11) })
+    })
+
+    await goto(page, /模型探测/)
+    await inputByLabel(page, '模型名称').fill('gpt-6-sol')
+    await page.getByRole('button', { name: '全不选' }).click()
+    await check(page, 'chat-basic')
+    await check(page, 'top_p_range')
+    await check(page, 'expect-reject')
+    await addChannel(page, { apiKey: 'sk-test-probe' })
+    await page.getByRole('button', { name: '▶ 开始测试' }).click()
+    await page.getByRole('dialog').locator('input').fill('e2e-越界不改判')
+    await page.getByRole('button', { name: '确认并开始' }).click()
+    await openFinishedReport(page, 'e2e-越界不改判')
+
+    const tile = page.locator('[data-probe-tile][data-probe-key="top_p_range@chat"]')
+    await expect(tile).toContainText('通过', { timeout: 10000 })
+    await expect(tile).toContainText('HTTP 400')
+    await expect(tile).not.toContainText('符合预期')
+  })
+
+  test('单格重试覆盖原结论，邻居不变，仍打到报告里的地址', async ({ page }) => {
+    const urls: string[] = []
+    let mode: '400' | '200' | '500' | '401' = '400'
+    await page.route('**/v1/chat/completions', async route => {
+      const body = route.request().postDataJSON()
+      if (body?.top_p === 2) {
+        urls.push(route.request().url())
+        const status = mode === '400' ? 400 : mode === '200' ? 200 : mode === '500' ? 500 : 401
+        const payload = status === 200
+          ? JSON.parse(CHAT_OK(9))
+          : { error: { message: `mode-${mode}`, tail: 'RETRY-BODY' } }
+        await route.fulfill({ status, contentType: 'application/json', body: JSON.stringify(payload) })
+        return
+      }
+      await route.fulfill({ status: 200, contentType: 'application/json', body: CHAT_OK(12) })
+    })
+
+    await goto(page, /模型探测/)
+    await page.getByRole('button', { name: '全不选' }).click()
+    await check(page, 'chat-basic')
+    await check(page, 'temperature')
+    await check(page, 'top_p_range')
+    await setupRun(page, 'e2e-单格重试')
+
+    const tile = page.locator('[data-probe-tile][data-probe-key="top_p_range@chat"]')
+    const temperature = page.locator('main').locator('[data-probe-tile]').filter({ hasText: /temperature/ })
+    const basic = page.locator('[data-probe-tile][data-probe-key="chat-basic"]')
+    await expect(tile).toContainText('通过', { timeout: 10000 })
+    const before = await readHistoryStore(page, 'modelprobe')
+    expect(before).toHaveLength(1)
+    const temperatureDetail = before[0].results['temperature@chat'].detail
+
+    mode = '200'
+    await page.getByRole('button', { name: /渠道管理/ }).click()
+    await channelCard(page, '测试渠道').getByRole('button', { name: '编辑' }).click()
+    await inputByLabel(page, 'Base URL').fill('https://moved.example')
+    await page.getByRole('button', { name: '保存渠道' }).click()
+    await expect(channelCard(page, '测试渠道')).toContainText('https://moved.example')
+    await page.getByRole('button', { name: '测试报告' }).click()
+    await page.locator('[data-probe-retry][aria-label="重试 top_p 越界 Chat Completions"]').click()
+    await expect(tile).toContainText('失败', { timeout: 10000 })
+    await expect(tile).toContainText('top_p=2 被接受（HTTP 200）')
+    await expect(temperature).toContainText('通过')
+    await expect(basic).toContainText('通过')
+    expect(urls.at(-1)).toBe('https://api.openai.com/v1/chat/completions')
+
+    const after = await readHistoryStore(page, 'modelprobe')
+    expect(after).toHaveLength(1)
+    expect(after[0].id).toBe(before[0].id)
+    expect(after[0].name).toBe(before[0].name)
+    expect(after[0].startedAt).toBe(before[0].startedAt)
+    expect(after[0].completedAt).not.toBe(before[0].completedAt)
+    expect(after[0].durationMs).toBeGreaterThanOrEqual(before[0].durationMs)
+    expect(after[0].logs).toEqual([])
+    expect(after[0].results['temperature@chat'].detail).toBe(temperatureDetail)
+    expect(after[0].results['chat-basic'].status).toBe('passed')
+    expect(after[0].results['top_p_range@chat'].status).toBe('failed')
+    expect(after[0].results['top_p_range@chat'].repro.responseBody).toBeUndefined()
+
+    mode = '500'
+    await page.locator('[data-probe-retry][aria-label="重试 top_p 越界 Chat Completions"]').click()
+    await expect(tile).toContainText('异常：HTTP 500', { timeout: 10000 })
+    mode = '401'
+    await page.locator('[data-probe-retry][aria-label="重试 top_p 越界 Chat Completions"]').click()
+    await expect(tile).toContainText('异常：鉴权失败（HTTP 401）', { timeout: 10000 })
+    const finalRows = await readHistoryStore(page, 'modelprobe')
+    expect(finalRows).toHaveLength(1)
+    expect(finalRows[0].id).toBe(before[0].id)
+    expect(finalRows[0].results['top_p_range@chat'].repro.responseBody.error.tail).toBe('RETRY-BODY')
+    expect(finalRows[0].results['temperature@chat'].detail).toBe(temperatureDetail)
+  })
+
+  test('重试被停止时保留原结论，并禁用同一批控件', async ({ page }) => {
+    let hold = false
+    let release: () => void = () => {}
+    await page.route('**/v1/chat/completions', async route => {
+      const body = route.request().postDataJSON()
+      if (body?.top_p === 2 && hold) {
+        await new Promise<void>(resolve => { release = resolve })
+        try {
+          await route.fulfill({ status: 500, contentType: 'application/json', body: JSON.stringify({ error: { message: 'late' } }) })
+        } catch { /* 页面已经中止这次请求 */ }
+        return
+      }
+      if (body?.top_p === 2) {
+        await route.fulfill({ status: 400, contentType: 'application/json', body: JSON.stringify({ error: { message: 'range' } }) })
+        return
+      }
+      await route.fulfill({ status: 200, contentType: 'application/json', body: CHAT_OK(8) })
+    })
+
+    try {
+      await goto(page, /模型探测/)
+      await page.getByRole('button', { name: '全不选' }).click()
+      await check(page, 'chat-basic')
+      await check(page, 'top_p_range')
+      await setupRun(page, 'e2e-重试停止')
+      const tile = page.locator('[data-probe-tile][data-probe-key="top_p_range@chat"]')
+      await expect(tile).toContainText('通过', { timeout: 10000 })
+      const before = await readHistoryStore(page, 'modelprobe')
+
+      hold = true
+      await page.locator('[data-probe-retry][aria-label="重试 top_p 越界 Chat Completions"]').click()
+      await expect(page.getByRole('button', { name: '⏹ 停止' })).toBeVisible()
+      await expect(page.getByRole('button', { name: '测试连接' })).toBeDisabled()
+      await inputByLabel(page, '模型名称').fill('still-editable')
+      await expect(inputByLabel(page, '模型名称')).toHaveValue('still-editable')
+      await page.getByRole('button', { name: '实时进度' }).click()
+      await expect(page.getByRole('button', { name: '全不选' })).toBeDisabled()
+      await page.getByRole('button', { name: /请求日志/ }).click()
+      await expect(page.getByRole('button', { name: '清空日志' })).toBeDisabled()
+      await page.getByRole('button', { name: '⏹ 停止' }).click()
+      await expect(page.getByRole('button', { name: '▶ 开始测试' })).toBeVisible({ timeout: 10000 })
+      await page.getByRole('button', { name: '测试报告' }).click()
+      await expect(tile).toContainText('通过')
+      await expect(tile).not.toContainText('失败')
+
+      const after = await readHistoryStore(page, 'modelprobe')
+      expect(after).toHaveLength(1)
+      expect(after[0].completedAt).toBe(before[0].completedAt)
+      expect(after[0].durationMs).toBe(before[0].durationMs)
+      expect(after[0].results['top_p_range@chat'].status).toBe('passed')
+    } finally {
+      release()
+    }
+  })
+
+  test('找不到渠道时在报告页提示', async ({ page }) => {
+    await goto(page, /模型探测/)
+    await page.getByRole('button', { name: /历史/ }).click()
+    await writeHistoryStore(page, 'modelprobe', {
+      id: 'p-retry-missing',
+      name: 'e2e-缺渠道',
+      startedAt: '2026-09-29T01:00:00.000Z',
+      completedAt: '2026-09-29T01:00:01.000Z',
+      durationMs: 1000,
+      summary: { passed: 1, failed: 0, abnormal: 0, unsupported: 0, skipped: 0, expected: 0, untested: 0 },
+      logs: [],
+      target: { baseUrl: 'https://missing.example', model: 'probe-model', channelName: '不存在的渠道', overrides: { chat: null, responses: null, anthropic: null } },
+      results: {
+        'top_p_range@chat': { status: 'passed', detail: '通过：非法 top_p 返回 HTTP 400', duration: 10, format: 'chat', repro: { url: 'https://missing.example/v1/chat/completions', headers: {}, body: { top_p: 2 }, status: 400, requestId: null } },
+      },
+    })
+    await page.reload()
+    await goto(page, /模型探测/)
+    await page.getByRole('button', { name: /历史/ }).click()
+    await page.getByRole('button', { name: '查看', exact: true }).click()
+    await page.locator('[data-probe-retry][aria-label="重试 top_p 越界 Chat Completions"]').click()
+    await expect(page.getByTestId('probe-retry-notice')).toContainText('没有找到渠道「不存在的渠道」，不能重试。')
+    const stored = await readHistoryStore(page, 'modelprobe')
+    expect(stored[0].results['top_p_range@chat'].status).toBe('passed')
+    expect(stored[0].completedAt).toBe('2026-09-29T01:00:01.000Z')
+  })
+
+  test('Anthropic 的 top_p 越界固定 max_tokens，400 仍通过', async ({ page }) => {
+    const seen: any[] = []
+    await page.route('**/v1/messages', async route => {
+      const body = route.request().postDataJSON()
+      seen.push(body)
+      if (body?.top_p === 2) {
+        await route.fulfill({ status: 400, contentType: 'application/json', body: JSON.stringify({ error: { message: 'bad top_p' } }) })
+        return
+      }
+      if (body?.max_completion_tokens != null) {
+        await route.fulfill({ status: 200, contentType: 'application/json', body: ANTHROPIC_OK() })
+        return
+      }
+      await route.fulfill({
+        status: 400,
+        contentType: 'application/json',
+        body: JSON.stringify({ error: { message: 'max_tokens is not supported; use max_completion_tokens' } }),
+      })
+    })
+
+    await goto(page, /模型探测/)
+    await page.getByRole('button', { name: '全不选' }).click()
+    await check(page, 'anthropic-basic')
+    await check(page, 'top_p_range')
+    await setupRun(page, 'e2e-越界-anthropic')
+
+    const ranged = seen.filter(body => body?.top_p === 2)
+    expect(ranged).toHaveLength(1)
+    expect(ranged[0].max_tokens).toBe(120)
+    expect(ranged[0].max_completion_tokens).toBeUndefined()
+    const tile = page.locator('[data-probe-tile][data-probe-key="top_p_range@anthropic"]')
+    await expect(tile).toContainText('通过', { timeout: 10000 })
+    await expect(tile).toContainText('HTTP 400')
   })
 })

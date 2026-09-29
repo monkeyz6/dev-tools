@@ -137,6 +137,25 @@ describe('gpt-6-sol 样本', () => {
     assert.equal(next?.status, 'expected')
   })
 
+  it('top_p 越界不走预期拒绝改判', () => {
+    const family = decideFamily(signals)
+    const origin = decideOrigin(signals)
+    const rejected = reclassifyExpected('top_p_range@chat', {
+      status: 'failed',
+      detail: '失败：top_p=2 被接受（HTTP 200）',
+      format: 'chat',
+      repro: { status: 200 },
+    }, family, origin)
+    assert.equal(rejected, null)
+    const passed = reclassifyExpected('top_p_range@chat', {
+      status: 'passed',
+      detail: '通过：非法 top_p 返回 HTTP 400',
+      format: 'chat',
+      repro: { status: 400 },
+    }, family, origin)
+    assert.equal(passed, null)
+  })
+
   it('推理模型接受了 temperature 则改判异常', () => {
     const family = decideFamily(signals)
     const origin = decideOrigin(signals)
