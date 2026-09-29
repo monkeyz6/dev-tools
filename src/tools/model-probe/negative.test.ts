@@ -1,7 +1,7 @@
 import { describe, it } from 'node:test'
 import assert from 'node:assert/strict'
 import { setProbeAnthropicCapField } from './protocol.ts'
-import { probeNon2xxResponseBody, probeTopPRangeBody, scoreTopPRange } from './negative.ts'
+import { probeKeptResponseBody, probeNon2xxResponseBody, probeTopPRangeBody, scoreTopPRange } from './negative.ts'
 
 describe('scoreTopPRange', () => {
   it('其它 4xx 通过，2xx 失败', () => {
@@ -67,5 +67,18 @@ describe('probeNon2xxResponseBody', () => {
     assert.equal(probeNon2xxResponseBody(204, body), undefined)
     assert.equal(probeNon2xxResponseBody(0, body), undefined)
     assert.equal(probeNon2xxResponseBody(null, body), undefined)
+  })
+})
+
+describe('probeKeptResponseBody', () => {
+  it('2xx 正文留下，非 2xx 的空正文也留下，未发出的 null 不写', () => {
+    const body = { choices: [{ message: { content: 'OK' } }] }
+    assert.equal(probeKeptResponseBody(200, body), body)
+    assert.equal(probeKeptResponseBody(204, 'raw'), 'raw')
+    assert.equal(probeKeptResponseBody(401, null), null)
+    assert.equal(probeKeptResponseBody(200, null), undefined)
+    assert.deepEqual(probeKeptResponseBody(0, { error: '请求超时或已中止' }), { error: '请求超时或已中止' })
+    assert.equal(probeKeptResponseBody(0, null), undefined)
+    assert.equal(probeKeptResponseBody(null, null), undefined)
   })
 })

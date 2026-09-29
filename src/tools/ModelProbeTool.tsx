@@ -37,7 +37,7 @@ import {
 } from './model-probe/profiles'
 import { decideOrigin, signalsFromProbeLogs } from './model-probe/origin'
 import { probeRequestIdFromHeaders, probeRequestIdFromRecord, probeRequestIdHeaders, probeShownRequestId } from './model-probe/request-id'
-import { probeNon2xxResponseBody, probeTopPRangeBody, scoreTopPRange } from './model-probe/negative'
+import { probeKeptResponseBody, probeTopPRangeBody, scoreTopPRange } from './model-probe/negative'
 import { probeMatchRetryChannel, probeReplaceCellLogs } from './model-probe/cell'
 
 // ─── Tool: 模型探测 ─────────────────────────────────────────────────────────────
@@ -298,7 +298,7 @@ const probeReproOf = (log: ProbeLog): ProbeResult['repro'] => {
     requestId: probeRequestIdFromRecord(responseHeaders) ?? log.requestId,
     ...(Object.keys(responseHeaders).length ? { responseHeaders } : {}),
   }
-  const responseBody = probeNon2xxResponseBody(log.status, log.responseBody)
+  const responseBody = probeKeptResponseBody(log.status, log.responseBody)
   if (responseBody !== undefined) repro.responseBody = responseBody
   return repro
 }

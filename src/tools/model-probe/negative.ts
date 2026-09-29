@@ -43,3 +43,9 @@ export function probeNon2xxResponseBody(status: number | null, body: unknown): u
   if (status >= 200 && status < 300) return undefined
   return body
 }
+
+/** 弹层要看正文：有内容就留下（含 2xx）；非 2xx 的空正文仍留下；未发出的 null 不写。 */
+export function probeKeptResponseBody(status: number | null, body: unknown): unknown | undefined {
+  if (body !== undefined && body !== null) return body
+  return probeNon2xxResponseBody(status, body)
+}

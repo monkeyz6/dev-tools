@@ -1070,7 +1070,7 @@ interface MatrixSheetItem {
   responseBody?: unknown
 }
 
-function matrixSheetItem(name: string, subtitle: string, result: ProbeHtmlResult, kind: ProbeMatrixKind): MatrixSheetItem {
+function matrixSheetItem(name: string, subtitle: string, result: ProbeHtmlResult): MatrixSheetItem {
   const note = presentMatrixNote(result.detail || '')
   const item: MatrixSheetItem = {
     name,
@@ -1088,7 +1088,7 @@ function matrixSheetItem(name: string, subtitle: string, result: ProbeHtmlResult
   }
   const requestId = probeShownRequestId(result.repro)
   if (requestId) item.requestId = requestId
-  if (kind === 'problems' && result.repro) {
+  if (result.repro) {
     item.url = result.repro.url
     item.body = result.repro.body
     if ('responseBody' in result.repro) item.responseBody = result.repro.responseBody
@@ -1107,7 +1107,7 @@ function matrixCellHtml(name: string, subtitle: string, result: ProbeHtmlResult 
   if (!opens) {
     return `<td><span class="dot-st ${esc(result.status)}">${esc(MATRIX_STATUS[result.status])}</span></td>`
   }
-  const item = matrixSheetItem(name, subtitle, result, kind)
+  const item = matrixSheetItem(name, subtitle, result)
   const index = flat.length
   flat.push(item)
   const aria = [name, subtitle, item.statusLabel].filter(Boolean).join(' ')
@@ -1352,8 +1352,8 @@ function probeMatrixSheet(payload: string, originsPayload: string): string {
 <script>${MATRIX_SHEET_SCRIPT}</script>`
 }
 
-// 两份表静止时状态字一样。整表弹层的 Request ID 从响应头按既定顺序读取，不写请求体、响应体、地址和响应头原文。
-// 异常文件里通过和符合预期只留状态字；失败、异常、不支持的弹层再带上请求与非 2xx 响应。
+// 两份表静止时状态字一样。能打开的弹层带上地址、请求体、已留下的响应体和 Request ID，不写请求头和响应头原文。
+// 异常文件里通过和符合预期只留状态字，不带这些内容。
 export function buildProbeMatrixHtml(
   reports: ProbeHtmlReport[],
   tests: ProbeHtmlTestMeta[],

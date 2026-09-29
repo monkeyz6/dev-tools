@@ -2019,6 +2019,8 @@ test.describe('模型探测', () => {
     await expect(passed).toContainText('OpenAI Chat Completions')
     await expect(passed).toContainText('通过')
     await expect(passed).toContainText('req-e2e-pass')
+    await expect(passed).toContainText('请求体')
+    await expect(passed).toContainText('https://a.example/v1/chat/completions')
     await expect(passed).toContainText('↑1')
     await expect(passed).not.toContainText('基础请求返回成功')
     await expect(passed).not.toContainText('OpenAI 系兼容')
@@ -2057,8 +2059,8 @@ test.describe('模型探测', () => {
     expect(manyHtml).not.toContain('模型对比')
     expect(manyHtml).not.toContain('份报告')
     expect(manyHtml).toContain('req-e2e-pass')
-    expect(manyHtml).not.toContain('"body"')
-    expect(manyHtml).not.toContain('https://a.example/v1/chat/completions')
+    expect(manyHtml).toContain('"body"')
+    expect(manyHtml).toContain('https://a.example/v1/chat/completions')
     expect(manyHtml).not.toContain('Bearer secret')
     const [bad] = await Promise.all([
       page.waitForEvent('download'),
@@ -2084,7 +2086,9 @@ test.describe('模型探测', () => {
     await expect(sheet).toContainText('↑1')
     await expect(sheet).toContainText('Request ID')
     await expect(sheet).toContainText('req-e2e-pass')
-    await expect(preview.locator('#sheetBodyWrap')).toBeHidden()
+    await expect(sheet).toContainText('请求体')
+    await expect(sheet).toContainText('https://a.example/v1/chat/completions')
+    await expect(preview.locator('#sheetBodyWrap')).toBeVisible()
     await expect(preview.locator('#sheetRespWrap')).toBeHidden()
     await expect(sheet).not.toContainText('基础请求返回成功')
     await sheet.getByRole('button', { name: '关闭' }).click()
@@ -2263,7 +2267,7 @@ test.describe('模型探测', () => {
     expect(cell.status).toBe('passed')
     expect(cell.repro.requestId).toBe('log-range-9')
     expect(cell.repro.responseBody.error.tail).toBe('FULL-RANGE')
-    expect(stored[0].results['chat-basic'].repro.responseBody).toBeUndefined()
+    expect(stored[0].results['chat-basic'].repro.responseBody.choices[0].message.content).toBe('OK')
 
     const [md] = await Promise.all([
       page.waitForEvent('download'),
@@ -2373,7 +2377,7 @@ test.describe('模型探测', () => {
     expect(after[0].results['temperature@chat'].detail).toBe(temperatureDetail)
     expect(after[0].results['chat-basic'].status).toBe('passed')
     expect(after[0].results['top_p_range@chat'].status).toBe('failed')
-    expect(after[0].results['top_p_range@chat'].repro.responseBody).toBeUndefined()
+    expect(after[0].results['top_p_range@chat'].repro.responseBody.id).toBe('chatcmpl-probe')
 
     mode = '500'
     await page.locator('[data-probe-retry][aria-label="重试 top_p 越界 Chat Completions"]').click()
