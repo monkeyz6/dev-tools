@@ -2507,5 +2507,111 @@ test.describe('模型探测', () => {
     const tile = page.locator('[data-probe-tile][data-probe-key="top_p_range@anthropic"]')
     await expect(tile).toContainText('通过', { timeout: 10000 })
     await expect(tile).toContainText('HTTP 400')
+
+    await page.locator('[data-probe-retry][aria-label="重试 top_p 越界 Anthropic Messages"]').click()
+    await expect(tile).toContainText('通过', { timeout: 10000 })
+    const rangedAfter = seen.filter(body => body?.top_p === 2)
+    expect(rangedAfter).toHaveLength(2)
+    expect(rangedAfter[1].max_tokens).toBe(120)
+    expect(rangedAfter[1].max_completion_tokens).toBeUndefined()
+  })
+
+  test('Anthropic 单格重试沿用已改用的 max_completion_tokens', async ({ page }) => {
+    const seen: any[] = []
+    await page.route('**/v1/messages', async route => {
+      const body = route.request().postDataJSON()
+      seen.push(body)
+      if (body?.max_completion_tokens != null) {
+        await route.fulfill({ status: 200, contentType: 'application/json', body: ANTHROPIC_OK() })
+        return
+      }
+      await route.fulfill({
+        status: 400,
+        contentType: 'application/json',
+        body: JSON.stringify({ error: { message: 'max_tokens is not supported; use max_completion_tokens' } }),
+      })
+    })
+
+    await goto(page, /模型探测/)
+    await page.getByRole('button', { name: '全不选' }).click()
+    await check(page, 'anthropic-basic')
+    await check(page, 'temperature')
+    await setupRun(page, 'e2e-重试上限字段')
+
+    const tile = page.locator('[data-probe-tile][data-probe-key="temperature@anthropic"]')
+    await expect(tile).toContainText('通过', { timeout: 10000 })
+    await page.locator('[data-probe-retry][aria-label="重试 temperature Anthropic Messages"]').click()
+    await expect(tile).toContainText('通过', { timeout: 10000 })
+    const temperatureBodies = seen.filter(body => body?.temperature != null)
+    expect(temperatureBodies.length).toBeGreaterThanOrEqual(2)
+    const retried = temperatureBodies.at(-1)
+    expect(retried.max_completion_tokens).toBe(120)
+    expect(retried.max_tokens).toBeUndefined()
+  })
+
+  test('历史报告重试仍按官方地址改判，并同步实时进度', async ({ page }) => {
+    await page.route('**/v1/chat/completions', route => route.fulfill({
+      status: 404,
+      contentType: 'application/json',
+      body: JSON.stringify({ error: { message: 'No such model' } }),
+    }))
+
+    await goto(page, /模型探测/)
+    await addChannel(page, { apiKey: 'sk-test-probe', baseUrl: 'https://api.anthropic.com', name: '官方 Claude' })
+    await page.getByRole('button', { name: /历史/ }).click()
+    await writeHistoryStore(page, 'modelprobe', {
+      id: 'p-retry-history',
+      name: 'e2e-历史改判',
+      startedAt: '2026-09-29T01:00:00.000Z',
+      completedAt: '2026-09-29T01:00:01.000Z',
+      durationMs: 1000,
+      summary: { passed: 0, failed: 1, abnormal: 0, unsupported: 0, skipped: 0, expected: 0, untested: 0 },
+      logs: [],
+      verdict: {
+        family: { label: 'Claude', reasons: ['保留家族'] },
+        access: { label: '官方直连', reasons: ['保留接入'] },
+        upstream: { label: 'Anthropic 官方', reasons: ['重试前的依据'] },
+      },
+      target: {
+        baseUrl: 'https://api.anthropic.com',
+        model: 'claude-sonnet-4-5',
+        channelName: '官方 Claude',
+        overrides: { chat: null, responses: null, anthropic: null },
+      },
+      results: {
+        'temperature@chat': {
+          status: 'failed',
+          detail: 'No such model',
+          duration: 10,
+          format: 'chat',
+          repro: {
+            url: 'https://api.anthropic.com/v1/chat/completions',
+            headers: {},
+            body: { temperature: 0 },
+            status: 404,
+            requestId: null,
+          },
+        },
+      },
+    })
+    await page.reload()
+    await goto(page, /模型探测/)
+    await check(page, 'expect-reject')
+    await page.getByRole('button', { name: /历史/ }).click()
+    await page.getByRole('button', { name: '查看', exact: true }).click()
+    await page.locator('[data-probe-retry][aria-label="重试 temperature Chat Completions"]').click()
+
+    const tile = page.locator('[data-probe-tile][data-probe-key="temperature@chat"]')
+    await expect(tile).toContainText('符合预期', { timeout: 10000 })
+    await expect(tile).toContainText('Claude 官方不提供 Chat Completions')
+    const stored = await readHistoryStore(page, 'modelprobe')
+    expect(stored).toHaveLength(1)
+    expect(stored[0].results['temperature@chat'].status).toBe('expected')
+    expect(stored[0].verdict.upstream).toEqual({ label: 'Anthropic 官方', reasons: ['重试前的依据'] })
+    expect(stored[0].verdict.access.reasons).toEqual(['保留接入'])
+
+    await page.getByRole('button', { name: '实时进度' }).click()
+    const liveRow = page.locator('div.flex.items-center.gap-3').filter({ has: page.locator('input[aria-label="选择 temperature"]') })
+    await expect(liveRow).toContainText('符合预期')
   })
 })

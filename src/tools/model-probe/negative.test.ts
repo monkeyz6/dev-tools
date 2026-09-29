@@ -1,7 +1,7 @@
 import { describe, it } from 'node:test'
 import assert from 'node:assert/strict'
 import { setProbeAnthropicCapField } from './protocol.ts'
-import { probeKeptResponseBody, probeNon2xxResponseBody, probeTopPRangeBody, scoreTopPRange } from './negative.ts'
+import { probeKeptResponseBody, probeNon2xxResponseBody, probeSettledAnthropicCap, probeTopPRangeBody, scoreTopPRange } from './negative.ts'
 
 describe('scoreTopPRange', () => {
   it('其它 4xx 通过，2xx 失败', () => {
@@ -67,6 +67,34 @@ describe('probeNon2xxResponseBody', () => {
     assert.equal(probeNon2xxResponseBody(204, body), undefined)
     assert.equal(probeNon2xxResponseBody(0, body), undefined)
     assert.equal(probeNon2xxResponseBody(null, body), undefined)
+  })
+})
+
+describe('probeSettledAnthropicCap', () => {
+  it('Anthropic 请求体带 max_completion_tokens 时沿用该字段', () => {
+    assert.equal(probeSettledAnthropicCap({
+      'chat-basic': { format: 'chat', repro: { body: { max_completion_tokens: 120, max_tokens: 120 } } },
+      'top_p_range@anthropic': { format: 'anthropic', repro: { body: { max_tokens: 120, top_p: 2 } } },
+      'anthropic-basic': { format: 'anthropic', repro: { body: { max_completion_tokens: 120, messages: [] } } },
+    }), 'max_completion_tokens')
+  })
+
+  it('键名以 @anthropic 结尾、或结论写了已改用时也算', () => {
+    assert.equal(probeSettledAnthropicCap({
+      'temperature@anthropic': { repro: { body: { max_completion_tokens: 120 } } },
+    }), 'max_completion_tokens')
+    assert.equal(probeSettledAnthropicCap({
+      'anthropic-basic': { format: 'anthropic', detail: '基础请求返回成功。上游拒绝 max_tokens，已改用 max_completion_tokens。', repro: { body: ['not-an-object'] } },
+    }), 'max_completion_tokens')
+  })
+
+  it('没有 Anthropic 证据时仍是 max_tokens', () => {
+    assert.equal(probeSettledAnthropicCap(null), 'max_tokens')
+    assert.equal(probeSettledAnthropicCap({}), 'max_tokens')
+    assert.equal(probeSettledAnthropicCap({
+      'temperature@chat': { format: 'chat', detail: '通过', repro: { body: { max_completion_tokens: 16 } } },
+      'anthropic-basic': { format: 'anthropic', repro: { body: { max_tokens: 120 } } },
+    }), 'max_tokens')
   })
 })
 
