@@ -1,5 +1,5 @@
 import { test, expect } from '@playwright/test'
-import { goto, inputByLabel, readKv, channelCard } from './helpers'
+import { goto, inputByLabel, readKv, channelCard, readHistoryStore, writeHistoryStore } from './helpers'
 import { readFileSync } from 'fs'
 
 test.beforeEach(async ({ page }) => {
@@ -115,13 +115,20 @@ async function addChannel(page: import('@playwright/test').Page, opts: { apiKey:
   await page.getByRole('button', { name: '保存渠道' }).click()
 }
 
-/** 新增渠道 + 填模型 + 开始测试（弹窗确认）。调用前应先完成测试项勾选（勾选控件在「实时进度」面板里）。 */
+async function openFinishedReport(page: import('@playwright/test').Page, name: string) {
+  const row = page.locator('[data-testid="probe-history-row"]').filter({ hasText: name })
+  await expect(row).toBeVisible({ timeout: 30000 })
+  await row.getByRole('button', { name: '查看' }).click()
+}
+
+/** 新增渠道 + 填模型 + 开始测试（弹窗确认）。调用前应先完成测试项勾选（勾选控件在「实时进度」面板里）。跑完停在历史，这里再打开那一份报告。 */
 async function setupRun(page: import('@playwright/test').Page, name: string, opts: { apiKey?: string } = {}) {
   await addChannel(page, { apiKey: opts.apiKey ?? 'sk-test-probe' })
   await inputByLabel(page, '模型名称').fill('probe-model')
   await page.getByRole('button', { name: '▶ 开始测试' }).click()
   await page.getByRole('dialog').locator('input').fill(name)
   await page.getByRole('button', { name: '确认并开始' }).click()
+  await openFinishedReport(page, name)
 }
 
 test.describe('模型探测', () => {
@@ -211,6 +218,7 @@ test.describe('模型探测', () => {
     await page.getByRole('button', { name: '▶ 开始测试' }).click()
     await page.getByRole('dialog').locator('input').fill('e2e-预期拒绝关闭')
     await page.getByRole('button', { name: '确认并开始' }).click()
+    await openFinishedReport(page, 'e2e-预期拒绝关闭')
 
     const tile = page.locator('main').getByRole('button', { name: /temperature/ })
     await expect(tile).toContainText('不支持', { timeout: 10000 })
@@ -241,6 +249,7 @@ test.describe('模型探测', () => {
     await page.getByRole('button', { name: '▶ 开始测试' }).click()
     await page.getByRole('dialog').locator('input').fill('e2e-预期拒绝开启')
     await page.getByRole('button', { name: '确认并开始' }).click()
+    await openFinishedReport(page, 'e2e-预期拒绝开启')
 
     const tile = page.locator('main').getByRole('button', { name: /temperature/ })
     await expect(tile).toContainText('符合预期', { timeout: 10000 })
@@ -254,6 +263,7 @@ test.describe('模型探测', () => {
     await page.getByRole('button', { name: '▶ 开始测试' }).click()
     await page.getByRole('dialog').locator('input').fill('e2e-预期拒绝却成功')
     await page.getByRole('button', { name: '确认并开始' }).click()
+    await openFinishedReport(page, 'e2e-预期拒绝却成功')
     const again = page.locator('main').getByRole('button', { name: /temperature/ })
     await expect(again).toContainText('异常', { timeout: 10000 })
     await expect(again).toContainText('不应接受 temperature')
@@ -728,7 +738,7 @@ test.describe('模型探测', () => {
     await expect(page.locator('main')).toContainText('通过 1', { timeout: 10000 })
     await page.getByRole('button', { name: /历史/ }).click()
     await expect(page.locator('main')).toContainText('已存 1 / 20 条历史报告')
-    await page.getByRole('button', { name: '查看' }).click()
+    await page.getByRole('button', { name: '查看', exact: true }).click()
     await expect(page.locator('main')).toContainText('e2e-历史报告')
   })
 
@@ -1160,7 +1170,7 @@ test.describe('模型探测', () => {
     const main = page.locator('main')
     await expect(main).toContainText('e2e-历史结构化Anthropic')
     await expect(main).toContainText('通过 1 · 失败 0 · 不支持 0 · 符合预期 0 · 未测 0')
-    await main.getByRole('button', { name: '查看' }).click()
+    await main.getByRole('button', { name: '查看', exact: true }).click()
     await expect(main).toContainText('通过 1')
     await expect(main).not.toContainText('不支持 1')
     await expect(main.getByRole('button', { name: /结构化输出/ })).toHaveCount(0)
@@ -1802,6 +1812,7 @@ test.describe('模型探测', () => {
     await page.getByRole('button', { name: '▶ 开始测试' }).click()
     await page.getByRole('dialog').locator('input').fill('e2e-原生联网')
     await page.getByRole('button', { name: '确认并开始' }).click()
+    await openFinishedReport(page, 'e2e-原生联网')
 
     const tile = page.locator('main').getByRole('button', { name: /OpenAI 联网搜索/ })
     await expect(tile).toContainText('已调用 web_search', { timeout: 10000 })
@@ -1835,6 +1846,7 @@ test.describe('模型探测', () => {
     await page.getByRole('button', { name: '▶ 开始测试' }).click()
     await page.getByRole('dialog').locator('input').fill('e2e-原生明确不支持')
     await page.getByRole('button', { name: '确认并开始' }).click()
+    await openFinishedReport(page, 'e2e-原生明确不支持')
 
     const tile = page.locator('main').getByRole('button', { name: /OpenAI 联网搜索/ })
     await expect(tile).toContainText('不支持', { timeout: 10000 })
@@ -1859,9 +1871,238 @@ test.describe('模型探测', () => {
     await page.getByRole('button', { name: '▶ 开始测试' }).click()
     await page.getByRole('dialog').locator('input').fill('e2e-原生无证据')
     await page.getByRole('button', { name: '确认并开始' }).click()
+    await openFinishedReport(page, 'e2e-原生无证据')
 
     const tile = page.locator('main').getByRole('button', { name: /OpenAI 联网搜索/ })
     await expect(tile).toContainText('异常', { timeout: 10000 })
     await expect(tile).toContainText('没有 web_search 的调用或结果证据')
+  })
+
+  test('多个模型的原生工具取并集', async ({ page }) => {
+    await goto(page, /模型探测/)
+    await inputByLabel(page, '模型名称').fill('gpt-4o, deepseek-chat')
+    await expect(page.locator('input[data-id="native-openai-web_search"]')).toBeVisible()
+    await inputByLabel(page, '模型名称').fill('deepseek-chat')
+    await expect(page.locator('input[data-id="native-openai-web_search"]')).toHaveCount(0)
+  })
+
+  test('多个模型各写一条历史，没写占位符时补上模型名', async ({ page }) => {
+    await page.route('**/v1/chat/completions', route =>
+      route.fulfill({ status: 200, contentType: 'application/json', body: CHAT_OK(10) }))
+
+    await goto(page, /模型探测/)
+    await page.getByRole('button', { name: '全不选' }).click()
+    await check(page, 'chat-basic')
+    await addChannel(page, { apiKey: 'sk-test-probe' })
+    await inputByLabel(page, '模型名称').fill('alpha-one, beta-two')
+    await page.getByRole('button', { name: '▶ 开始测试' }).click()
+    const dialog = page.getByRole('dialog')
+    await expect(dialog).toContainText('{model}')
+    await expect(dialog).toContainText('名称 · 模型名')
+    await dialog.locator('input').fill('批量回归')
+    await dialog.getByRole('button', { name: '确认并开始' }).click()
+
+    const main = page.locator('main')
+    await expect(main).toContainText('批量回归 · alpha-one', { timeout: 20000 })
+    await expect(main).toContainText('批量回归 · beta-two')
+    await expect(page.getByRole('checkbox', { name: '选择 批量回归 · alpha-one' })).toBeChecked()
+    await expect(page.getByRole('checkbox', { name: '选择 批量回归 · beta-two' })).toBeChecked()
+  })
+
+  test('历史多选：先查看详情，再导出卡片或矩阵', async ({ page }) => {
+    await goto(page, /模型探测/)
+    await page.evaluate(() => new Promise<void>((resolve, reject) => {
+      const req = indexedDB.open('dev-toolkit-history')
+      req.onupgradeneeded = () => {
+        const db = req.result
+        if (!db.objectStoreNames.contains('modelprobe')) db.createObjectStore('modelprobe', { keyPath: 'id' })
+      }
+      req.onsuccess = () => {
+        const db = req.result
+        const tx = db.transaction('modelprobe', 'readwrite')
+        const os = tx.objectStore('modelprobe')
+        const base = {
+          startedAt: '2026-09-29T01:00:00.000Z',
+          durationMs: 1000,
+          summary: { passed: 0, failed: 0, abnormal: 0, unsupported: 0, skipped: 0, expected: 0, untested: 0 },
+          logs: [],
+        }
+        os.put({
+          ...base,
+          id: 'p-matrix-a',
+          name: 'e2e-卡片甲',
+          completedAt: '2026-09-29T01:00:01.000Z',
+          target: { baseUrl: 'https://a.example', model: 'gpt-4o', channelName: '渠道甲', overrides: { chat: null, responses: null, anthropic: null } },
+          results: {
+            'chat-basic': { status: 'passed', detail: '基础请求返回成功', duration: 10, format: 'chat', usage: { input: 1, output: 2, cacheRead: null, cacheWrite: null }, repro: null },
+            'temperature@chat': { status: 'skipped', detail: '用户未勾选', duration: null, format: 'chat', repro: null },
+          },
+        })
+        os.put({
+          ...base,
+          id: 'p-matrix-b',
+          name: 'e2e-卡片乙',
+          completedAt: '2026-09-29T02:00:01.000Z',
+          target: { baseUrl: 'https://b.example', model: 'deepseek-chat', channelName: '渠道乙', overrides: { chat: null, responses: null, anthropic: null } },
+          results: {
+            'chat-basic': { status: 'failed', detail: '失败', duration: 10, format: 'chat', usage: { input: 1, output: 2, cacheRead: null, cacheWrite: null }, repro: null },
+          },
+        })
+        tx.oncomplete = () => resolve()
+        tx.onerror = () => reject(tx.error)
+      }
+      req.onerror = () => reject(req.error)
+    }))
+    await page.reload()
+    await goto(page, /模型探测/)
+    await page.getByRole('button', { name: /历史/ }).click()
+    const viewBtn = page.getByRole('button', { name: '查看所选' })
+    await expect(viewBtn).toBeDisabled()
+    await expect(page.getByRole('button', { name: '导出 HTML' })).toHaveCount(0)
+
+    await page.getByRole('checkbox', { name: '选择 e2e-卡片甲' }).check()
+    await viewBtn.click()
+    await expect(page.getByRole('heading', { name: 'e2e-卡片甲' })).toBeVisible()
+    await expect(page.getByRole('button', { name: /OpenAI Chat Completions/ })).toBeVisible()
+    const [one] = await Promise.all([
+      page.waitForEvent('download'),
+      page.getByRole('button', { name: '导出 HTML' }).click(),
+    ])
+    expect(one.suggestedFilename()).toBe('e2e-卡片甲.html')
+    const oneHtml = readFileSync(await one.path(), 'utf8')
+    expect(oneHtml).toContain('class="tile"')
+
+    await page.getByRole('button', { name: /历史/ }).click()
+    await page.getByRole('checkbox', { name: '选择 e2e-卡片乙' }).check()
+    await viewBtn.click()
+    const matrix = page.getByTestId('probe-matrix-view')
+    await expect(matrix).toBeVisible()
+    await expect(matrix).toContainText('gpt-4o · 渠道甲')
+    await expect(matrix).toContainText('deepseek-chat · 渠道乙')
+    await expect(matrix).toContainText('已跳过')
+    await expect(matrix.locator('.probe-matrix-gap')).toBeVisible()
+    await expect(matrix.locator('.probe-tile')).toHaveCount(0)
+    await matrix.getByRole('button', { name: 'temperature Chat Completions 已跳过' }).click()
+    await expect(page.getByRole('dialog')).toContainText('用户未勾选')
+    await page.getByRole('dialog').getByRole('button', { name: '关闭' }).click()
+    const [many] = await Promise.all([
+      page.waitForEvent('download'),
+      matrix.getByRole('button', { name: '导出 HTML' }).click(),
+    ])
+    expect(many.suggestedFilename()).toBe('模型对比_2.html')
+    const manyHtml = readFileSync(await many.path(), 'utf8')
+    expect(manyHtml).toContain('class="matrix-cell')
+    expect(manyHtml).toContain('gpt-4o · 渠道甲')
+    expect(manyHtml).toContain('deepseek-chat · 渠道乙')
+    expect(manyHtml).toContain('已跳过')
+    expect(manyHtml).toContain('class="gap"')
+    expect(manyHtml).not.toContain('.tile')
+    expect(manyHtml).not.toContain('class="tile"')
+  })
+
+  test('删除历史后，打开的矩阵或卡片跟着更新', async ({ page }) => {
+    const base = {
+      startedAt: '2026-09-29T01:00:00.000Z',
+      durationMs: 1000,
+      summary: { passed: 1, failed: 0, abnormal: 0, unsupported: 0, skipped: 0, expected: 0, untested: 0 },
+      logs: [],
+      results: {
+        'chat-basic': { status: 'passed', detail: '基础请求返回成功', duration: 10, format: 'chat', usage: { input: 1, output: 2, cacheRead: null, cacheWrite: null }, repro: null },
+      },
+    }
+    const reports = [
+      { id: 'p-del-a', name: 'e2e-删除甲', model: 'model-甲', completedAt: '2026-09-29T01:00:01.000Z' },
+      { id: 'p-del-b', name: 'e2e-删除乙', model: 'model-乙', completedAt: '2026-09-29T01:00:02.000Z' },
+      { id: 'p-del-c', name: 'e2e-删除丙', model: 'model-丙', completedAt: '2026-09-29T01:00:03.000Z' },
+    ]
+    await goto(page, /模型探测/)
+    await page.getByRole('button', { name: /历史/ }).click()
+    await expect(page.locator('main')).toContainText('暂无历史报告')
+    for (const item of reports) {
+      await writeHistoryStore(page, 'modelprobe', {
+        ...base,
+        id: item.id,
+        name: item.name,
+        completedAt: item.completedAt,
+        target: { baseUrl: 'https://a.example', model: item.model, channelName: '渠道', overrides: { chat: null, responses: null, anthropic: null } },
+      })
+    }
+    await page.reload()
+    await goto(page, /模型探测/)
+    await page.getByRole('button', { name: /历史/ }).click()
+    for (const item of reports) await page.getByRole('checkbox', { name: `选择 ${item.name}` }).check()
+    await page.getByRole('button', { name: '查看所选' }).click()
+    const matrix = page.getByTestId('probe-matrix-view')
+    await expect(matrix).toContainText('3 份报告')
+
+    await page.getByRole('button', { name: /历史/ }).click()
+    await page.locator('[data-testid="probe-history-row"]').filter({ hasText: 'e2e-删除甲' }).getByRole('button', { name: '删除', exact: true }).click()
+    await page.getByRole('button', { name: '测试报告' }).click()
+    await expect(matrix).toContainText('2 份报告')
+    await expect(matrix).not.toContainText('model-甲')
+    await expect(matrix).toContainText('model-丙')
+
+    await page.getByRole('button', { name: /历史/ }).click()
+    await page.getByRole('checkbox', { name: '选择 e2e-删除丙' }).uncheck()
+    await page.getByRole('button', { name: /删除所选/ }).click()
+    await page.getByRole('button', { name: '测试报告' }).click()
+    await expect(page.getByTestId('probe-matrix-view')).toHaveCount(0)
+    await expect(page.getByRole('heading', { name: 'e2e-删除丙' })).toBeVisible()
+
+    await page.getByRole('button', { name: /历史/ }).click()
+    await page.getByRole('button', { name: '清空历史' }).click()
+    await page.getByRole('button', { name: '测试报告' }).click()
+    await expect(page.locator('main')).toContainText('完成一轮测试后，报告将显示在这里')
+    await page.getByRole('button', { name: /历史/ }).click()
+    await expect(page.locator('main')).toContainText('暂无历史报告')
+  })
+
+  test('测试进行中不能清空日志', async ({ page }) => {
+    let release: () => void = () => {}
+    const gate = new Promise<void>(resolve => { release = resolve })
+    await page.route('**/v1/chat/completions', async route => {
+      await gate
+      await route.fulfill({ status: 200, contentType: 'application/json', body: CHAT_OK(12) })
+    })
+    try {
+      await goto(page, /模型探测/)
+      await page.getByRole('button', { name: '全不选' }).click()
+      await check(page, 'chat-basic')
+      await addChannel(page, { apiKey: 'sk-test-probe' })
+      await inputByLabel(page, '模型名称').fill('probe-model')
+      await page.getByRole('button', { name: '▶ 开始测试' }).click()
+      await page.getByRole('dialog').locator('input').fill('e2e-日志锁定')
+      await page.getByRole('button', { name: '确认并开始' }).click()
+      await page.getByRole('button', { name: /请求日志/ }).click()
+      await expect(page.getByRole('button', { name: '清空日志' })).toBeDisabled()
+    } finally {
+      release()
+    }
+    await expect(page.getByRole('button', { name: '历史 (1)', exact: true })).toBeVisible({ timeout: 15000 })
+    await page.getByRole('button', { name: /请求日志/ }).click()
+    await expect(page.getByRole('button', { name: '清空日志' })).toBeEnabled()
+  })
+
+  test('一批超过 20 个模型时保留较新的并提示', async ({ page }) => {
+    test.setTimeout(45_000)
+    await page.route('**/v1/chat/completions', route =>
+      route.fulfill({ status: 200, contentType: 'application/json', body: CHAT_OK(10) }))
+    await goto(page, /模型探测/)
+    await page.getByRole('button', { name: '全不选' }).click()
+    await check(page, 'chat-basic')
+    await addChannel(page, { apiKey: 'sk-test-probe' })
+    const models = Array.from({ length: 21 }, (_, i) => `m${String(i + 1).padStart(2, '0')}`)
+    await inputByLabel(page, '模型名称').fill(models.join(','))
+    await page.getByRole('button', { name: '▶ 开始测试' }).click()
+    await page.getByRole('dialog').locator('input').fill('上限')
+    await page.getByRole('button', { name: '确认并开始' }).click()
+
+    const note = page.getByTestId('probe-history-note')
+    await expect(note).toContainText('本批 21 个模型里，较早的 1 份超出历史上限 20 条', { timeout: 30000 })
+    await expect(page.getByTestId('probe-history-row')).toHaveCount(20)
+    const stored = await readHistoryStore(page, 'modelprobe')
+    expect(stored).toHaveLength(20)
+    const missing = models.filter(model => !stored.some(item => item.name === `上限 · ${model}`))
+    expect(missing).toHaveLength(1)
   })
 })

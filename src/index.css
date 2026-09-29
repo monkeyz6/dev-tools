@@ -736,6 +736,67 @@ textarea:focus-visible { outline: none; }
 .probe-status-text.is-untested,
 .probe-status-text.is-skipped { color: var(--t3); }
 
+/* 对比表跟结果区同一个滚动容器，表头和首列才能粘住；外层再套 overflow 会把 sticky 关掉。 */
+.probe-matrix {
+  border-collapse: separate;
+  border-spacing: 0;
+  width: max-content;
+  min-width: 100%;
+}
+.probe-matrix th,
+.probe-matrix td {
+  padding: 10px 14px;
+  border-bottom: 1px solid var(--border);
+  vertical-align: middle;
+  background: var(--bg);
+  white-space: nowrap;
+}
+.probe-matrix thead th {
+  position: sticky;
+  top: 0;
+  z-index: 2;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text);
+  text-align: left;
+  box-shadow: inset 0 -1px 0 var(--border);
+}
+.probe-matrix .probe-matrix-rowh {
+  position: sticky;
+  left: 0;
+  z-index: 1;
+  min-width: 14rem;
+  max-width: 18rem;
+  text-align: left;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text);
+  white-space: normal;
+}
+.probe-matrix thead .probe-matrix-rowh { z-index: 3; }
+.probe-matrix .probe-matrix-group td {
+  position: static;
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--t3);
+  background: var(--s1);
+  text-align: left;
+}
+.probe-matrix-cell {
+  appearance: none;
+  border: 0;
+  background: transparent;
+  padding: 0;
+  font: inherit;
+  cursor: pointer;
+}
+.probe-matrix td.probe-matrix-gap {
+  color: var(--t3);
+  text-align: center;
+}
+
 /* 窄窗口里五个页签放不下一行。共享分段控件是 inline-flex 且按钮不换行，
    这里只在探测页把它收成容器宽度并允许换行，避免首尾页签被裁掉。 */
 @media (max-width: 1023px) {

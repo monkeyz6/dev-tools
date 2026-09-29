@@ -14,7 +14,7 @@ export const fieldOf = (page: Page, label: string): Locator =>
 
 /** 按字段标签定位输入框 */
 export const inputByLabel = (page: Page, label: string): Locator =>
-  fieldOf(page, label).locator('input')
+  fieldOf(page, label).locator('input, textarea').first()
 
 /** 按字段标签定位自绘下拉的触发按钮（CustomSelect 是 button + 绝对定位下拉） */
 export const selectByLabel = (page: Page, label: string): Locator =>

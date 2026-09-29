@@ -59,7 +59,7 @@ interface ProbeHtmlItem {
   name: string
   explain: string
   formatLabel: string
-  status: Exclude<ProbeHtmlStatus, 'skipped'>
+  status: ProbeHtmlStatus
   detail: string
   duration: number | null
   usage?: ProbeHtmlResult['usage']
@@ -77,6 +77,7 @@ interface ProbeHtmlGroup { title: string; items: ProbeHtmlItem[] }
 const STATUS_LABEL: Record<Exclude<ProbeHtmlStatus, 'skipped'>, string> = {
   passed: '通过', failed: '失败', abnormal: '异常', unsupported: '不支持', expected: '符合预期', untested: '未测',
 }
+const MATRIX_STATUS: Record<ProbeHtmlStatus, string> = { ...STATUS_LABEL, skipped: '已跳过' }
 
 const THEME_VAR_KEYS = [
   'bg', 's1', 's2', 'border', 'borderHard', 'text', 't2', 't3',
@@ -447,9 +448,9 @@ function ioParts(usage?: ProbeHtmlResult['usage']): { inn: string; out: string; 
 
 function renderTile(item: ProbeHtmlItem, index: number): string {
   const io = ioParts(item.usage)
-  return `<button type="button" class="tile" data-i="${index}" style="--i:${Math.min(index, 12)}" aria-label="${esc(item.name)} ${esc(item.formatLabel)} ${STATUS_LABEL[item.status]}">
+  return `<button type="button" class="tile" data-i="${index}" style="--i:${Math.min(index, 12)}" aria-label="${esc(item.name)} ${esc(item.formatLabel)} ${MATRIX_STATUS[item.status]}">
     <div class="tile-top">
-      <span class="dot-st ${item.status}">${STATUS_LABEL[item.status]}</span>
+      <span class="dot-st ${item.status}">${MATRIX_STATUS[item.status]}</span>
       ${item.duration != null ? `<span class="ms mono">${esc(item.duration)} ms</span>` : ''}
     </div>
     <h2>${esc(item.name)}</h2>
@@ -511,7 +512,7 @@ export function buildProbeReportHtml(
     explain: item.explain,
     formatLabel: item.formatLabel,
     status: item.status,
-    statusLabel: STATUS_LABEL[item.status],
+    statusLabel: MATRIX_STATUS[item.status],
     detail: item.detail,
     duration: item.duration,
     usage: item.usage || null,
@@ -589,7 +590,13 @@ export function buildProbeReportHtml(
   ${skippedNote ? `<p class="footer">${esc(skippedNote)}</p>` : ''}
   ${groupHtml}
 </main>
-<div class="overlay" id="overlay" hidden>
+${probeSheetDocument(payload, '.tile')}
+</body>
+</html>`
+}
+
+function probeSheetDocument(payload: string, clickSelector: string): string {
+  return `<div class="overlay" id="overlay" hidden>
   <div class="sheet" role="dialog" aria-modal="true" aria-labelledby="sheetTitle">
     <div class="sheet-head">
       <div>
@@ -708,7 +715,7 @@ export function buildProbeReportHtml(
     overlay.classList.add('is-on');
     document.body.style.overflow = 'hidden';
   }
-  document.querySelectorAll('.tile').forEach(function (el) {
+  document.querySelectorAll(${JSON.stringify(clickSelector)}).forEach(function (el) {
     el.addEventListener('click', function () { openSheet(Number(el.getAttribute('data-i'))); });
   });
   overlay.addEventListener('click', function (e) { if (e.target === overlay) closeSheet(); });
@@ -728,7 +735,181 @@ export function buildProbeReportHtml(
     else done();
   });
 })();
+</script>`
+}
+
+const MATRIX_CSS = `
+.matrix-bleed{width:max-content;min-width:100%;padding:0 clamp(16px,4vw,36px) clamp(56px,8vw,96px)}
+table.matrix{border-collapse:separate;border-spacing:0;width:max-content;min-width:100%}
+.matrix th,.matrix td{padding:10px 14px;border-bottom:1px solid var(--border);vertical-align:middle;background:var(--bg);white-space:nowrap}
+.matrix thead th{position:sticky;top:48px;z-index:2;font-size:12px;font-weight:600;color:var(--text);text-align:left;box-shadow:inset 0 -1px 0 var(--border)}
+.matrix .rowh{position:sticky;left:0;z-index:1;min-width:14rem;text-align:left;font-size:13px;font-weight:600;color:var(--text)}
+.matrix thead .rowh{z-index:3}
+.matrix .mx-group td{position:static;font-size:11px;font-weight:700;letter-spacing:.08em;text-transform:uppercase;color:var(--t3);background:var(--s1);text-align:left}
+.matrix-cell{appearance:none;border:0;background:transparent;padding:0;font:inherit;font-size:12px;font-weight:600;cursor:pointer;color:inherit}
+.matrix td.gap{color:var(--t3);text-align:center}
+.matrix .row-sub{display:block;margin-top:4px}
+.dot-st.skipped{color:var(--t3)}
+.pill.skipped{background:var(--s2);color:var(--t3)}
+@media print{
+  .matrix thead th,.matrix .rowh{position:static}
+}
+`
+
+function matrixChannelOf(report: ProbeHtmlReport): string {
+  return (report.target.channelName || '').trim() || report.target.baseUrl || ''
+}
+
+export function probeMatrixColumnLabels(reports: ProbeHtmlReport[]): string[] {
+  const mixed = new Set(reports.map(matrixChannelOf)).size > 1
+  const base = reports.map(report => {
+    const model = report.target.model || '未命名模型'
+    const channel = matrixChannelOf(report)
+    return mixed && channel ? `${model} · ${channel}` : model
+  })
+  const counts = new Map<string, number>()
+  for (const label of base) counts.set(label, (counts.get(label) ?? 0) + 1)
+  return reports.map((report, index) => {
+    const label = base[index]
+    if ((counts.get(label) ?? 0) < 2) return label
+    return `${label} · ${fmtTime(report.completedAt)}`
+  })
+}
+
+function unionResultKeys(id: string, reports: ProbeHtmlReport[]): string[] {
+  const keys = new Set<string>()
+  for (const report of reports) {
+    for (const key of resultKeysOf(id, report.results)) keys.add(key)
+  }
+  return [...keys].sort((a, b) => a.localeCompare(b))
+}
+
+function formatLabelOfKey(key: string, reports: ProbeHtmlReport[], formatLabels: Record<string, string>): string {
+  for (const report of reports) {
+    const result = report.results[key]
+    if (!result) continue
+    const fmt = result.format || formatOfKey(key)
+    if (fmt) return formatLabels[fmt] || fmt
+  }
+  const fmt = formatOfKey(key)
+  return fmt ? (formatLabels[fmt] || fmt) : ''
+}
+
+function matrixItemPayload(item: ProbeHtmlItem) {
+  return {
+    name: item.name,
+    explain: item.explain,
+    formatLabel: item.formatLabel,
+    status: item.status,
+    statusLabel: MATRIX_STATUS[item.status],
+    detail: item.detail,
+    duration: item.duration,
+    usage: item.usage || null,
+    cache: item.cache || null,
+    tokenValues: item.tokenValues || null,
+    checks: item.checks || null,
+    url: item.url,
+    http: item.http,
+    requestId: item.requestId,
+    body: item.body,
+  }
+}
+
+export function buildProbeMatrixHtml(
+  reports: ProbeHtmlReport[],
+  tests: ProbeHtmlTestMeta[],
+  formatLabels: Record<string, string>,
+  theme?: ProbeHtmlTheme,
+): string {
+  const list = reports.map(sanitizeHtmlReport)
+  const labels = probeMatrixColumnLabels(list)
+  const flat: ProbeHtmlItem[] = []
+  let rows = ''
+  let lastGroup = ''
+  const colspan = list.length + 1
+  for (const test of tests) {
+    const keys = unionResultKeys(test.id, list)
+    if (!keys.length) continue
+    if (test.group !== lastGroup) {
+      lastGroup = test.group
+      rows += `<tr class="mx-group"><td colspan="${colspan}">${esc(test.group)}</td></tr>`
+    }
+    for (const key of keys) {
+      const formatLabel = formatLabelOfKey(key, list, formatLabels)
+      const cells = list.map(report => {
+        const result = report.results[key]
+        if (!result) return '<td class="gap">—</td>'
+        const fmt = result.format || formatOfKey(key)
+        const item: ProbeHtmlItem = {
+          name: test.name,
+          explain: test.explain,
+          formatLabel: fmt ? (formatLabels[fmt] || fmt) : formatLabel,
+          status: result.status,
+          detail: result.detail,
+          duration: result.duration,
+          usage: result.usage,
+          cache: result.cache,
+          tokenValues: result.tokenValues,
+          checks: result.checks,
+          url: result.repro?.url || '',
+          http: result.repro?.status ?? null,
+          requestId: result.repro?.requestId ?? null,
+          body: result.repro ? result.repro.body : null,
+        }
+        const index = flat.length
+        flat.push(item)
+        const statusLabel = MATRIX_STATUS[result.status]
+        return `<td><button type="button" class="matrix-cell dot-st ${esc(result.status)}" data-i="${index}" aria-label="${esc(`${test.name} ${formatLabel} ${statusLabel}`)}">${esc(statusLabel)}</button></td>`
+      }).join('')
+      rows += `<tr><th class="rowh" scope="row">${esc(test.name)}${formatLabel ? `<span class="chip row-sub">${esc(formatLabel)}</span>` : ''}</th>${cells}</tr>`
+    }
+  }
+  const head = labels.map(label => `<th scope="col">${esc(label)}</th>`).join('')
+  const payload = JSON.stringify(flat.map(matrixItemPayload)).replace(/</g, '\\u003c')
+  const initial = theme?.initialTheme === 'dark' ? 'dark' : 'light'
+  const liveStyle = theme?.liveCss ? ` style="${esc(theme.liveCss)}"` : ''
+  const css = REPORT_CSS.split('.tile').join('.x-card') + MATRIX_CSS
+  return `<!doctype html>
+<html lang="zh-CN" data-theme="${initial}"${liveStyle}>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>模型对比</title>
+<script>
+(function () {
+  try {
+    var t = localStorage.getItem('modelprobe-report-theme');
+    if (t === 'light' || t === 'dark') {
+      document.documentElement.removeAttribute('style');
+      document.documentElement.setAttribute('data-theme', t);
+    }
+  } catch (e) {}
+})();
 </script>
+<style>${css}</style>
+</head>
+<body>
+<div class="ambient" aria-hidden="true"><i class="orb-a"></i><i class="orb-b"></i><i class="orb-c"></i></div>
+<header class="top">
+  <div class="brand">模型探测</div>
+  <button type="button" class="theme-btn" id="themeBtn">深色模式</button>
+</header>
+<main>
+  <div class="wrap">
+    <section class="hero">
+      <div class="eyebrow">模型对比</div>
+      <h1>模型对比</h1>
+      <p class="sub">${list.length} 份报告</p>
+    </section>
+  </div>
+  <div class="matrix-bleed">
+    <table class="matrix">
+      <thead><tr><th class="rowh" scope="col">测试项</th>${head}</tr></thead>
+      <tbody>${rows}</tbody>
+    </table>
+  </div>
+</main>
+${probeSheetDocument(payload, '.matrix-cell')}
 </body>
 </html>`
 }
@@ -751,6 +932,27 @@ export function downloadProbeReportHtml(
   const a = document.createElement('a')
   a.href = url
   a.download = probeReportHtmlFileName(report.name)
+  document.body.appendChild(a)
+  a.click()
+  a.remove()
+  setTimeout(() => URL.revokeObjectURL(url), 1000)
+}
+
+export function probeMatrixHtmlFileName(count: number): string {
+  return probeReportHtmlFileName(`模型对比_${count}`)
+}
+
+export function downloadProbeMatrixHtml(
+  reports: ProbeHtmlReport[],
+  tests: ProbeHtmlTestMeta[],
+  formatLabels: Record<string, string>,
+): void {
+  const html = buildProbeMatrixHtml(reports, tests, formatLabels, captureProbeExportTheme())
+  const blob = new Blob([html], { type: 'text/html;charset=utf-8' })
+  const url = URL.createObjectURL(blob)
+  const a = document.createElement('a')
+  a.href = url
+  a.download = probeMatrixHtmlFileName(reports.length)
   document.body.appendChild(a)
   a.click()
   a.remove()

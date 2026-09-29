@@ -7,7 +7,8 @@ import { decryptLlmApiKey, encryptLlmApiKey } from '../shared/api-key-crypto'
 import { historyDbGetAll, historyDbPutOne, historyDbDeleteOne, historyDbDeleteMany, historyDbClear, historyDbMigrateFromLocalStorage } from '../shared/history-db'
 import { useDebouncedPersist } from '../shared/use-debounced-persist'
 import { uniqueCopyName } from '../shared/channel-copy'
-import { downloadProbeReportHtml } from './ModelProbeExport'
+import { downloadProbeMatrixHtml, downloadProbeReportHtml, probeMatrixColumnLabels } from './ModelProbeExport'
+import { probeHistoryNewestFirst, probeHistoryOverflow, probeLogsSince, probeNameForModel, probeSplitModels, probeUnionBuiltinCases, probeViewAfterDelete } from './model-probe/batch'
 import {
   type ProbeFormat, type ProbeSseEvent, type ProbeUsage,
   probeEmptyUsage, probeUsageOf, probeUsageFromSse, probeParseSseBlock,
@@ -422,17 +423,19 @@ async function probeHistMigrateOnce(): Promise<void> {
 }
 async function loadProbeHistory(): Promise<ProbeReport[]> {
   const list = await historyDbGetAll<ProbeReport>('modelprobe')
-  return list.sort((a, b) => b.completedAt.localeCompare(a.completedAt))
+  return probeHistoryNewestFirst(list)
 }
 async function saveProbeHistory(rep: ProbeReport): Promise<ProbeReport[]> {
   await historyDbPutOne('modelprobe', rep)
-  let list = await loadProbeHistory()
-  if (list.length > PROBE_HISTORY_MAX) {
-    const overflow = list.slice(PROBE_HISTORY_MAX)
-    await historyDbDeleteMany('modelprobe', overflow.map(r => r.id))
-    list = list.slice(0, PROBE_HISTORY_MAX)
-  }
-  return list
+  return loadProbeHistory()
+}
+// 一批多模型会连续写入。写一条就裁会把本批更早的模型删掉，所以裁剪留到整批结束。
+async function trimProbeHistory(): Promise<ProbeReport[]> {
+  const list = await loadProbeHistory()
+  const overflow = probeHistoryOverflow(list, PROBE_HISTORY_MAX)
+  if (!overflow.length) return list
+  await historyDbDeleteMany('modelprobe', overflow.map(item => item.id))
+  return loadProbeHistory()
 }
 async function deleteProbeHistory(id: string): Promise<ProbeReport[]> {
   await historyDbDeleteOne('modelprobe', id)
@@ -573,11 +576,12 @@ function ProbeStatusBadge({ status }: { status: ProbeStatus }) {
   )
 }
 
-function ProbeReportTiles({ report }: { report: ProbeReport }) {
-  const [detail, setDetail] = useState<{ test: ProbeTestDef; key: string; result: ProbeResult } | null>(null)
+function ProbeResultDialog({ detail, onClose }: {
+  detail: { test: ProbeTestDef; key: string; result: ProbeResult }
+  onClose: () => void
+}) {
   useEffect(() => {
-    if (!detail) return
-    const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') setDetail(null) }
+    const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') onClose() }
     window.addEventListener('keydown', onKey)
     const prev = document.body.style.overflow
     document.body.style.overflow = 'hidden'
@@ -585,7 +589,85 @@ function ProbeReportTiles({ report }: { report: ProbeReport }) {
       window.removeEventListener('keydown', onKey)
       document.body.style.overflow = prev
     }
-  }, [detail])
+  }, [onClose])
+  return (
+    <div
+      className="fixed inset-0 z-50 flex items-center justify-center p-5 ia-lightbox-enter"
+      style={{ background: 'color-mix(in srgb, var(--bg) 78%, transparent)', backdropFilter: 'blur(10px)' }}
+      onClick={e => { if (e.target === e.currentTarget) onClose() }}
+    >
+      <div
+        role="dialog"
+        aria-modal="true"
+        className="floating-material probe-sheet-enter rounded-2xl p-6 w-full max-w-3xl max-h-[86vh] overflow-y-auto"
+        style={{ background: 'var(--surfaceStrong)', border: '1px solid var(--border)', boxShadow: 'var(--shadowMd)' }}
+        onClick={e => e.stopPropagation()}
+      >
+        <div className="flex items-start justify-between gap-3">
+          <div className="min-w-0 flex-1">
+            <div className="flex flex-wrap items-center gap-2">
+              <ProbeStatusBadge status={detail.result.status} />
+              {probeFormatOfKey(detail.key) && (
+                <span className="rounded-full px-2 py-0.5 text-[11px]" style={{ background: 'var(--s2)', color: 'var(--t2)' }}>
+                  {PROBE_FORMAT_LABELS[probeFormatOfKey(detail.key)!]}
+                </span>
+              )}
+            </div>
+            <h2 className="text-lg font-bold mt-2" style={{ color: 'var(--text)', letterSpacing: '-0.014em' }}>{detail.test.name}</h2>
+            <p className="text-xs mt-1 leading-5 break-words" style={{ color: 'var(--t3)' }}>{detail.test.explain}</p>
+          </div>
+          <Btn small variant="ghost" className="shrink-0" onClick={onClose}>关闭</Btn>
+        </div>
+        <p className="text-sm mt-3 leading-6 break-words" style={{ color: 'var(--text)' }}>{detail.result.detail}</p>
+        {detail.result.checks && detail.result.checks.length > 0 && (
+          <div className="mt-3 flex flex-wrap gap-1.5">
+            {detail.result.checks.map(c => (
+              <span key={c.id} className="rounded-full px-2 py-0.5 text-[11px]" style={{
+                background: c.passed ? 'var(--okBg)' : 'var(--errBg)',
+                color: c.passed ? 'var(--ok)' : 'var(--err)',
+              }}>{c.passed ? '✓' : '✗'} {c.detail}</span>
+            ))}
+          </div>
+        )}
+        <div className="mt-3 flex flex-wrap items-center gap-2">
+          {detail.result.duration != null && (
+            <span className="font-mono text-[11px] px-1.5 py-0.5 rounded" style={{ background: 'var(--s2)', color: 'var(--t2)', fontFamily: PROBE_MONO }}>{detail.result.duration} ms</span>
+          )}
+          <ProbeUsageChip usage={detail.result.usage ?? probeEmptyUsage()} />
+        </div>
+        {detail.result.cache && (
+          <div className="text-xs mt-2" style={{ color: 'var(--t2)' }}>缓存：{detail.result.cache.hits}/{detail.result.cache.total} 次命中 · 读取值 {detail.result.cache.reads.join(', ')}</div>
+        )}
+        {detail.result.tokenValues && detail.result.tokenValues.length > 0 && (
+          <div className="text-xs mt-2" style={{ color: 'var(--t2)' }}>每次输入 Token：{detail.result.tokenValues.join(', ')}</div>
+        )}
+        {detail.result.repro ? (
+          <div className="mt-4">
+            <div className="flex flex-wrap items-center gap-2 mb-3">
+              <span className="font-mono text-[11px] px-1.5 py-0.5 rounded" style={{ background: 'var(--s2)', color: 'var(--text)', fontFamily: PROBE_MONO }}>POST {detail.result.repro.url}</span>
+              <span className="font-mono text-[11px] px-1.5 py-0.5 rounded" style={{ background: 'var(--s2)', color: 'var(--text)', fontFamily: PROBE_MONO }}>HTTP {detail.result.repro.status ?? '—'}</span>
+              {detail.result.repro.requestId && (
+                <span className="inline-flex items-center gap-1">
+                  <span className="font-mono text-[11px]" style={{ color: 'var(--t3)', fontFamily: PROBE_MONO }}>Request ID</span>
+                  <ProbeCopyId value={detail.result.repro.requestId} />
+                </span>
+              )}
+            </div>
+            <div className="grid gap-3 xl:grid-cols-2">
+              <ProbeCodeBlock title="请求头（密钥已脱敏）" children={probeJsonPretty(detail.result.repro.headers)} />
+              <ProbeCodeBlock title="请求体" children={probeJsonPretty(detail.result.repro.body)} />
+            </div>
+          </div>
+        ) : (
+          <p className="text-xs mt-4" style={{ color: 'var(--t3)' }}>本轮无实际请求。</p>
+        )}
+      </div>
+    </div>
+  )
+}
+
+function ProbeReportTiles({ report }: { report: ProbeReport }) {
+  const [detail, setDetail] = useState<{ test: ProbeTestDef; key: string; result: ProbeResult } | null>(null)
 
   const groups: { title: string; items: { test: ProbeTestDef; key: string; result: ProbeResult }[] }[] = []
   let skipped = 0
@@ -657,81 +739,90 @@ function ProbeReportTiles({ report }: { report: ProbeReport }) {
       {skipped > 0 && (
         <p className="mt-5 text-xs" style={{ color: 'var(--t3)' }}>另有 {skipped} 项未执行。</p>
       )}
-      {detail && (
-        <div
-          className="fixed inset-0 z-50 flex items-center justify-center p-5 ia-lightbox-enter"
-          style={{ background: 'color-mix(in srgb, var(--bg) 78%, transparent)', backdropFilter: 'blur(10px)' }}
-          onClick={e => { if (e.target === e.currentTarget) setDetail(null) }}
-        >
-          <div
-            role="dialog"
-            aria-modal="true"
-            className="floating-material probe-sheet-enter rounded-2xl p-6 w-full max-w-3xl max-h-[86vh] overflow-y-auto"
-            style={{ background: 'var(--surfaceStrong)', border: '1px solid var(--border)', boxShadow: 'var(--shadowMd)' }}
-            onClick={e => e.stopPropagation()}
-          >
-            <div className="flex items-start justify-between gap-3">
-              <div className="min-w-0 flex-1">
-                <div className="flex flex-wrap items-center gap-2">
-                  <ProbeStatusBadge status={detail.result.status} />
-                  {probeFormatOfKey(detail.key) && (
-                    <span className="rounded-full px-2 py-0.5 text-[11px]" style={{ background: 'var(--s2)', color: 'var(--t2)' }}>
-                      {PROBE_FORMAT_LABELS[probeFormatOfKey(detail.key)!]}
-                    </span>
-                  )}
-                </div>
-                <h2 className="text-lg font-bold mt-2" style={{ color: 'var(--text)', letterSpacing: '-0.014em' }}>{detail.test.name}</h2>
-                <p className="text-xs mt-1 leading-5 break-words" style={{ color: 'var(--t3)' }}>{detail.test.explain}</p>
-              </div>
-              <Btn small variant="ghost" className="shrink-0" onClick={() => setDetail(null)}>关闭</Btn>
-            </div>
-            <p className="text-sm mt-3 leading-6 break-words" style={{ color: 'var(--text)' }}>{detail.result.detail}</p>
-            {detail.result.checks && detail.result.checks.length > 0 && (
-              <div className="mt-3 flex flex-wrap gap-1.5">
-                {detail.result.checks.map(c => (
-                  <span key={c.id} className="rounded-full px-2 py-0.5 text-[11px]" style={{
-                    background: c.passed ? 'var(--okBg)' : 'var(--errBg)',
-                    color: c.passed ? 'var(--ok)' : 'var(--err)',
-                  }}>{c.passed ? '✓' : '✗'} {c.detail}</span>
-                ))}
-              </div>
-            )}
-            <div className="mt-3 flex flex-wrap items-center gap-2">
-              {detail.result.duration != null && (
-                <span className="font-mono text-[11px] px-1.5 py-0.5 rounded" style={{ background: 'var(--s2)', color: 'var(--t2)', fontFamily: PROBE_MONO }}>{detail.result.duration} ms</span>
-              )}
-              <ProbeUsageChip usage={detail.result.usage ?? probeEmptyUsage()} />
-            </div>
-            {detail.result.cache && (
-              <div className="text-xs mt-2" style={{ color: 'var(--t2)' }}>缓存：{detail.result.cache.hits}/{detail.result.cache.total} 次命中 · 读取值 {detail.result.cache.reads.join(', ')}</div>
-            )}
-            {detail.result.tokenValues && detail.result.tokenValues.length > 0 && (
-              <div className="text-xs mt-2" style={{ color: 'var(--t2)' }}>每次输入 Token：{detail.result.tokenValues.join(', ')}</div>
-            )}
-            {detail.result.repro ? (
-              <div className="mt-4">
-                <div className="flex flex-wrap items-center gap-2 mb-3">
-                  <span className="font-mono text-[11px] px-1.5 py-0.5 rounded" style={{ background: 'var(--s2)', color: 'var(--text)', fontFamily: PROBE_MONO }}>POST {detail.result.repro.url}</span>
-                  <span className="font-mono text-[11px] px-1.5 py-0.5 rounded" style={{ background: 'var(--s2)', color: 'var(--text)', fontFamily: PROBE_MONO }}>HTTP {detail.result.repro.status ?? '—'}</span>
-                  {detail.result.repro.requestId && (
-                    <span className="inline-flex items-center gap-1">
-                      <span className="font-mono text-[11px]" style={{ color: 'var(--t3)', fontFamily: PROBE_MONO }}>Request ID</span>
-                      <ProbeCopyId value={detail.result.repro.requestId} />
-                    </span>
-                  )}
-                </div>
-                <div className="grid gap-3 xl:grid-cols-2">
-                  <ProbeCodeBlock title="请求头（密钥已脱敏）" children={probeJsonPretty(detail.result.repro.headers)} />
-                  <ProbeCodeBlock title="请求体" children={probeJsonPretty(detail.result.repro.body)} />
-                </div>
-              </div>
-            ) : (
-              <p className="text-xs mt-4" style={{ color: 'var(--t3)' }}>本轮无实际请求。</p>
-            )}
-          </div>
-        </div>
-      )}
+      {detail && <ProbeResultDialog detail={detail} onClose={() => setDetail(null)} />}
     </>
+  )
+}
+
+function ProbeMatrixView({ reports }: { reports: ProbeReport[] }) {
+  const [detail, setDetail] = useState<{ test: ProbeTestDef; key: string; result: ProbeResult } | null>(null)
+  const labels = probeMatrixColumnLabels(reports)
+  const groups: { title: string; rows: { test: ProbeTestDef; key: string; formatLabel: string }[] }[] = []
+  for (const test of probeCatalog()) {
+    const keySet = new Set<string>()
+    for (const report of reports) {
+      for (const key of probeResultKeysOf(test, report.results)) keySet.add(key)
+    }
+    const keys = [...keySet].sort((a, b) => a.localeCompare(b))
+    if (!keys.length) continue
+    let group = groups.find(item => item.title === test.group)
+    if (!group) {
+      group = { title: test.group, rows: [] }
+      groups.push(group)
+    }
+    for (const key of keys) {
+      const fmt = probeFormatOfKey(key)
+      group.rows.push({ test, key, formatLabel: fmt ? PROBE_FORMAT_LABELS[fmt] : '' })
+    }
+  }
+  const colspan = reports.length + 1
+  return (
+    <div className="p-6" data-testid="probe-matrix-view">
+      <div className="surface-card rounded-2xl p-5" style={{ background: 'var(--bg)', border: '1px solid var(--border)', boxShadow: 'var(--shadow)' }}>
+        <div className="text-xs font-semibold uppercase" style={{ color: 'var(--accent)', letterSpacing: '0.12em' }}>模型对比</div>
+        <h3 className="text-xl font-bold mt-1" style={{ color: 'var(--text)', letterSpacing: '-0.02em' }}>模型对比</h3>
+        <p className="text-sm mt-1" style={{ color: 'var(--t2)' }}>{reports.length} 份报告</p>
+        <div className="mt-4">
+          <Btn small variant="soft" onClick={() => downloadProbeMatrixHtml(reports, probeCatalog(), PROBE_FORMAT_LABELS)}>导出 HTML</Btn>
+        </div>
+      </div>
+      <table className="probe-matrix mt-6">
+        <thead>
+          <tr>
+            <th className="probe-matrix-rowh" scope="col">测试项</th>
+            {labels.map(label => <th key={label} scope="col">{label}</th>)}
+          </tr>
+        </thead>
+        <tbody>
+          {groups.map(group => (
+            <React.Fragment key={group.title}>
+              <tr className="probe-matrix-group">
+                <td colSpan={colspan}>{group.title}</td>
+              </tr>
+              {group.rows.map(row => (
+                <tr key={row.key}>
+                  <th className="probe-matrix-rowh" scope="row">
+                    <div>{row.test.name}</div>
+                    {row.formatLabel && (
+                      <span className="mt-1 inline-block rounded-full px-2 py-0.5 text-[11px] font-normal normal-case tracking-normal" style={{ background: 'var(--s2)', color: 'var(--t2)', letterSpacing: '0' }}>{row.formatLabel}</span>
+                    )}
+                  </th>
+                  {reports.map(report => {
+                    const result = report.results[row.key]
+                    if (!result) return <td key={report.id} className="probe-matrix-gap">—</td>
+                    const statusLabel = PROBE_STATUS_LABELS[result.status]
+                    const aria = `${row.test.name} ${row.formatLabel} ${statusLabel}`.replace(/\s+/g, ' ').trim()
+                    return (
+                      <td key={report.id}>
+                        <button
+                          type="button"
+                          className="probe-matrix-cell"
+                          aria-label={aria}
+                          onClick={() => setDetail({ test: row.test, key: row.key, result })}
+                        >
+                          <span className={`probe-status-text is-${result.status}`}>{statusLabel}</span>
+                        </button>
+                      </td>
+                    )
+                  })}
+                </tr>
+              ))}
+            </React.Fragment>
+          ))}
+        </tbody>
+      </table>
+      {detail && <ProbeResultDialog detail={detail} onClose={() => setDetail(null)} />}
+    </div>
   )
 }
 
@@ -844,13 +935,14 @@ const ProbeConfigPane = React.memo(function ProbeConfigPane({
       </div>
       <div>
         <Label className="block mb-1.5">模型名称</Label>
-        <CustomInput value={model} onChange={onModel} placeholder="gpt-4o-mini / deepseek-chat" />
+        <CustomTextarea value={model} onChange={onModel} rows={3} placeholder={'gpt-4o-mini\ndeepseek-chat'} />
+        <p className="text-xs mt-1.5 leading-5" style={{ color: 'var(--t3)' }}>多个模型用逗号或回车分隔，按顺序逐个探测。</p>
       </div>
 
       <div style={{ borderTop: '1px solid var(--border)', paddingTop: 14 }}>
         <div className="flex items-center justify-between mb-2">
           <Label className="block">连接测试</Label>
-          <Btn small variant="soft" onClick={onTestConnection} disabled={running || connRunning || !hasActiveChannel || !model.trim()}>
+          <Btn small variant="soft" onClick={onTestConnection} disabled={running || connRunning || !hasActiveChannel || probeSplitModels(model).length === 0}>
             {connRunning ? '测试中…' : '测试连接'}
           </Btn>
         </div>
@@ -1005,7 +1097,8 @@ function ModelProbeTool() {
   })
   const selectedRef = useRef(selected)
   useEffect(() => { selectedRef.current = selected }, [selected])
-  const nativeTests = useMemo(() => matchBuiltinToolCases(model).map(toNativeProbeTest), [model])
+  const parsedModels = useMemo(() => probeSplitModels(model), [model])
+  const nativeTests = useMemo(() => probeUnionBuiltinCases(parsedModels).map(toNativeProbeTest), [parsedModels])
   const visibleTests = useMemo(() => [...PROBE_TESTS, ...nativeTests], [nativeTests])
   useEffect(() => {
     const visibleIds = new Set(nativeTests.map(t => t.id))
@@ -1109,7 +1202,14 @@ function ModelProbeTool() {
   const [nameModal, setNameModal] = useState(false)
   const [testName, setTestName] = useState('')
   const [report, setReport] = useState<ProbeReport | null>(null)
+  const [matrixReports, setMatrixReports] = useState<ProbeReport[] | null>(null)
   const [history, setHistory] = useState<ProbeReport[]>([])
+  const [historyNote, setHistoryNote] = useState('')
+  const reportRef = useRef<ProbeReport | null>(null)
+  const matrixRef = useRef<ProbeReport[] | null>(null)
+  reportRef.current = report
+  matrixRef.current = matrixReports
+  const [picked, setPicked] = useState<Set<string>>(new Set())
   const [logs, setLogs] = useState<ProbeLog[]>([])
   const [logFilter, setLogFilter] = useState('all')
   const [openLogs, setOpenLogs] = useState<Record<string, boolean>>({})
@@ -1120,6 +1220,7 @@ function ModelProbeTool() {
   const [connResults, setConnResults] = useState<Record<ProbeFormat, { ok: boolean; status: number | null; ms: number; err: string } | null>>({ chat: null, responses: null, anthropic: null })
 
   const logsRef = useRef<ProbeLog[]>([])
+  const logsEpochRef = useRef(0)
   const stopRef = useRef(false)
   const formatBlockerRef = useRef<Partial<Record<ProbeFormat, string>>>({})
   const profileRef = useRef<ProbeProfileId>('unknown')
@@ -1131,7 +1232,7 @@ function ModelProbeTool() {
     let cancelled = false
     ;(async () => {
       await probeHistMigrateOnce()
-      const list = await loadProbeHistory()
+      const list = await trimProbeHistory()
       if (!cancelled) setHistory(list)
     })()
     return () => { cancelled = true }
@@ -1145,9 +1246,11 @@ function ModelProbeTool() {
     setStatuses(prev => ({ ...prev, [key]: { status, detail } }))
   }
 
+  const probeLogPrefixRef = useRef('')
+  const probeProgressTagRef = useRef('')
   const probeNewLog = (resultKey: string, label: string, format: ProbeFormat, url?: string): ProbeLog => ({
     id: Math.random().toString(36).slice(2, 10) + Date.now().toString(36),
-    resultKey, label, format,
+    resultKey, label: probeLogPrefixRef.current ? `${probeLogPrefixRef.current} · ${label}` : label, format,
     url: url ?? (cfgRef.current?.urlOf[format] ?? ''),
     method: 'POST', status: null, statusText: '', duration: 0, time: new Date().toISOString(),
     requestHeaders: {}, requestBody: null, responseHeaders: {}, responseBody: null,
@@ -1238,7 +1341,7 @@ function ModelProbeTool() {
         if (attempt > 1) probeResetLogResponse(log)
         last = await runOnce()
         if (last.status === 429 && attempt < maxAttempts && !stopRef.current) {
-          setProgress(prev => ({ ...prev, label: `HTTP 429，6s 后重试（第 ${attempt}/${PROBE_429_RETRY_MAX} 次）` }))
+          setProgress(prev => ({ ...prev, label: `${probeProgressTagRef.current}${probeProgressTagRef.current ? ' · ' : ''}HTTP 429，6s 后重试（第 ${attempt}/${PROBE_429_RETRY_MAX} 次）` }))
           await probeDelay(PROBE_429_RETRY_WAIT_MS)
           continue
         }
@@ -1870,11 +1973,12 @@ function ModelProbeTool() {
 
   const testConnection = async () => {
     const ch = activeChannel
-    if (!ch || !model.trim()) {
+    const firstModel = probeSplitModels(model)[0]
+    if (!ch || !firstModel) {
       setStartErr('测试连接需要先在「渠道管理」选择一个渠道，并填写模型名称。')
       return
     }
-    const cfg = await probeBuildCfgFromChannel(ch, model.trim(), 15000)
+    const cfg = await probeBuildCfgFromChannel(ch, firstModel, 15000)
     if (!cfg.apiKey.trim()) {
       setStartErr('渠道 API Key 解密失败，请重新编辑渠道并保存。')
       return
@@ -1924,25 +2028,69 @@ function ModelProbeTool() {
 
   const runProbe = async (name: string) => {
     const ch = activeChannel
+    const models = probeSplitModels(model)
     const errs: string[] = []
     if (!ch) errs.push('请先在「渠道管理」添加并选择一个渠道。')
-    if (!model.trim()) errs.push('模型名称不能为空。')
-    const cfg: ProbeCfg = ch
-      ? await probeBuildCfgFromChannel(ch, model.trim())
-      : { baseUrl: '', apiKey: '', model: model.trim(), timeoutMs: 60000, urlOf: { chat: '', responses: '', anthropic: '' } }
-    if (ch && !cfg.apiKey.trim()) errs.push('渠道 API Key 解密失败，请重新编辑渠道并保存。')
-    const catalog = [...PROBE_TESTS, ...matchBuiltinToolCases(model.trim()).map(toNativeProbeTest)]
-    const selectedTests = catalog.filter(t => selectedRef.current[t.id] && t.kind !== 'score')
-    if (!selectedTests.length) errs.push('请至少勾选一个测试项。')
-    const paramIds = selectedTests.filter(t => t.kind === 'parameter').map(t => t.id)
-    const needFormats = selectedTests.some(t => probeMultiFormatKinds.includes(t.kind))
+    if (!models.length) errs.push('模型名称不能为空。')
+    else {
+      const selectedAcross = new Map<string, ProbeTestDef>()
+      for (const modelName of models) {
+        for (const t of [...PROBE_TESTS, ...matchBuiltinToolCases(modelName).map(toNativeProbeTest)]) {
+          if (selectedRef.current[t.id] && t.kind !== 'score') selectedAcross.set(t.id, t)
+        }
+      }
+      if (!selectedAcross.size) errs.push('请至少勾选一个测试项。')
+      const needFormats = [...selectedAcross.values()].some(t => probeMultiFormatKinds.includes(t.kind))
+      const activeFormats = (['chat', 'responses', 'anthropic'] as ProbeFormat[]).filter(f => selectedRef.current[`${f}-basic`])
+      if (needFormats && activeFormats.length === 0) errs.push('参数 / 流式 / Token 稳定性 / 补充场景 / 原生工具测试需要至少勾选一个基础格式测试（Chat / Responses / Anthropic）。')
+    }
     const activeFormats = (['chat', 'responses', 'anthropic'] as ProbeFormat[]).filter(f => selectedRef.current[`${f}-basic`])
-    if (needFormats && activeFormats.length === 0) errs.push('参数 / 流式 / Token 稳定性 / 补充场景 / 原生工具测试需要至少勾选一个基础格式测试（Chat / Responses / Anthropic）。')
+    const keyProbe = ch && models.length ? await probeBuildCfgFromChannel(ch, models[0]) : null
+    if (ch && models.length && !keyProbe?.apiKey.trim()) errs.push('渠道 API Key 解密失败，请重新编辑渠道并保存。')
     if (errs.length) { setStartErr(errs.join('\n')); return }
+    if (!ch) return
     setStartErr('')
 
-    cfgRef.current = cfg
     stopRef.current = false
+    probeLogPrefixRef.current = ''
+    probeProgressTagRef.current = ''
+    logsEpochRef.current += 1
+    logsRef.current = []
+    setLogs([])
+    setOpenLogs({})
+    setReport(null)
+    setHistoryNote('')
+    setRunning(true)
+    setPane('live')
+    const newIds: string[] = []
+    try {
+      for (let index = 0; index < models.length; index++) {
+        if (stopRef.current) break
+        const modelName = models[index]
+        const cfg = await probeBuildCfgFromChannel(ch, modelName)
+        probeLogPrefixRef.current = models.length > 1 ? modelName : ''
+        probeProgressTagRef.current = `第 ${index + 1}/${models.length} 个 · ${modelName}`
+        newIds.push(await runOneModel(cfg, probeNameForModel(name, modelName, models.length)))
+      }
+    } finally {
+      probeLogPrefixRef.current = ''
+      probeProgressTagRef.current = ''
+      setProbeAnthropicCapField('max_tokens')
+      setRunning(false)
+      const list = await trimProbeHistory()
+      setHistory(list)
+      const alive = new Set(list.map(item => item.id))
+      const dropped = newIds.filter(id => !alive.has(id))
+      setPicked(new Set(newIds.filter(id => alive.has(id))))
+      setHistoryNote(dropped.length
+        ? `本批 ${newIds.length} 个模型里，较早的 ${dropped.length} 份超出历史上限 ${PROBE_HISTORY_MAX} 条，已不保留。`
+        : '')
+      if (newIds.length) setPane('history')
+      setProgress(prev => ({ ...prev, label: stopRef.current ? '已停止' : '测试完成' }))
+    }
+
+    async function runOneModel(cfg: ProbeCfg, reportName: string): Promise<string> {
+    cfgRef.current = cfg
     formatBlockerRef.current = {}
     profileRef.current = profileFromName(cfg.model)
     officialAnthropicRef.current = (() => {
@@ -1950,14 +2098,11 @@ function ModelProbeTool() {
     })()
     anthropicMaxTokensRowRef.current = null
     setProbeAnthropicCapField('max_tokens')
-    logsRef.current = []
-    setLogs([])
-    setOpenLogs({})
-    setReport(null)
-    setRunning(true)
-    setPane('live')
     setStatuses({})
 
+    const catalog = [...PROBE_TESTS, ...matchBuiltinToolCases(cfg.model).map(toNativeProbeTest)]
+    const selectedTests = catalog.filter(t => selectedRef.current[t.id] && t.kind !== 'score')
+    const paramIds = selectedTests.filter(t => t.kind === 'parameter').map(t => t.id)
     const resultsObj: Record<string, ProbeResult> = {}
     const commit = (key: string, out: ProbeResult) => {
       const gated = probeApplyUsageGate(out)
@@ -1977,11 +2122,14 @@ function ModelProbeTool() {
     let curLabel = '准备测试'
     const updateProgress = (label?: string) => {
       if (label) curLabel = label
-      setProgress({ done: completed, total, label: curLabel })
+      const tag = probeProgressTagRef.current
+      setProgress({ done: completed, total, label: tag ? `${tag} · ${curLabel}` : curLabel })
     }
 
     const startedAt = new Date().toISOString()
     const startMs = Date.now()
+    const logFrom = logsRef.current.length
+    const logEpoch = logsEpochRef.current
     let parametersDone = false
     try {
       for (const t of catalog) {
@@ -2074,10 +2222,11 @@ function ModelProbeTool() {
       })
     } finally {
       setProbeAnthropicCapField('max_tokens')
+      const modelLogs = probeLogsSince(logsRef.current, logFrom, logsEpochRef.current, logEpoch)
       const signals = signalsFromProbeLogs({
         requestModel: cfg.model,
         baseUrl: cfg.baseUrl,
-        logs: logsRef.current.map(log => ({
+        logs: modelLogs.map(log => ({
           url: log.url,
           status: log.status,
           resultKey: log.resultKey,
@@ -2105,24 +2254,35 @@ function ModelProbeTool() {
       }
       const rep: ProbeReport = probeSanitizeReport({
         id: 'p' + Date.now() + '_' + Math.random().toString(36).slice(2, 7),
-        name, startedAt, completedAt: new Date().toISOString(), durationMs: Date.now() - startMs,
+        name: reportName, startedAt, completedAt: new Date().toISOString(), durationMs: Date.now() - startMs,
         target: {
           baseUrl: cfg.baseUrl, model: cfg.model, channelName: ch?.name,
           overrides: { chat: ch?.chatUrl.trim() || null, responses: ch?.responsesUrl.trim() || null, anthropic: ch?.anthropicUrl.trim() || null },
         },
-        results: resultsObj, summary: probeEmptySummary(), logs: logsRef.current, verdict,
+        results: resultsObj, summary: probeEmptySummary(), logs: modelLogs, verdict,
       })
+      setMatrixReports(null)
       setReport(rep)
       setHistory(await saveProbeHistory({ ...rep, logs: [] }))
-      setRunning(false)
-      setProgress({ done: total, total, label: '测试完成' })
-      setPane('report')
+      setProgress({ done: total, total, label: `${probeProgressTagRef.current} · ${stopRef.current ? '已停止' : '完成'}` })
+      return rep.id
+    }
     }
   }
 
   const viewHistoryReport = (rep: ProbeReport) => {
+    setMatrixReports(null)
     setReport(probeSanitizeReport(rep))
     setPane('report')
+  }
+  const viewPicked = () => {
+    const rows = history.filter(item => picked.has(item.id)).map(probeSanitizeReport)
+    if (rows.length === 1) viewHistoryReport(rows[0])
+    else if (rows.length > 1) {
+      setReport(null)
+      setMatrixReports(rows)
+      setPane('report')
+    }
   }
   // baseUrl/超时/协议 URL 覆写已归入渠道，不再是可直接写回的扁平字段：优先匹配一个 baseUrl 相同的
   // 已存渠道并切过去；匹配不到就把历史配置带入「渠道管理」的新增表单，跳转过去待用户补充 apiKey 后保存。
@@ -2160,6 +2320,29 @@ function ModelProbeTool() {
   const exportHtml = () => {
     if (!report) return
     downloadProbeReportHtml(probeSanitizeReport(report), probeCatalog(), PROBE_FORMAT_LABELS)
+  }
+  const syncOpenReports = (removed: ReadonlySet<string>) => {
+    const next = probeViewAfterDelete(reportRef.current, matrixRef.current, removed)
+    setReport(next.report ? probeSanitizeReport(next.report) : null)
+    setMatrixReports(next.matrix && next.matrix.length > 0 ? next.matrix : null)
+  }
+  const deletePicked = () => {
+    const ids = history.filter(item => picked.has(item.id)).map(item => item.id)
+    if (!ids.length) return
+    const removed = new Set(ids)
+    historyDbDeleteMany('modelprobe', ids).then(() => loadProbeHistory()).then(list => {
+      setHistory(list)
+      setPicked(new Set())
+      syncOpenReports(removed)
+    }).catch(() => {})
+  }
+  const togglePicked = (id: string) => {
+    setPicked(prev => {
+      const next = new Set(prev)
+      if (next.has(id)) next.delete(id)
+      else next.add(id)
+      return next
+    })
   }
   const exportMd = () => {
     if (!report) return
@@ -2299,7 +2482,7 @@ function ModelProbeTool() {
           {running ? (
             <Btn variant="danger" onClick={() => { stopRef.current = true; activeAbortRef.current?.abort() }}>⏹ 停止</Btn>
           ) : (
-            <Btn variant="primary" onClick={() => { setTestName(probeNowName()); setNameModal(true) }} disabled={!activeChannel || !model.trim()}>▶ 开始测试</Btn>
+            <Btn variant="primary" onClick={() => { setTestName(probeNowName()); setNameModal(true) }} disabled={!activeChannel || probeSplitModels(model).length === 0}>▶ 开始测试</Btn>
           )}
         </div>
       </div>
@@ -2408,7 +2591,13 @@ function ModelProbeTool() {
                     <option value="all">全部测试项</option>
                     {visibleTests.map(t => <option key={t.id} value={t.id}>{t.name}</option>)}
                   </select>
-                  <Btn small variant="soft" onClick={() => { logsRef.current = []; setLogs([]); setOpenLogs({}) }}>清空日志</Btn>
+                  <Btn small variant="soft" disabled={running} title={running ? '测试进行中，日志还要用来判定本轮' : undefined} onClick={() => {
+                    if (running) return
+                    logsEpochRef.current += 1
+                    logsRef.current = []
+                    setLogs([])
+                    setOpenLogs({})
+                  }}>清空日志</Btn>
                 </div>
                 {filteredLogs.length === 0 ? (
                   <div className="py-20 text-center text-sm" style={{ color: 'var(--t3)' }}>没有匹配的请求记录</div>
@@ -2419,7 +2608,9 @@ function ModelProbeTool() {
             )}
 
             {pane === 'report' && (
-              !report ? (
+              matrixReports && matrixReports.length > 1 ? (
+                <ProbeMatrixView reports={matrixReports} />
+              ) : !report ? (
                 <div className="py-20 text-center text-sm" style={{ color: 'var(--t3)' }}>完成一轮测试后，报告将显示在这里</div>
               ) : (
                 <div className="p-6">
@@ -2457,9 +2648,27 @@ function ModelProbeTool() {
 
             {pane === 'history' && (
               <div className="p-6">
-                <div className="flex items-center justify-between mb-4">
-                  <p className="text-sm" style={{ color: 'var(--t2)' }}>已存 {history.length} / {PROBE_HISTORY_MAX} 条历史报告</p>
-                  {history.length > 0 && <Btn small variant="danger" onClick={() => { setHistory([]); clearProbeHistory().catch(() => {}) }}>清空历史</Btn>}
+                <div className="flex flex-col gap-3 mb-4 sm:flex-row sm:items-center sm:justify-between">
+                  <div>
+                    <p className="text-sm" style={{ color: 'var(--t2)' }}>已存 {history.length} / {PROBE_HISTORY_MAX} 条历史报告</p>
+                    {historyNote && <p className="text-sm mt-1" style={{ color: 'var(--warn)' }} data-testid="probe-history-note">{historyNote}</p>}
+                  </div>
+                  {history.length > 0 && (
+                    <div className="flex flex-wrap items-center gap-2">
+                      <button
+                        type="button"
+                        onClick={() => {
+                          const allOn = history.every(item => picked.has(item.id))
+                          setPicked(allOn ? new Set() : new Set(history.map(item => item.id)))
+                        }}
+                        className="cursor-pointer border-0 outline-none text-xs font-semibold"
+                        style={{ background: 'transparent', color: 'var(--accent)', fontFamily: 'inherit' }}
+                      >{history.every(item => picked.has(item.id)) ? '取消全选' : '全选'}</button>
+                      <Btn small variant="soft" disabled={picked.size === 0} onClick={viewPicked}>查看所选</Btn>
+                      <Btn small variant="danger" disabled={picked.size === 0} onClick={deletePicked}>删除所选 ({picked.size})</Btn>
+                      <Btn small variant="danger" onClick={() => { setHistory([]); setPicked(new Set()); setMatrixReports(null); setReport(null); setHistoryNote(''); clearProbeHistory().catch(() => {}) }}>清空历史</Btn>
+                    </div>
+                  )}
                 </div>
                 {history.length === 0 ? (
                   <div className="py-16 text-center text-sm" style={{ color: 'var(--t3)' }}>暂无历史报告，完成一轮测试后自动入库</div>
@@ -2468,7 +2677,14 @@ function ModelProbeTool() {
                     {history.map(h => {
                       const histSummary = probeSanitizeReport(h).summary
                       return (
-                        <div key={h.id} className="surface-card rounded-2xl p-4 flex flex-col gap-3 sm:flex-row sm:items-center sm:gap-4" style={{ background: 'var(--bg)', border: '1px solid var(--border)', boxShadow: 'var(--shadow)' }}>
+                        <div key={h.id} data-testid="probe-history-row" className="surface-card rounded-2xl p-4 flex flex-col gap-3 sm:flex-row sm:items-center sm:gap-4" style={{ background: 'var(--bg)', border: '1px solid var(--border)', boxShadow: 'var(--shadow)' }}>
+                          <input
+                            type="checkbox"
+                            checked={picked.has(h.id)}
+                            onChange={() => togglePicked(h.id)}
+                            aria-label={`选择 ${h.name}`}
+                            className="h-4 w-4 flex-shrink-0 cursor-pointer accent-[var(--accent)]"
+                          />
                           <div className="min-w-0 flex-1">
                             <div className="text-sm font-bold truncate" style={{ color: 'var(--text)' }}>{h.name}</div>
                             <div className="text-xs mt-1 flex flex-wrap gap-x-4 gap-y-0.5" style={{ color: 'var(--t3)' }}>
@@ -2480,7 +2696,18 @@ function ModelProbeTool() {
                           <div className="flex flex-wrap gap-2 flex-shrink-0">
                             <Btn small variant="soft" onClick={() => viewHistoryReport(h)}>查看</Btn>
                             <Btn small variant="soft" onClick={() => reuseHistoryConfig(h)}>回填配置</Btn>
-                            <Btn small variant="ghost" onClick={() => { deleteProbeHistory(h.id).then(setHistory) }}>删除</Btn>
+                            <Btn small variant="ghost" onClick={() => {
+                              const removed = new Set([h.id])
+                              deleteProbeHistory(h.id).then(list => {
+                                setHistory(list)
+                                setPicked(prev => {
+                                  const next = new Set(prev)
+                                  next.delete(h.id)
+                                  return next
+                                })
+                                syncOpenReports(removed)
+                              })
+                            }}>删除</Btn>
                           </div>
                         </div>
                       )
@@ -2509,7 +2736,7 @@ function ModelProbeTool() {
           <div role="dialog" aria-modal="true" className="floating-material rounded-2xl p-6 w-full max-w-md" style={{ background: 'var(--bg)', border: '1px solid var(--border)', boxShadow: 'var(--shadowMd)' }}
             onClick={e => e.stopPropagation()}>
             <h2 className="text-lg font-bold" style={{ color: 'var(--text)' }}>命名本次测试</h2>
-            <p className="text-sm mt-1" style={{ color: 'var(--t2)' }}>名称会写入报告与导出文件，便于后续定位。</p>
+            <p className="text-sm mt-1 leading-6" style={{ color: 'var(--t2)' }}>名称会写入报告与导出文件。写入 {'{model}'} 会换成这一份的模型名。多个模型且名称里没有这个占位符时，会自动补成「名称 · 模型名」。</p>
             <CustomInput value={testName} onChange={setTestName} className="mt-4" placeholder="例如：2026-08-08 15:30:00" />
             <div className="mt-5 flex justify-end gap-2">
               <Btn variant="ghost" onClick={() => setNameModal(false)}>取消</Btn>
