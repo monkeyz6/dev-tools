@@ -1,6 +1,13 @@
 // 模型探测：自包含单文件 HTML 报告（网格卡片 + 弹层，请求体可复制，不含请求头 / key）
 
-export type ProbeHtmlStatus = 'passed' | 'failed' | 'unsupported' | 'skipped'
+export type ProbeHtmlStatus = 'passed' | 'failed' | 'abnormal' | 'unsupported' | 'skipped' | 'expected' | 'untested'
+
+export interface ProbeHtmlVerdictLayer { label: string; reasons: string[] }
+export interface ProbeHtmlVerdict {
+  family: ProbeHtmlVerdictLayer
+  access: ProbeHtmlVerdictLayer
+  upstream: ProbeHtmlVerdictLayer
+}
 
 export interface ProbeHtmlResult {
   status: ProbeHtmlStatus
@@ -33,6 +40,7 @@ export interface ProbeHtmlReport {
   }
   results: Record<string, ProbeHtmlResult>
   summary: Record<ProbeHtmlStatus, number>
+  verdict?: ProbeHtmlVerdict | null
 }
 
 export interface ProbeHtmlTestMeta {
@@ -67,7 +75,7 @@ interface ProbeHtmlItem {
 interface ProbeHtmlGroup { title: string; items: ProbeHtmlItem[] }
 
 const STATUS_LABEL: Record<Exclude<ProbeHtmlStatus, 'skipped'>, string> = {
-  passed: '通过', failed: '失败', unsupported: '不支持',
+  passed: '通过', failed: '失败', abnormal: '异常', unsupported: '不支持', expected: '符合预期', untested: '未测',
 }
 
 const THEME_VAR_KEYS = [
@@ -190,19 +198,32 @@ h1{margin:10px 0 0;font-size:26px;font-weight:700;letter-spacing:-.021em;line-he
   padding:3px 9px;font-size:11px;letter-spacing:.02em;
   background:var(--s2);color:var(--t2);border:1px solid var(--border);
 }
-.stats{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:12px}
-.stat{padding:16px 18px;border-radius:18px}
-.stat .k{font-size:11px;font-weight:600;color:var(--t3);letter-spacing:.04em}
+.origin{margin-top:16px;display:grid;gap:8px}
+.origin-row{display:grid;grid-template-columns:4.5rem minmax(0,1fr);column-gap:12px;align-items:baseline}
+.origin-k{font-size:12px;font-weight:600;line-height:1.45;color:var(--t3)}
+.origin-v{font-size:14px;font-weight:600;line-height:1.45;color:var(--text)}
+.origin-r{margin:2px 0 0;padding:0;list-style:none}
+.origin-r li{font-size:12px;line-height:1.5;color:var(--t2);overflow-wrap:anywhere}
+.stats{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:12px}
+@media (min-width:720px){.stats{grid-template-columns:repeat(4,minmax(0,1fr))}}
+@media (min-width:1040px){.stats{grid-template-columns:repeat(7,minmax(0,1fr))}}
+.stat{padding:14px 12px;border-radius:18px}
+.stat .k{font-size:11px;font-weight:600;color:var(--t3);letter-spacing:.04em;white-space:nowrap}
 .stat .v{margin-top:6px;font-size:28px;font-weight:700;letter-spacing:-.025em;line-height:1.1;color:var(--text)}
 .stat .v.zero{color:var(--t3)}
 .stat .v.ok{color:var(--ok)}
 .stat .v.err{color:var(--err)}
+.stat .v.abn{color:color-mix(in srgb, var(--err) 55%, var(--warn))}
 .stat .v.warn{color:var(--warn)}
+.stat .v.info{color:var(--accent)}
 .bar{display:flex;height:6px;border-radius:999px;overflow:hidden;background:var(--s2)}
 .bar i{display:block;height:100%}
 .bar .ok{background:var(--ok)}
+.bar .info{background:var(--accent)}
 .bar .err{background:var(--err)}
+.bar .abn{background:color-mix(in srgb, var(--err) 55%, var(--warn))}
 .bar .warn{background:var(--warn)}
+.bar .mute{background:var(--t3);opacity:.45}
 .section-title{
   margin:6px 2px 10px;font-size:12px;font-weight:700;color:var(--t3);
   letter-spacing:.08em;text-transform:uppercase;
@@ -234,11 +255,17 @@ h1{margin:10px 0 0;font-size:26px;font-weight:700;letter-spacing:-.021em;line-he
 .dot-st::before{content:"";width:7px;height:7px;border-radius:999px;background:currentColor;box-shadow:0 0 8px currentColor;flex-shrink:0}
 .dot-st.passed{color:var(--ok)}
 .dot-st.failed{color:var(--err)}
+.dot-st.abnormal{color:color-mix(in srgb, var(--err) 55%, var(--warn))}
 .dot-st.unsupported{color:var(--warn)}
+.dot-st.expected{color:var(--accent)}
+.dot-st.untested{color:var(--t3)}
 .pill{display:inline-flex;align-items:center;border-radius:999px;padding:3px 9px;font-size:11px;font-weight:600;flex-shrink:0}
 .pill.passed{background:var(--okBg);color:var(--ok)}
 .pill.failed{background:var(--errBg);color:var(--err)}
+.pill.abnormal{background:color-mix(in srgb, var(--err) 14%, transparent);color:color-mix(in srgb, var(--err) 55%, var(--warn))}
 .pill.unsupported{background:var(--warnBg);color:var(--warn)}
+.pill.expected{background:var(--accentSub);color:var(--accent)}
+.pill.untested{background:var(--s2);color:var(--t3)}
 .footer{font-size:12px;color:var(--t3);line-height:1.7;padding:4px 4px 0}
 .overlay{
   position:fixed;inset:0;z-index:40;display:none;align-items:center;justify-content:center;
@@ -291,9 +318,10 @@ pre{
 }
 @keyframes sheet-in{from{opacity:0;transform:translateY(10px) scale(.96)}to{opacity:1;transform:none}}
 @media (max-width:720px){
-  .stats{grid-template-columns:repeat(2,minmax(0,1fr))}
   h1{font-size:22px}
   .hero-time{text-align:left}
+  .stat{padding:12px 10px}
+  .stat .v{font-size:22px}
 }
 @media (prefers-reduced-transparency:reduce){
   .top,.overlay{background:var(--bg);backdrop-filter:none;-webkit-backdrop-filter:none}
@@ -354,8 +382,12 @@ function sanitizeHtmlReport(report: ProbeHtmlReport): ProbeHtmlReport {
   for (const [k, v] of Object.entries(report.results || {})) {
     if (!isHiddenResult(k, v)) results[k] = v
   }
-  const summary: Record<ProbeHtmlStatus, number> = { passed: 0, failed: 0, unsupported: 0, skipped: 0 }
-  for (const r of Object.values(results)) summary[r.status]++
+  const summary: Record<ProbeHtmlStatus, number> = {
+    passed: 0, failed: 0, abnormal: 0, unsupported: 0, skipped: 0, expected: 0, untested: 0,
+  }
+  for (const r of Object.values(results)) {
+    if (summary[r.status] != null) summary[r.status]++
+  }
   return { ...report, results, summary }
 }
 
@@ -394,8 +426,14 @@ function buildGroups(report: ProbeHtmlReport, tests: ProbeHtmlTestMeta[], format
   return groups
 }
 
-function statClass(kind: 'ok' | 'err' | 'warn', n: number): string {
+function statClass(kind: 'ok' | 'err' | 'abn' | 'warn' | 'info', n: number): string {
   return n > 0 ? kind : 'zero'
+}
+
+function renderOrigin(verdict?: ProbeHtmlVerdict | null): string {
+  if (!verdict) return ''
+  const row = (label: string, layer: ProbeHtmlVerdictLayer) => `<div class="origin-row"><div class="origin-k">${esc(label)}</div><div><div class="origin-v">${esc(layer.label)}</div>${layer.reasons.length ? `<ul class="origin-r">${layer.reasons.map(reason => `<li>${esc(reason)}</li>`).join('')}</ul>` : ''}</div></div>`
+  return `<div class="origin">${row('家族', verdict.family)}${row('接入层', verdict.access)}${row('上游', verdict.upstream)}</div>`
 }
 
 function ioParts(usage?: ProbeHtmlResult['usage']): { inn: string; out: string; innEmpty: boolean; outEmpty: boolean } {
@@ -458,8 +496,8 @@ export function buildProbeReportHtml(
   }).join('')
 
   const s = report.summary
-  const ran = s.passed + s.failed + s.unsupported
-  const totalSeg = Math.max(1, ran)
+  const scored = s.passed + s.failed + s.abnormal + s.unsupported + s.expected + s.untested
+  const totalSeg = Math.max(1, scored)
   const overrides = Object.entries(report.target.overrides || {}).filter(([, v]) => !!v)
   const overrideHtml = overrides.length
     ? `<div class="overrides">${overrides.map(([k, v]) => `<span class="chip">${esc(k)} · ${esc(v)}</span>`).join('')}</div>`
@@ -519,6 +557,7 @@ export function buildProbeReportHtml(
         <h1>${esc(report.name)}</h1>
         <p class="sub">${esc(targetLine)}</p>
         ${overrideHtml}
+        ${renderOrigin(report.verdict)}
         <div class="meta">
           <span><b>开始</b>${esc(fmtTime(report.startedAt))}</span>
           <span><b>完成</b>${esc(fmtTime(report.completedAt))}</span>
@@ -533,14 +572,21 @@ export function buildProbeReportHtml(
   <section class="stats" aria-label="结果统计">
     <div class="stat"><div class="k">通过</div><div class="v ${statClass('ok', s.passed)}">${s.passed}</div></div>
     <div class="stat"><div class="k">失败</div><div class="v ${statClass('err', s.failed)}">${s.failed}</div></div>
+    <div class="stat"><div class="k">异常</div><div class="v ${statClass('abn', s.abnormal)}">${s.abnormal}</div></div>
     <div class="stat"><div class="k">不支持</div><div class="v ${statClass('warn', s.unsupported)}">${s.unsupported}</div></div>
-    <div class="stat"><div class="k">已执行</div><div class="v">${ran}</div></div>
+    <div class="stat"><div class="k">符合预期</div><div class="v ${statClass('info', s.expected)}">${s.expected}</div></div>
+    <div class="stat"><div class="k">未测</div><div class="v ${s.untested > 0 ? '' : 'zero'}">${s.untested}</div></div>
+    <div class="stat"><div class="k">已跳过</div><div class="v ${s.skipped > 0 ? '' : 'zero'}">${s.skipped}</div></div>
   </section>
   <div class="bar" aria-hidden="true">
     <i class="ok" style="width:${(s.passed / totalSeg) * 100}%"></i>
+    <i class="info" style="width:${(s.expected / totalSeg) * 100}%"></i>
     <i class="err" style="width:${(s.failed / totalSeg) * 100}%"></i>
+    <i class="abn" style="width:${(s.abnormal / totalSeg) * 100}%"></i>
     <i class="warn" style="width:${(s.unsupported / totalSeg) * 100}%"></i>
+    <i class="mute" style="width:${(s.untested / totalSeg) * 100}%"></i>
   </div>
+  ${skippedNote ? `<p class="footer">${esc(skippedNote)}</p>` : ''}
   ${groupHtml}
 </main>
 <div class="overlay" id="overlay" hidden>

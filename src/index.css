@@ -730,7 +730,28 @@ textarea:focus-visible { outline: none; }
 }
 .probe-status-text.is-passed { color: var(--ok); }
 .probe-status-text.is-failed { color: var(--err); }
+.probe-status-text.is-abnormal { color: color-mix(in srgb, var(--err) 55%, var(--warn)); }
 .probe-status-text.is-unsupported { color: var(--warn); }
+.probe-status-text.is-expected { color: var(--accent); }
+.probe-status-text.is-untested,
+.probe-status-text.is-skipped { color: var(--t3); }
+
+/* 窄窗口里五个页签放不下一行。共享分段控件是 inline-flex 且按钮不换行，
+   这里只在探测页把它收成容器宽度并允许换行，避免首尾页签被裁掉。 */
+@media (max-width: 1023px) {
+  .probe-tabs .segmented-control {
+    display: flex;
+    flex-wrap: wrap;
+    width: max-content;
+    max-width: 100%;
+    min-width: 0;
+  }
+  .probe-tabs .segmented-option {
+    flex: 0 0 auto;
+    padding-left: 0.5rem;
+    padding-right: 0.5rem;
+  }
+}
 
 /* 报告详情弹窗：缩放淡入带轻微回弹（reduced-motion 时全局规则会把时长压到 0.01ms） */
 .probe-sheet-enter { animation: probe-sheet-in 0.4s var(--ease-spring) both; }

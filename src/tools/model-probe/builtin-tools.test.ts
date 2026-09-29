@@ -76,7 +76,7 @@ describe('oracleNativeToolEvidence', () => {
     const check = oracleNativeToolEvidence({ output: [{ type: 'web_search_call' }] }, spec)
     assert.equal(check.passed, true)
   })
-  it('仅文本 2xx 失败', () => {
+  it('仅文本 2xx 没有调用证据', () => {
     const check = oracleNativeToolEvidence({ output: [{ type: 'message', content: [{ text: 'hi' }] }] }, spec)
     assert.equal(check.passed, false)
   })

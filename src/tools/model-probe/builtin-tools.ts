@@ -47,7 +47,7 @@ interface BuiltinVendorProfile {
   cases: BuiltinProbeCase[]
 }
 
-const PAID = '可能单独计费。单独发请求，不并入参数组合。'
+const PAID = '可能单独计费。单独发请求，不并入参数组合。明确拒绝记为不支持；请求成功但没有调用或结果证据时记为异常。'
 
 const caseBase = (
   partial: Omit<BuiltinProbeCase, 'group' | 'kind' | 'defaultSelected'>,

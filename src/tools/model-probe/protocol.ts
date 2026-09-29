@@ -87,7 +87,11 @@ export const probeMergeUsage = (u: ProbeUsage, src: any) => {
   u.input = probeNum(src.prompt_tokens ?? src.input_tokens) ?? u.input
   u.output = probeNum(src.completion_tokens ?? src.output_tokens) ?? u.output
   u.cacheRead = probeNum(src.prompt_tokens_details?.cached_tokens ?? src.input_tokens_details?.cached_tokens ?? src.cache_read_input_tokens) ?? u.cacheRead
-  u.cacheWrite = probeNum(src.cache_creation_input_tokens) ?? u.cacheWrite
+  u.cacheWrite = probeNum(
+    src.cache_creation_input_tokens
+    ?? src.prompt_tokens_details?.cache_write_tokens
+    ?? src.input_tokens_details?.cache_write_tokens,
+  ) ?? u.cacheWrite
 }
 
 export const probeParseSseBlock = (block: string, index: number): ProbeSseEvent => {
@@ -369,10 +373,14 @@ const responsesProtocol: ProbeProtocol = {
     const msg = items.find((it: any) => asObj(it)?.type === 'message' || asObj(it)?.role === 'assistant')
     ensureResponsesInputArray(body)
     if (msg && typeof msg === 'object') {
-      const cloned = JSON.parse(JSON.stringify(msg))
-      if (!cloned.type) cloned.type = 'message'
-      if (!cloned.role) cloned.role = 'assistant'
-      body.input.push(cloned)
+      const content = Array.isArray(asObj(msg)?.content) ? JSON.parse(JSON.stringify(asObj(msg)!.content)) : null
+      const text = responsesProtocol.textOf(data)
+      if (!content && !text) return false
+      body.input.push({
+        type: 'message',
+        role: 'assistant',
+        content: content || [{ type: 'output_text', text }],
+      })
       return true
     }
     const text = responsesProtocol.textOf(data)
@@ -463,6 +471,17 @@ const responsesProtocol: ProbeProtocol = {
   },
 }
 
+export type AnthropicCapField = 'max_tokens' | 'max_completion_tokens'
+
+let anthropicCapField: AnthropicCapField = 'max_tokens'
+
+/** 本轮 Anthropic 体用哪个上限字段。推理模型在 max_tokens 被拒后切到 max_completion_tokens。 */
+export const setProbeAnthropicCapField = (field: AnthropicCapField) => {
+  anthropicCapField = field
+}
+
+export const probeAnthropicCapField = (): AnthropicCapField => anthropicCapField
+
 const anthropicProtocol: ProbeProtocol = {
   id: 'anthropic',
   capabilities: { structuredOutput: true, streamPure: false },
@@ -476,10 +495,12 @@ const anthropicProtocol: ProbeProtocol = {
     }
   },
   baseBody(model, prompt) {
-    return { model, max_tokens: PROBE_DEFAULT_CAP, messages: [{ role: 'user', content: prompt }] }
+    return { model, [anthropicCapField]: PROBE_DEFAULT_CAP, messages: [{ role: 'user', content: prompt }] }
   },
   applyMaxTokens(body, n) {
-    body.max_tokens = n
+    delete body.max_tokens
+    delete body.max_completion_tokens
+    body[anthropicCapField] = n
   },
   applyTools(body, tools, choice) {
     body.tools = tools.map(t => ({
@@ -523,7 +544,7 @@ const anthropicProtocol: ProbeProtocol = {
       case 'temperature': return { temperature: 0.2 }
       case 'top_p': return { top_p: 0.9 }
       case 'reasoning_effort': return { reasoning_effort: 'low' }
-      case 'max_tokens': return { max_tokens: PROBE_DEFAULT_CAP }
+      case 'max_tokens': return { [anthropicCapField]: PROBE_DEFAULT_CAP }
       case 'structured_output':
         return { output_config: { format: { type: 'json_schema', schema: PROBE_JSON_SCHEMA } } }
       case 'tool_calling': return weatherAndOrder('anthropic')
@@ -618,7 +639,7 @@ export const probeChatMaxTokenBlame = (err: string): ChatMaxTokenKey | 'conflict
 }
 
 /** pretty JSON 只取 message。sibling 字段（如 model=xxx-thinking）不能当判定。 */
-const probeErrorText = (err: string): string => {
+export const probeErrorMessage = (err: string): string => {
   const t = String(err || '').trim()
   if (!t.startsWith('{')) return err
   try {
@@ -634,7 +655,7 @@ const probeErrorText = (err: string): string => {
 
 /** thinking / 思考模式拒绝 required、object 等强制 tool_choice 时才降级。须同时命中 tool_choice 与思考相关词，避免「not support」单独误触发。 */
 export const probeToolChoiceForcedBlocked = (err: string): boolean => {
-  const e = probeErrorText(err).toLowerCase()
+  const e = probeErrorMessage(err).toLowerCase()
   if (!/tool[_ -]?choice/.test(e)) return false
   return /thinking|reasoning|思考|推理/.test(e)
 }
@@ -672,6 +693,17 @@ export const probeParamMatched = (id: string, err: string, format?: ProbeFormat)
   if (id === 'structured_output') return /response_format|json\s?schema|text\.format|output_config|output_format/.test(err)
   if (id === 'tool_calling') return /tool|function/.test(err)
   return err.includes(id)
+}
+
+/** 一条错误只点名一个待测参数时才归给它。同时点名多个（例如工具 + reasoning_effort）则拆开重测。 */
+export const probeSoleParamMatch = (ids: Iterable<string>, err: string, format?: ProbeFormat): string | null => {
+  const hit = [...ids].filter(id => probeParamMatched(id, err, format))
+  return hit.length === 1 ? hit[0] : null
+}
+
+export const probeResponsesResourceId = (data: unknown): string | null => {
+  const id = asObj(data)?.id
+  return typeof id === 'string' && id.startsWith('resp_') ? id : null
 }
 
 export const probeUsageOf = (format: ProbeFormat, data: any): ProbeUsage =>

@@ -188,6 +188,77 @@ test.describe('模型探测', () => {
     await expect(page.getByRole('dialog')).toContainText('组合请求通过')
   })
 
+  test('预期拒绝默认关闭：推理模型拒绝 temperature 仍是不支持', async ({ page }) => {
+    await page.route('**/v1/chat/completions', async route => {
+      const body = route.request().postDataJSON()
+      if (body?.temperature !== undefined) {
+        await route.fulfill({
+          status: 400, contentType: 'application/json',
+          body: JSON.stringify({ error: { message: "Unsupported value: 'temperature' does not support 0.2 with this model. Only the default (1) value is supported." } }),
+        })
+        return
+      }
+      await route.fulfill({ status: 200, contentType: 'application/json', body: CHAT_OK(11) })
+    })
+
+    await goto(page, /模型探测/)
+    await expect(page.locator('input[data-id="expect-reject"]')).not.toBeChecked()
+    await inputByLabel(page, '模型名称').fill('gpt-6-sol')
+    await page.getByRole('button', { name: '全不选' }).click()
+    await check(page, 'chat-basic')
+    await check(page, 'temperature')
+    await addChannel(page, { apiKey: 'sk-test-probe' })
+    await page.getByRole('button', { name: '▶ 开始测试' }).click()
+    await page.getByRole('dialog').locator('input').fill('e2e-预期拒绝关闭')
+    await page.getByRole('button', { name: '确认并开始' }).click()
+
+    const tile = page.locator('main').getByRole('button', { name: /temperature/ })
+    await expect(tile).toContainText('不支持', { timeout: 10000 })
+    await expect(tile).not.toContainText('符合预期')
+    await expect(tile).not.toContainText('异常')
+  })
+
+  test('勾选预期拒绝：该拒的 temperature 记符合预期，接受了记异常', async ({ page }) => {
+    await page.route('**/v1/chat/completions', async route => {
+      const body = route.request().postDataJSON()
+      if (body?.temperature !== undefined) {
+        await route.fulfill({
+          status: 400, contentType: 'application/json',
+          body: JSON.stringify({ error: { message: "Unsupported value: 'temperature' does not support 0.2 with this model. Only the default (1) value is supported." } }),
+        })
+        return
+      }
+      await route.fulfill({ status: 200, contentType: 'application/json', body: CHAT_OK(11) })
+    })
+
+    await goto(page, /模型探测/)
+    await inputByLabel(page, '模型名称').fill('gpt-6-sol')
+    await page.getByRole('button', { name: '全不选' }).click()
+    await check(page, 'chat-basic')
+    await check(page, 'temperature')
+    await check(page, 'expect-reject')
+    await addChannel(page, { apiKey: 'sk-test-probe' })
+    await page.getByRole('button', { name: '▶ 开始测试' }).click()
+    await page.getByRole('dialog').locator('input').fill('e2e-预期拒绝开启')
+    await page.getByRole('button', { name: '确认并开始' }).click()
+
+    const tile = page.locator('main').getByRole('button', { name: /temperature/ })
+    await expect(tile).toContainText('符合预期', { timeout: 10000 })
+    await expect(tile).toContainText('不接受该 temperature')
+
+    await page.unroute('**/v1/chat/completions')
+    await page.route('**/v1/chat/completions', async route => {
+      await route.fulfill({ status: 200, contentType: 'application/json', body: CHAT_OK(11) })
+    })
+    await page.getByRole('button', { name: '实时进度' }).click()
+    await page.getByRole('button', { name: '▶ 开始测试' }).click()
+    await page.getByRole('dialog').locator('input').fill('e2e-预期拒绝却成功')
+    await page.getByRole('button', { name: '确认并开始' }).click()
+    const again = page.locator('main').getByRole('button', { name: /temperature/ })
+    await expect(again).toContainText('异常', { timeout: 10000 })
+    await expect(again).toContainText('不应接受 temperature')
+  })
+
   test('工具调用：combo auto 后再发强制 get_weather', async ({ page }) => {
     const chatBodies: any[] = []
     const responsesBodies: any[] = []
@@ -1088,7 +1159,7 @@ test.describe('模型探测', () => {
     await page.getByRole('button', { name: /历史/ }).click()
     const main = page.locator('main')
     await expect(main).toContainText('e2e-历史结构化Anthropic')
-    await expect(main).toContainText('通过 1 · 失败 0 · 不支持 0')
+    await expect(main).toContainText('通过 1 · 失败 0 · 不支持 0 · 符合预期 0 · 未测 0')
     await main.getByRole('button', { name: '查看' }).click()
     await expect(main).toContainText('通过 1')
     await expect(main).not.toContainText('不支持 1')
@@ -1747,7 +1818,30 @@ test.describe('模型探测', () => {
     expect(chatBodies.some(b => JSON.stringify(b.tools || []).includes('"type":"web_search"'))).toBe(false)
   })
 
-  test('原生工具：2xx 无调用证据判失败', async ({ page }) => {
+  test('原生工具：明确不支持仍记不支持', async ({ page }) => {
+    await page.route('**/v1/responses', async route => {
+      await route.fulfill({
+        status: 400, contentType: 'application/json',
+        body: JSON.stringify({ error: { message: 'unknown tool: web_search is not supported' } }),
+      })
+    })
+
+    await goto(page, /模型探测/)
+    await inputByLabel(page, '模型名称').fill('gpt-4o')
+    await page.getByRole('button', { name: '全不选' }).click()
+    await check(page, 'responses-basic')
+    await check(page, 'native-openai-web_search')
+    await addChannel(page, { apiKey: 'sk-test-probe' })
+    await page.getByRole('button', { name: '▶ 开始测试' }).click()
+    await page.getByRole('dialog').locator('input').fill('e2e-原生明确不支持')
+    await page.getByRole('button', { name: '确认并开始' }).click()
+
+    const tile = page.locator('main').getByRole('button', { name: /OpenAI 联网搜索/ })
+    await expect(tile).toContainText('不支持', { timeout: 10000 })
+    await expect(tile).not.toContainText('异常')
+  })
+
+  test('原生工具：2xx 无调用证据判异常', async ({ page }) => {
     await page.route('**/v1/chat/completions', async route => {
       await route.fulfill({ status: 200, contentType: 'application/json', body: CHAT_OK(12) })
     })
@@ -1767,6 +1861,7 @@ test.describe('模型探测', () => {
     await page.getByRole('button', { name: '确认并开始' }).click()
 
     const tile = page.locator('main').getByRole('button', { name: /OpenAI 联网搜索/ })
-    await expect(tile).toContainText('没有 web_search 的调用或结果证据', { timeout: 10000 })
+    await expect(tile).toContainText('异常', { timeout: 10000 })
+    await expect(tile).toContainText('没有 web_search 的调用或结果证据')
   })
 })

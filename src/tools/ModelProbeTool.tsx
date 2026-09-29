@@ -11,8 +11,8 @@ import { downloadProbeReportHtml } from './ModelProbeExport'
 import {
   type ProbeFormat, type ProbeSseEvent, type ProbeUsage,
   probeEmptyUsage, probeUsageOf, probeUsageFromSse, probeParseSseBlock,
-  probeProtocolOf, probeParamComboBody, probeParamMatched,
-  probeChatMaxTokenBlame, probeChatMaxAcceptLabel, probeToolChoiceForcedBlocked, CHAT_MAX_TOKEN_KEYS,
+  probeProtocolOf, probeParamComboBody, probeSoleParamMatch,
+  probeChatMaxTokenBlame, probeChatMaxAcceptLabel, probeToolChoiceForcedBlocked, probeResponsesResourceId, setProbeAnthropicCapField, CHAT_MAX_TOKEN_KEYS,
   PROBE_ENDPOINTS, PROBE_RED_PNG_B64, PROBE_TRUNCATION_PROMPT, PROBE_TRUNCATION_CAP, PROBE_DEFAULT_CAP,
   PROBE_SCHEMA_PROMPT, PROBE_SCHEMA_CAP, PROBE_TOOL_FORCE_PROMPT, PROBE_WEATHER_TOOL,
   PROBE_SYSTEM_INSTRUCTION, PROBE_SYSTEM_USER, PROBE_MULTITURN_TURN1, PROBE_MULTITURN_TURN2,
@@ -28,6 +28,12 @@ import {
   ALL_BUILTIN_PROBE_CASES, applyBuiltinTool, builtinCaseById, matchBuiltinToolCases,
   oracleNativeToolEvidence, oracleUnsupportedNativeTool,
 } from './model-probe/builtin-tools'
+import {
+  type ProbeProfileId,
+  aggregateProbeStatus, anthropicBaseBlocked, anthropicCapAction, anthropicMaxTokensConclusion,
+  basicProtocolGate, decideFamily, nameSuggestsGpt, profileFromName, reclassifyExpected, scoreProtocolGate,
+} from './model-probe/profiles'
+import { decideOrigin, signalsFromProbeLogs } from './model-probe/origin'
 
 // ─── Tool: 模型探测 ─────────────────────────────────────────────────────────────
 // 定位：API 渠道兼容性实验台 —— 三种协议格式 × 参数/流式/缓存/Token 计数稳定性，
@@ -35,8 +41,9 @@ import {
 // 参数 combo 只验接受；上限/工具/结构化输出在接受后再发语义请求；
 // System / 多轮核验指令；图片输入默认不勾选。
 // 厂商内置工具（kind=native）按模型名命中后追加，默认不勾，单独发请求。
+// 「预期拒绝」（kind=score）默认不勾，不发请求，只决定要不要把本该拒绝的结果改判。
 
-type ProbeStatus = 'passed' | 'failed' | 'unsupported' | 'skipped'
+type ProbeStatus = 'passed' | 'failed' | 'abnormal' | 'unsupported' | 'skipped' | 'expected' | 'untested'
 
 interface ProbeTestDef {
   id: string
@@ -44,7 +51,7 @@ interface ProbeTestDef {
   name: string
   desc: string
   explain: string
-  kind: 'basic' | 'parameter' | 'stream' | 'token' | 'cache' | 'extra' | 'native'
+  kind: 'basic' | 'parameter' | 'stream' | 'token' | 'cache' | 'extra' | 'native' | 'score'
   format?: ProbeFormat
   subtype?: string
   defaultSelected?: boolean
@@ -83,6 +90,9 @@ interface ProbeResult {
   repro: { url: string; headers: Record<string, string>; body: any; status: number | null; requestId: string | null } | null
 }
 
+interface ProbeVerdictLayer { label: string; reasons: string[] }
+interface ProbeVerdict { family: ProbeVerdictLayer; access: ProbeVerdictLayer; upstream: ProbeVerdictLayer }
+
 interface ProbeReport {
   id: string
   name: string
@@ -93,6 +103,7 @@ interface ProbeReport {
   results: Record<string, ProbeResult>
   summary: Record<ProbeStatus, number>
   logs: ProbeLog[]
+  verdict?: ProbeVerdict | null
 }
 
 interface ProbeCfg {
@@ -130,28 +141,59 @@ const PROBE_FORMAT_LABELS: Record<ProbeFormat, string> = {
 }
 const PROBE_FORMAT_SHORT: Record<ProbeFormat, string> = { chat: 'chat', responses: 'responses', anthropic: 'anthropic' }
 const PROBE_REQUEST_ID_HEADERS = ['x-oneapi-request-id', 'x-request-id', 'x-openai-request-id', 'request-id', 'x-goog-request-id']
-const PROBE_STATUS_LABELS: Record<ProbeStatus, string> = { passed: '通过', failed: '失败', unsupported: '不支持', skipped: '已跳过' }
+const PROBE_STATUS_LABELS: Record<ProbeStatus, string> = {
+  passed: '通过', failed: '失败', abnormal: '异常', unsupported: '不支持', skipped: '已跳过', expected: '符合预期', untested: '未测',
+}
+const PROBE_STATUS_ORDER: ProbeStatus[] = ['passed', 'failed', 'abnormal', 'unsupported', 'expected', 'untested', 'skipped']
+const probeEmptySummary = (): Record<ProbeStatus, number> => ({
+  passed: 0, failed: 0, abnormal: 0, unsupported: 0, skipped: 0, expected: 0, untested: 0,
+})
+const probeStatusColor = (status: string): string => (
+  status === 'failed' ? 'var(--err)'
+    : status === 'abnormal' ? 'color-mix(in srgb, var(--err) 55%, var(--warn))'
+    : status === 'passed' ? 'var(--ok)'
+      : status === 'unsupported' ? 'var(--warn)'
+        : status === 'expected' ? 'var(--accent)'
+          : status === 'running' ? 'var(--accent)'
+            : 'var(--t3)'
+)
+const probeSummaryLine = (summary: Record<ProbeStatus, number>): string => {
+  const abnormal = summary.abnormal || 0
+  const abnormalPart = abnormal > 0 ? ` · 异常 ${abnormal}` : ''
+  return `通过 ${summary.passed || 0} · 失败 ${summary.failed || 0}${abnormalPart} · 不支持 ${summary.unsupported || 0} · 符合预期 ${summary.expected || 0} · 未测 ${summary.untested || 0}`
+}
+const probeFormatMark = (status: string): string => (
+  status === 'passed' ? '✓'
+    : status === 'failed' ? '✗'
+      : status === 'abnormal' ? '!'
+      : status === 'unsupported' ? '△'
+        : status === 'expected' ? '○'
+          : status === 'untested' ? '·'
+            : status === 'skipped' ? '−'
+              : '…'
+)
 const PROBE_ROW_STATUS_LABELS: Record<string, string> = { ...PROBE_STATUS_LABELS, pending: '待执行', running: '执行中' }
 
 const PROBE_TESTS: ProbeTestDef[] = [
   { id: 'chat-basic', group: '协议基础', name: 'OpenAI Chat Completions', desc: '验证 /v1/chat/completions 基础非流式请求', explain: 'OpenAI 系兼容网关最通用的协议格式，也是中转渠道的第一道验证关卡。', kind: 'basic', format: 'chat' },
   { id: 'responses-basic', group: '协议基础', name: 'OpenAI Responses', desc: '验证 /v1/responses 基础非流式请求', explain: 'Responses API 是 OpenAI 新一代接口，请求/响应结构与 Chat Completions 不同。', kind: 'basic', format: 'responses' },
   { id: 'anthropic-basic', group: '协议基础', name: 'Anthropic Messages', desc: '验证 /v1/messages 基础非流式请求', explain: 'Anthropic Messages 使用 x-api-key 鉴权与不同的消息结构，常被中转站映射为 OpenAI 格式。', kind: 'basic', format: 'anthropic' },
-  { id: 'temperature', group: '参数与特性', name: 'temperature', desc: '采样温度参数支持情况', explain: 'temperature 控制采样随机性；部分轻量模型或中转映射可能忽略该参数，极端情况下直接报错。', kind: 'parameter' },
-  { id: 'top_p', group: '参数与特性', name: 'top_p', desc: '核采样参数支持情况', explain: 'top_p 与 temperature 同为采样参数，有些实现只支持其一或两者互斥。', kind: 'parameter' },
-  { id: 'reasoning_effort', group: '参数与特性', name: 'reasoning_effort', desc: '推理强度参数支持情况', explain: 'reasoning_effort（low/medium/high）仅推理模型支持，普通模型通常会报参数错误。', kind: 'parameter' },
-  { id: 'max_tokens', group: '参数与特性', name: 'Token 上限参数', desc: 'Chat 同时试 max_tokens 与 max_completion_tokens，并核验截断原因', explain: 'Chat Completions 在同一发里带 max_tokens 与 max_completion_tokens；其中一个被拒就丢掉该字段再试，互斥则拆开各测一次。Responses 用 max_output_tokens，Anthropic 用 max_tokens。接受后再发长输出 + 很小 cap 核验截断原因。', kind: 'parameter' },
+  { id: 'expect-reject', group: '参数与特性', name: '预期拒绝', desc: '按模型档位核对本来就该拒绝的请求。默认不勾选', explain: '勾选后才改判。GPT 推理档拒绝 temperature、top_p，或 Chat 上工具与 reasoning_effort 不能同用，记为符合预期；这些请求却返回成功则记异常。Codex 产品线的 Chat Completions、Claude 官方的 Chat / Responses、Claude 的 reasoning_effort 同样处理。gpt-4o、gpt-4.1 和未识别的模型名仍按普通能力判定。不勾选时，拒绝记为不支持或失败，成功记为通过。Anthropic 被要求改用 max_completion_tokens 时，无论是否勾选都会改字段再测。', kind: 'score', defaultSelected: false },
+  { id: 'temperature', group: '参数与特性', name: 'temperature', desc: '采样温度参数支持情况', explain: 'temperature 控制采样随机性。拒绝记为不支持，接受记为通过。勾选「预期拒绝」后，GPT 推理模型拒绝非默认值或不接受该参数时记为符合预期，请求成功则记异常。gpt-4o / gpt-4.1 不套这套规则。', kind: 'parameter' },
+  { id: 'top_p', group: '参数与特性', name: 'top_p', desc: '核采样参数支持情况', explain: 'top_p 与 temperature 同为采样参数。默认按是否接受来判。勾选「预期拒绝」后，GPT 推理模型不接受 top_p 记为符合预期，请求成功记异常。', kind: 'parameter' },
+  { id: 'reasoning_effort', group: '参数与特性', name: 'reasoning_effort', desc: '推理强度参数支持情况', explain: 'reasoning_effort（low/medium/high）仅推理模型支持，普通模型通常会报参数错误。勾选「预期拒绝」后，Claude 拒绝该参数记为符合预期，接受则记异常。', kind: 'parameter' },
+  { id: 'max_tokens', group: '参数与特性', name: 'Token 上限参数', desc: 'Chat 同时试 max_tokens 与 max_completion_tokens，并核验截断原因', explain: 'Chat Completions 在同一发里带 max_tokens 与 max_completion_tokens；其中一个被拒就丢掉该字段再试，互斥则拆开各测一次。Responses 用 max_output_tokens，Anthropic 默认用 max_tokens。推理模型若被要求改用 max_completion_tokens，会改字段再测；勾选「预期拒绝」时这一次拒绝记为符合预期。接受后再发长输出 + 很小 cap 核验截断原因。', kind: 'parameter' },
   { id: 'structured_output', group: '参数与特性', name: '结构化输出', desc: '接受 Schema 约束并校验返回 JSON', explain: 'combo 先验证 json_schema / text.format / output_config 是否被接受。接受后再发充足 cap 的 Schema 请求，解析 JSON 并校验 ok 为布尔值。Anthropic 走 output_config.format。', kind: 'parameter' },
   { id: 'tool_calling', group: '参数与特性', name: '工具调用', desc: '接受 tools，并强制调用 get_weather', explain: 'combo 用双工具 + tool_choice=auto 验证请求被接受。接受后再发强制指定 get_weather，核验响应里真有该调用。thinking 模式拒绝 required/object 的 tool_choice 时降级为 auto 再核验。无调用但 HTTP 成功记失败。', kind: 'parameter' },
   { id: 'stream-false', group: '传输与稳定性', name: '非流式响应', desc: '验证 stream=false 的完整 JSON 响应与 usage', explain: '非流式是计费与解析最简单的路径。HTTP 成功时必须带回 input 与 output Token，否则视为计费无法落地。', kind: 'stream' },
   { id: 'stream-true', group: '传输与稳定性', name: 'SSE 流式响应', desc: '验证 stream=true、SSE 格式与带 Token 上限时的 usage', explain: '流式响应按 SSE 分块返回。Chat 带 max_completion_tokens、Responses 带 max_output_tokens、Anthropic 带 max_tokens。通过条件：SSE 可解析且能读到 input + output Token。结束标记（[DONE] / response.completed / message_stop）写入说明，不作为通过条件。', kind: 'stream' },
   { id: 'stream-pure', group: '传输与稳定性', name: '纯流式（无 Token 上限）', desc: 'Chat 最小体：model + messages + stream，提示「讲个笑话」', explain: '不带 max_tokens / max_completion_tokens。用于检出「加上限才回 usage、不加就不回」的渠道。只跑 Chat Completions；Anthropic 强制要 max_tokens，无法做此对照。通过条件：SSE 可解析且能读到 input + output Token。', kind: 'stream', format: 'chat' },
   { id: 'token-stability', group: '传输与稳定性', name: 'Token 计算稳定性', desc: '对固定短输入重复计数并比较波动', explain: '同一输入多次请求的输入 Token 应恒定；混入固定随机串可暴露计数不一致（如后端换编码）。HTTP 成功时必须同时带回 input 与 output Token。', kind: 'token' },
-  { id: 'cache-chat', group: '缓存能力', name: 'Chat 自动前缀缓存', desc: '重复长前缀并读取 cached_tokens', explain: 'OpenAI 系自动前缀缓存无需显式声明，命中时 prompt_tokens_details.cached_tokens > 0。最多 3 次，首次命中即停。此处仅快速判定是否支持，详细命中率、覆盖率与节省测算请用「缓存命中率」工具。', kind: 'cache', format: 'chat' },
-  { id: 'cache-responses', group: '缓存能力', name: 'Responses 自动前缀缓存', desc: '重复长前缀并读取 cached_tokens', explain: 'Responses 格式命中时 input_tokens_details.cached_tokens > 0。最多 3 次，首次命中即停。此处仅快速判定是否支持，详细命中率、覆盖率与节省测算请用「缓存命中率」工具。', kind: 'cache', format: 'responses' },
+  { id: 'cache-chat', group: '缓存能力', name: 'Chat 自动前缀缓存', desc: '重复长前缀并读取 cached_tokens', explain: 'OpenAI 系自动前缀缓存无需显式声明。cached_tokens > 0 为通过；只看到 cache_write_tokens 记为符合预期；读写字段都没有才是不支持。GPT 请求带稳定的 prompt_cache_key。最多 3 次。', kind: 'cache', format: 'chat' },
+  { id: 'cache-responses', group: '缓存能力', name: 'Responses 自动前缀缓存', desc: '重复长前缀并读取 cached_tokens', explain: 'Responses 命中时 input_tokens_details.cached_tokens > 0。只写入、三次未读到命中记为符合预期。GPT 请求带稳定的 prompt_cache_key。最多 3 次。', kind: 'cache', format: 'responses' },
   { id: 'cache-anthropic', group: '缓存能力', name: 'Anthropic 显式缓存', desc: '使用 cache_control 并读取 cache_read_input_tokens', explain: 'Anthropic 需在 content block 显式声明 cache_control，命中时 cache_read_input_tokens > 0。最多 3 次，首次命中即停。此处仅快速判定是否支持，详细命中率、覆盖率与节省测算请用「缓存命中率」工具。', kind: 'cache', format: 'anthropic' },
   { id: 'system-prompt', group: '补充场景', name: 'System 提示词', desc: '检查系统指令是否被正确遵循', explain: '发出 Always reply exactly SYSTEM_OK。通过条件：HTTP 成功、有 usage，且回复文本含 SYSTEM_OK。', kind: 'extra', subtype: 'system' },
-  { id: 'multi-turn', group: '补充场景', name: '多轮对话', desc: '两跳口令：先记住再回传真实回复', explain: '第一跳让模型记住口令 ORBIT 并短确认（不要说出入口令）；把真实 assistant 文本拼进第二跳再问口令。通过条件：第二跳回复含 ORBIT。拿不到 assistant 文本则失败。', kind: 'extra', subtype: 'multiturn' },
+  { id: 'multi-turn', group: '补充场景', name: '多轮对话', desc: '两跳口令：先记住再回传真实回复', explain: '第一跳让模型记住口令 ORBIT 并短确认；第二跳只回传角色和文本，去掉服务端 item id。通过条件：第二跳回复含 ORBIT。Responses 若带回 resp_ id，会另发一发 previous_response_id，只用来判断上游是否跨资源，不改变这条用例的结论。', kind: 'extra', subtype: 'multiturn' },
   { id: 'image-input', group: '补充场景', name: '图片输入', desc: '内嵌纯红 PNG，识别主色', explain: '三种协议各自原生图片字段（Chat image_url / Responses input_image 字符串 data URL / Anthropic base64 image block）。问主色，期望 red。4xx 且错误像不支持视觉则记不支持。默认不勾选。', kind: 'extra', subtype: 'image', defaultSelected: false },
   { id: 'error-shape', group: '补充场景', name: '错误码规范性', desc: '使用无效模型检查 HTTP 状态与错误结构', explain: '无效模型应返回 4xx 与结构化错误对象，验证错误形态是否规范。', kind: 'extra', subtype: 'error' },
   { id: 'concurrency', group: '补充场景', name: '并发请求稳定性', desc: '并行发起 3 个低消耗请求', explain: '并发请求检验渠道的连接池与限流策略。', kind: 'extra', subtype: 'concurrency' },
@@ -265,17 +307,20 @@ const probeBoundFormats = (t: ProbeTestDef, activeFormats: ProbeFormat[]): Probe
   return formats.filter(f => probeAppliesToFormat(t.id, f))
 }
 const probeSkipKeysOf = (t: ProbeTestDef, activeFormats: ProbeFormat[]): string[] => {
+  if (t.kind === 'score') return []
   if (!probeMultiFormatKinds.includes(t.kind)) return [t.id]
   return probeBoundFormats(t, activeFormats).map(f => probeKey(t.id, f))
 }
 // 已勾选的绑定协议项（如纯流式@chat）即使对应基础格式未启用，也要占住结果键，
 // 否则中止时回填不到「已跳过」，「另有 N 项未执行」会少算。未勾选路径仍走 boundFormats。
 const probeExpectedKeysOf = (t: ProbeTestDef, activeFormats: ProbeFormat[]): string[] => {
+  if (t.kind === 'score') return []
   if (!probeMultiFormatKinds.includes(t.kind)) return [t.id]
   if (t.format) return [probeKey(t.id, t.format)]
   return probeBoundFormats(t, activeFormats).map(f => probeKey(t.id, f))
 }
 const probeSelectedCountOf = (t: ProbeTestDef, activeFormats: ProbeFormat[]): number => {
+  if (t.kind === 'score') return 0
   if (!probeMultiFormatKinds.includes(t.kind)) return 1
   if (t.format) return 1
   return probeBoundFormats(t, activeFormats).length
@@ -292,18 +337,14 @@ const probeSanitizeReport = (rep: ProbeReport): ProbeReport => {
   for (const [k, v] of Object.entries(rep.results || {})) {
     if (probeResultVisible(k, v)) results[k] = v
   }
-  const summary: Record<ProbeStatus, number> = { passed: 0, failed: 0, unsupported: 0, skipped: 0 }
-  for (const r of Object.values(results)) summary[r.status]++
+  const summary = probeEmptySummary()
+  for (const r of Object.values(results)) {
+    if (summary[r.status] != null) summary[r.status]++
+  }
   return { ...rep, results, summary }
 }
-const probeAggregateStatus = (items: { status: ProbeStatus }[]): ProbeStatus => {
-  if (!items.length) return 'skipped'
-  if (items.some(x => x.status === 'failed')) return 'failed'
-  if (items.every(x => x.status === 'passed')) return 'passed'
-  if (items.every(x => x.status === 'unsupported')) return 'unsupported'
-  if (items.every(x => x.status === 'skipped')) return 'skipped'
-  return 'failed'
-}
+const probeAggregateStatus = (items: { status: ProbeStatus }[]): ProbeStatus =>
+  aggregateProbeStatus(items.map(item => item.status))
 
 function loadProbeCfg(): Record<string, any> {
   if (typeof window === 'undefined') return {}
@@ -491,11 +532,40 @@ function ProbeIoChip({ usage }: { usage?: ProbeUsage | null }) {
   )
 }
 
+function ProbeVerdictBlock({ verdict }: { verdict: ProbeVerdict }) {
+  const rows: { label: string; layer: ProbeVerdictLayer }[] = [
+    { label: '家族', layer: verdict.family },
+    { label: '接入层', layer: verdict.access },
+    { label: '上游', layer: verdict.upstream },
+  ]
+  return (
+    <div className="mt-4 grid gap-2">
+      {rows.map(row => (
+        <div key={row.label} className="grid items-baseline gap-x-3" style={{ gridTemplateColumns: '4.5rem minmax(0,1fr)' }}>
+          <div className="text-xs font-semibold leading-5" style={{ color: 'var(--t3)' }}>{row.label}</div>
+          <div className="min-w-0">
+            <div className="text-sm font-semibold leading-5" style={{ color: 'var(--text)' }}>{row.layer.label}</div>
+            {row.layer.reasons.length > 0 && (
+              <ul className="mt-0.5 space-y-0.5">
+                {row.layer.reasons.map(reason => (
+                  <li key={reason} className="text-xs leading-5 break-words" style={{ color: 'var(--t2)' }}>{reason}</li>
+                ))}
+              </ul>
+            )}
+          </div>
+        </div>
+      ))}
+    </div>
+  )
+}
+
 function ProbeStatusBadge({ status }: { status: ProbeStatus }) {
   const s = status === 'passed' ? { background: 'var(--okBg)', color: 'var(--ok)' }
     : status === 'failed' ? { background: 'var(--errBg)', color: 'var(--err)' }
+    : status === 'abnormal' ? { background: 'color-mix(in srgb, var(--err) 14%, transparent)', color: 'color-mix(in srgb, var(--err) 55%, var(--warn))' }
     : status === 'unsupported' ? { background: 'var(--warnBg)', color: 'var(--warn)' }
-    : { background: 'var(--s2)', color: 'var(--t2)' }
+    : status === 'expected' ? { background: 'var(--accentSub)', color: 'var(--accent)' }
+    : { background: 'var(--s2)', color: 'var(--t3)' }
   return (
     <span className="inline-flex items-center px-2 py-0.5 rounded-full text-[11px] font-semibold whitespace-nowrap" style={s}>
       {PROBE_STATUS_LABELS[status]}
@@ -601,7 +671,7 @@ function ProbeReportTiles({ report }: { report: ProbeReport }) {
             onClick={e => e.stopPropagation()}
           >
             <div className="flex items-start justify-between gap-3">
-              <div className="min-w-0">
+              <div className="min-w-0 flex-1">
                 <div className="flex flex-wrap items-center gap-2">
                   <ProbeStatusBadge status={detail.result.status} />
                   {probeFormatOfKey(detail.key) && (
@@ -611,11 +681,11 @@ function ProbeReportTiles({ report }: { report: ProbeReport }) {
                   )}
                 </div>
                 <h2 className="text-lg font-bold mt-2" style={{ color: 'var(--text)', letterSpacing: '-0.014em' }}>{detail.test.name}</h2>
-                <p className="text-xs mt-1 leading-5" style={{ color: 'var(--t3)' }}>{detail.test.explain}</p>
+                <p className="text-xs mt-1 leading-5 break-words" style={{ color: 'var(--t3)' }}>{detail.test.explain}</p>
               </div>
-              <Btn small variant="ghost" onClick={() => setDetail(null)}>关闭</Btn>
+              <Btn small variant="ghost" className="shrink-0" onClick={() => setDetail(null)}>关闭</Btn>
             </div>
-            <p className="text-sm mt-3 leading-6" style={{ color: 'var(--text)' }}>{detail.result.detail}</p>
+            <p className="text-sm mt-3 leading-6 break-words" style={{ color: 'var(--text)' }}>{detail.result.detail}</p>
             {detail.result.checks && detail.result.checks.length > 0 && (
               <div className="mt-3 flex flex-wrap gap-1.5">
                 {detail.result.checks.map(c => (
@@ -673,8 +743,7 @@ function ProbeFormatCard({ t, checked, disabled, status, onChange }: {
   onChange: () => void
 }) {
   const fmt = t.format!
-  const statusColor = status.status === 'failed' ? 'var(--err)' : status.status === 'passed' ? 'var(--ok)'
-    : status.status === 'unsupported' ? 'var(--warn)' : status.status === 'running' ? 'var(--accent)' : 'var(--t3)'
+  const statusColor = probeStatusColor(status.status)
   return (
     <label
       className={`probe-format-card${checked ? ' is-checked' : ''}${disabled ? ' is-disabled' : ''}`}
@@ -763,7 +832,7 @@ const ProbeConfigPane = React.memo(function ProbeConfigPane({
 }) {
   const hasActiveChannel = channels.some(c => c.id === activeChId)
   return (
-    <div className="w-72 flex-shrink-0 flex flex-col p-4 gap-3.5 overflow-y-auto" style={{ borderRight: '1px solid var(--border)', background: 'var(--s1)' }}>
+    <div className="w-full max-h-[46%] flex-shrink-0 flex flex-col p-4 gap-3.5 overflow-y-auto border-b lg:max-h-none lg:w-72 lg:border-b-0 lg:border-r" style={{ borderColor: 'var(--border)', background: 'var(--s1)' }}>
       <div>
         <div className="flex items-center gap-1.5 mb-1.5">
           <Label className="block mb-0">使用渠道</Label>
@@ -1052,6 +1121,10 @@ function ModelProbeTool() {
 
   const logsRef = useRef<ProbeLog[]>([])
   const stopRef = useRef(false)
+  const formatBlockerRef = useRef<Partial<Record<ProbeFormat, string>>>({})
+  const profileRef = useRef<ProbeProfileId>('unknown')
+  const officialAnthropicRef = useRef(false)
+  const anthropicMaxTokensRowRef = useRef<ProbeResult | null>(null)
   const activeAbortRef = useRef<AbortController | null>(null)
 
   useEffect(() => {
@@ -1205,10 +1278,70 @@ function ModelProbeTool() {
   const runProbeBasic = async (t: ProbeTestDef): Promise<ProbeResult> => {
     const format = t.format!
     const log = probeNewLog(t.id, t.name, format)
+    const scoreExpected = !!selectedRef.current['expect-reject']
+    const gateOf = (ok: boolean, status: number | null, message: string) =>
+      scoreProtocolGate(
+        basicProtocolGate(profileRef.current, format, ok, status, message, officialAnthropicRef.current),
+        scoreExpected,
+      )
     try {
       const r = await probeRequest(log, format, probeBaseBody(cfgRef.current!, format))
-      if (r.ok) return probeResult('passed', '基础请求返回成功', { format, duration: r.log.duration, usage: r.log.usage, repro: probeReproOf(r.log) })
-      return probeResult('failed', probeExtractError(r.data), { format, duration: r.log.duration, usage: r.log.usage, repro: probeReproOf(r.log) })
+      if (r.ok) {
+        if (gateOf(true, r.status, '') === 'abnormal') {
+          const missing = probeUsageComplete(r.log.usage) ? '' : probeUsageFailDetail(r.log.usage)
+          return probeResult('abnormal', `异常：Codex 产品线官方不提供 Chat Completions，但渠道返回了成功。${missing}`, {
+            format, duration: r.log.duration, usage: r.log.usage, repro: probeReproOf(r.log),
+          })
+        }
+        return probeResult('passed', '基础请求返回成功', { format, duration: r.log.duration, usage: r.log.usage, repro: probeReproOf(r.log) })
+      }
+      const err = probeExtractError(r.data)
+      if (format === 'anthropic' && anthropicBaseBlocked(err)) {
+        if (anthropicCapAction(profileRef.current, err) === 'retry') {
+          setProbeAnthropicCapField('max_completion_tokens')
+          const retryLog = probeNewLog(t.id, `${t.name}（max_completion_tokens）`, format)
+          try {
+            const retry = await probeRequest(retryLog, format, probeBaseBody(cfgRef.current!, format))
+            if (retry.ok) {
+              const row = anthropicMaxTokensConclusion(profileRef.current, err, scoreExpected)
+              if (row) {
+                anthropicMaxTokensRowRef.current = probeResult(row.status, row.detail, {
+                  format, duration: r.log.duration, usage: r.log.usage, repro: probeReproOf(r.log),
+                })
+              }
+              const note = row?.status === 'expected'
+                ? '基础请求返回成功。max_tokens 被拒符合预期，已改用 max_completion_tokens。'
+                : '基础请求返回成功。上游拒绝 max_tokens，已改用 max_completion_tokens。'
+              return probeResult('passed', note, { format, duration: retry.log.duration, usage: retry.log.usage, repro: probeReproOf(retry.log) })
+            }
+            setProbeAnthropicCapField('max_tokens')
+            const retryErr = probeExtractError(retry.data)
+            formatBlockerRef.current.anthropic = retryErr
+            return probeResult('failed', `Anthropic 未转译：${retryErr}`, {
+              format, duration: retry.log.duration, usage: retry.log.usage, repro: probeReproOf(retry.log),
+            })
+          } catch (e: any) {
+            setProbeAnthropicCapField('max_tokens')
+            formatBlockerRef.current.anthropic = err
+            return probeCatchResult(e, format, retryLog)
+          }
+        }
+        formatBlockerRef.current.anthropic = err
+        return probeResult('failed', `Anthropic 未转译：${err}`, { format, duration: r.log.duration, usage: r.log.usage, repro: probeReproOf(r.log) })
+      }
+      const blocked = gateOf(false, r.status, err)
+      if (blocked === 'expected' || blocked === 'unsupported') {
+        formatBlockerRef.current[format] = err
+        if (blocked === 'unsupported') {
+          return probeResult('unsupported', err, { format, duration: r.log.duration, usage: r.log.usage, repro: probeReproOf(r.log) })
+        }
+        const protocol = format === 'chat' ? 'Chat Completions' : 'Responses'
+        const why = profileRef.current === 'codex'
+          ? '符合预期：Codex 产品线不提供 Chat Completions。'
+          : `符合预期：Claude 官方不提供 ${protocol}。`
+        return probeResult('expected', `${why}${err}`, { format, duration: r.log.duration, usage: r.log.usage, repro: probeReproOf(r.log) })
+      }
+      return probeResult('failed', err, { format, duration: r.log.duration, usage: r.log.usage, repro: probeReproOf(r.log) })
     } catch (e: any) {
       return probeCatchResult(e, format, log)
     }
@@ -1311,9 +1444,26 @@ function ModelProbeTool() {
     }
   }
 
+  const untestedBecauseBlocked = (format: ProbeFormat): ProbeResult | null => {
+    const message = formatBlockerRef.current[format]
+    if (!message) return null
+    return probeResult('untested', `未测：同一协议被基础错误挡住。${message}`, { format })
+  }
+
   const runProbeParamSuite = async (format: ProbeFormat, paramIds: string[]): Promise<Record<string, ProbeResult>> => {
     const outcomes: Record<string, ProbeResult> = {}
+    const blockedMessage = formatBlockerRef.current[format]
+    if (blockedMessage) {
+      for (const id of paramIds.filter(id => probeAppliesToFormat(id, format))) {
+        outcomes[probeKey(id, format)] = probeResult('untested', `未测：同一协议被基础错误挡住。${blockedMessage}`, { format })
+      }
+      return outcomes
+    }
     const pending = new Set(paramIds.filter(id => probeAppliesToFormat(id, format)))
+    if (format === 'anthropic' && anthropicMaxTokensRowRef.current && pending.has('max_tokens')) {
+      outcomes[probeKey('max_tokens', format)] = anthropicMaxTokensRowRef.current
+      pending.delete('max_tokens')
+    }
     const chatMaxKeys = new Set<string>(format === 'chat' && pending.has('max_tokens') ? CHAT_MAX_TOKEN_KEYS : [])
     const rejectedMax: string[] = []
     let soloAlias: string | null = null
@@ -1386,14 +1536,21 @@ function ModelProbeTool() {
           continue
         }
       }
-      const identified = [...pending].filter(id => probeParamMatched(id, errText, format))
-      if (identified.length) {
-        for (const id of identified) {
-          outcomes[probeKey(id, format)] = probeResult('unsupported', probeExtractError(r.data), { format, duration: r.log.duration, usage: r.log.usage, repro: probeReproOf(r.log) })
-          pending.delete(id)
-        }
+      const sole = probeSoleParamMatch(pending, errText, format)
+      if (sole) {
+        outcomes[probeKey(sole, format)] = probeResult('unsupported', probeExtractError(r.data), { format, duration: r.log.duration, usage: r.log.usage, repro: probeReproOf(r.log) })
+        pending.delete(sole)
         continue
       }
+      const named = [...pending].filter(id => errText.includes(id) || (id === 'tool_calling' && /tool|function/.test(errText)))
+      const effortSplit = errText.includes('reasoning_effort') && /tool|function/.test(errText)
+      const reasoningLike = profileRef.current === 'reasoning' || profileRef.current === 'codex'
+      const scoreExpected = !!selectedRef.current['expect-reject']
+      const splitNote = named.length > 1
+        ? (effortSplit
+          ? (scoreExpected && reasoningLike ? '组合互斥符合预期，已拆开重测。' : '组合里工具与 reasoning_effort 互相点名，已拆开重测。')
+          : '一条错误同时点名多个参数，已拆开重测。')
+        : ''
       for (const id of [...pending]) {
         const singleLog = probeNewLog(probeKey(id, format), `${probeParamLabel(id)}（${PROBE_FORMAT_LABELS[format]}）`, format)
         const singleBody = probeComboBody(cfgRef.current!, format, [id], id === 'max_tokens' && format === 'chat' ? [...chatMaxKeys] : undefined)
@@ -1401,7 +1558,7 @@ function ModelProbeTool() {
           const one = await probeRequest(singleLog, format, singleBody)
           if (one.ok) {
             const maxNote = format === 'chat' && id === 'max_tokens' ? probeChatMaxAcceptLabel(chatMaxKeys, rejectedMax) : ''
-            const label = maxNote ? `独立降级请求通过；${maxNote}` : '独立降级请求通过'
+            const label = [maxNote ? `独立降级请求通过；${maxNote}` : '独立降级请求通过', splitNote].filter(Boolean).join(' ')
             const accepted = probeResult('passed', label, { format, duration: one.log.duration, usage: one.log.usage, repro: probeReproOf(one.log) })
             await finishPassed([id], accepted, label)
           } else if (format === 'chat' && id === 'max_tokens' && chatMaxKeys.size > 1) {
@@ -1432,8 +1589,9 @@ function ModelProbeTool() {
               markMaxUnsupported(last.log, probeExtractError(last.data))
             }
           } else {
-            const s: ProbeStatus = /unsupported|unknown|invalid|not supported|not implemented/i.test(probeExtractError(one.data)) ? 'unsupported' : 'failed'
-            outcomes[probeKey(id, format)] = probeResult(s, probeExtractError(one.data), { format, duration: one.log.duration, usage: one.log.usage, repro: probeReproOf(one.log) })
+            const raw = probeExtractError(one.data)
+            const s: ProbeStatus = /unsupported|unknown|invalid|not supported|not implemented/i.test(raw) ? 'unsupported' : 'failed'
+            outcomes[probeKey(id, format)] = probeResult(s, splitNote ? `${raw} ${splitNote}` : raw, { format, duration: one.log.duration, usage: one.log.usage, repro: probeReproOf(one.log) })
           }
         } catch (e: any) {
           outcomes[probeKey(id, format)] = probeCatchResult(e, format, singleLog)
@@ -1445,6 +1603,8 @@ function ModelProbeTool() {
   }
 
   const runProbeStream = async (t: ProbeTestDef, format: ProbeFormat): Promise<ProbeResult> => {
+    const blocked = untestedBecauseBlocked(format)
+    if (blocked) return blocked
     const cfg = cfgRef.current!
     const stream = t.id !== 'stream-false'
     let body: Record<string, any>
@@ -1471,6 +1631,8 @@ function ModelProbeTool() {
   }
 
   const runProbeToken = async (format: ProbeFormat, count: number, fixed: string): Promise<ProbeResult> => {
+    const blocked = untestedBecauseBlocked(format)
+    if (blocked) return blocked
     const key = probeKey('token-stability', format)
     const values: number[] = []
     const durations: number[] = []
@@ -1499,15 +1661,20 @@ function ModelProbeTool() {
   }
 
   const runProbeCache = async (format: ProbeFormat): Promise<ProbeResult> => {
+    const blocked = untestedBecauseBlocked(format)
+    if (blocked) return blocked
     const t = probeTestById('cache-' + format)!
     const prefix = ('ModelProbe fixed cache prefix. The following context is intentionally repeated for cache verification. ').repeat(180)
     const body: Record<string, any> = probeBaseBody(cfgRef.current!, format, prefix + '\nReply OK.')
     if (format === 'anthropic') {
       body.messages = [{ role: 'user', content: [{ type: 'text', text: prefix, cache_control: { type: 'ephemeral' } }, { type: 'text', text: 'Reply OK.' }] }]
+    } else if (nameSuggestsGpt(cfgRef.current!.model)) {
+      body.prompt_cache_key = 'modelprobe-cache'
     }
     const reads: number[] = []
     const durations: number[] = []
     let lastLog: ProbeLog | null = null
+    let maxWrite = 0
     for (let i = 0; i < 3; i++) {
       const log = probeNewLog(t.id, t.name, format)
       lastLog = log
@@ -1519,16 +1686,26 @@ function ModelProbeTool() {
       }
       if (!r.ok) return probeResult('failed', probeExtractError(r.data), { format, duration: r.log.duration, usage: r.log.usage, repro: probeReproOf(r.log) })
       const read = r.log.usage.cacheRead || 0
+      const write = r.log.usage.cacheWrite || 0
+      if (write > maxWrite) maxWrite = write
       reads.push(read)
       durations.push(r.log.duration)
       if (read > 0) {
         return probeResult('passed', `第 ${i + 1} 次请求命中缓存，读取 Token: ${read}`, { format, duration: Math.round(durations.reduce((a, b) => a + b, 0) / durations.length), usage: r.log.usage, cache: { hits: 1, total: i + 1, reads }, repro: probeReproOf(r.log) })
       }
     }
-    return probeResult('unsupported', '连续 3 次请求均未报告缓存命中，已停止重试', { format, duration: durations.length ? Math.round(durations.reduce((a, b) => a + b, 0) / durations.length) : null, usage: lastLog?.usage, cache: { hits: 0, total: 3, reads }, repro: lastLog ? probeReproOf(lastLog) : null })
+    const cacheSummary = { format, duration: durations.length ? Math.round(durations.reduce((a, b) => a + b, 0) / durations.length) : null, usage: lastLog?.usage, cache: { hits: 0, total: 3, reads }, repro: lastLog ? probeReproOf(lastLog) : null }
+    if (maxWrite > 0) {
+      return probeResult('expected', `符合预期：已报告缓存写入 ${maxWrite} Token，3 次内未读到命中`, cacheSummary)
+    }
+    return probeResult('unsupported', '连续 3 次请求均未报告缓存命中，已停止重试', cacheSummary)
   }
 
   const runProbeExtra = async (subtype: string, format: ProbeFormat): Promise<ProbeResult> => {
+    if (subtype !== 'error') {
+      const blocked = untestedBecauseBlocked(format)
+      if (blocked) return blocked
+    }
     if (subtype === 'error') {
       const log = probeNewLog('error-shape', '错误码规范性', format)
       const body = { ...probeBaseBody(cfgRef.current!, format), model: 'modelprobe-intentionally-invalid-model' }
@@ -1612,6 +1789,17 @@ function ModelProbeTool() {
     try {
       const r1 = await probeRequest(log1, format, turn1)
       if (!r1.ok) return probeResult('failed', probeExtractError(r1.data), { format, duration: r1.log.duration, usage: r1.log.usage, repro: probeReproOf(r1.log) })
+      if (format === 'responses' && !stopRef.current) {
+        const resourceId = probeResponsesResourceId(r1.data)
+        if (resourceId) {
+          const stickyBody = probeProtocolOf('responses').baseBody(cfgRef.current!.model, 'Reply with exactly: OK')
+          stickyBody.previous_response_id = resourceId
+          const stickyLog = probeNewLog('origin-sticky@responses', 'Responses 上游粘性', 'responses')
+          try {
+            await probeRequest(stickyLog, 'responses', stickyBody)
+          } catch { /* 只收集上游是否跨资源，不改变多轮结论 */ }
+        }
+      }
       if (!probeUsageComplete(r1.log.usage)) {
         return probeResult('failed', probeUsageFailDetail(r1.log.usage), {
           format, duration: r1.log.duration, usage: r1.log.usage, repro: probeReproOf(r1.log),
@@ -1643,6 +1831,8 @@ function ModelProbeTool() {
     const spec = builtinCaseById(t.id)
     const format = t.format
     if (!spec || !format) return probeResult('failed', '未找到内置工具用例定义')
+    const blocked = untestedBecauseBlocked(format)
+    if (blocked) return blocked
     const proto = probeProtocolOf(format)
     const body = proto.baseBody(cfgRef.current!.model, spec.prompt)
     applyBuiltinTool(body, spec)
@@ -1655,7 +1845,17 @@ function ModelProbeTool() {
         return probeResult(s, err, { format, duration: r.log.duration, usage: r.log.usage, repro: probeReproOf(r.log) })
       }
       const check = oracleNativeToolEvidence(r.data, spec)
-      return probeResult(check.passed ? 'passed' : 'failed', check.detail, {
+      if (!check.passed) {
+        if (!probeUsageComplete(r.log.usage)) {
+          return probeResult('failed', `${check.detail}；${probeUsageFailDetail(r.log.usage)}`, {
+            format, duration: r.log.duration, usage: r.log.usage, repro: probeReproOf(r.log), checks: [check],
+          })
+        }
+        return probeResult('abnormal', `异常：渠道没有执行 ${spec.tool}，但请求成功了。${check.detail}`, {
+          format, duration: r.log.duration, usage: r.log.usage, repro: probeReproOf(r.log), checks: [check],
+        })
+      }
+      return probeResult('passed', check.detail, {
         format, duration: r.log.duration, usage: r.log.usage, repro: probeReproOf(r.log), checks: [check],
       })
     } catch (e: any) {
@@ -1732,7 +1932,7 @@ function ModelProbeTool() {
       : { baseUrl: '', apiKey: '', model: model.trim(), timeoutMs: 60000, urlOf: { chat: '', responses: '', anthropic: '' } }
     if (ch && !cfg.apiKey.trim()) errs.push('渠道 API Key 解密失败，请重新编辑渠道并保存。')
     const catalog = [...PROBE_TESTS, ...matchBuiltinToolCases(model.trim()).map(toNativeProbeTest)]
-    const selectedTests = catalog.filter(t => selectedRef.current[t.id])
+    const selectedTests = catalog.filter(t => selectedRef.current[t.id] && t.kind !== 'score')
     if (!selectedTests.length) errs.push('请至少勾选一个测试项。')
     const paramIds = selectedTests.filter(t => t.kind === 'parameter').map(t => t.id)
     const needFormats = selectedTests.some(t => probeMultiFormatKinds.includes(t.kind))
@@ -1743,6 +1943,13 @@ function ModelProbeTool() {
 
     cfgRef.current = cfg
     stopRef.current = false
+    formatBlockerRef.current = {}
+    profileRef.current = profileFromName(cfg.model)
+    officialAnthropicRef.current = (() => {
+      try { return new URL(cfg.baseUrl).hostname.toLowerCase() === 'api.anthropic.com' } catch { return false }
+    })()
+    anthropicMaxTokensRowRef.current = null
+    setProbeAnthropicCapField('max_tokens')
     logsRef.current = []
     setLogs([])
     setOpenLogs({})
@@ -1780,6 +1987,7 @@ function ModelProbeTool() {
       for (const t of catalog) {
         if (stopRef.current) break
         if (!selectedRef.current[t.id]) continue
+        if (t.kind === 'score') continue
         if (t.kind === 'parameter') {
           if (parametersDone) continue
           parametersDone = true
@@ -1865,6 +2073,36 @@ function ModelProbeTool() {
         })
       })
     } finally {
+      setProbeAnthropicCapField('max_tokens')
+      const signals = signalsFromProbeLogs({
+        requestModel: cfg.model,
+        baseUrl: cfg.baseUrl,
+        logs: logsRef.current.map(log => ({
+          url: log.url,
+          status: log.status,
+          resultKey: log.resultKey,
+          format: log.format,
+          requestBody: log.requestBody,
+          responseHeaders: log.responseHeaders,
+          responseBody: log.responseBody,
+          usage: log.usage,
+        })),
+      })
+      const family = decideFamily(signals)
+      const origin = decideOrigin(signals)
+      if (selectedRef.current['expect-reject']) {
+        for (const [key, result] of Object.entries(resultsObj)) {
+          const next = reclassifyExpected(key, result, family, origin)
+          if (!next) continue
+          resultsObj[key] = { ...result, status: next.status, detail: next.detail }
+          setTestStatus(key, next.status, next.detail)
+        }
+      }
+      const verdict: ProbeVerdict = {
+        family: { label: family.label, reasons: family.reasons },
+        access: { label: origin.access.label, reasons: origin.access.reasons },
+        upstream: { label: origin.upstream.label, reasons: origin.upstream.reasons },
+      }
       const rep: ProbeReport = probeSanitizeReport({
         id: 'p' + Date.now() + '_' + Math.random().toString(36).slice(2, 7),
         name, startedAt, completedAt: new Date().toISOString(), durationMs: Date.now() - startMs,
@@ -1872,7 +2110,7 @@ function ModelProbeTool() {
           baseUrl: cfg.baseUrl, model: cfg.model, channelName: ch?.name,
           overrides: { chat: ch?.chatUrl.trim() || null, responses: ch?.responsesUrl.trim() || null, anthropic: ch?.anthropicUrl.trim() || null },
         },
-        results: resultsObj, summary: { passed: 0, failed: 0, unsupported: 0, skipped: 0 }, logs: logsRef.current,
+        results: resultsObj, summary: probeEmptySummary(), logs: logsRef.current, verdict,
       })
       setReport(rep)
       setHistory(await saveProbeHistory({ ...rep, logs: [] }))
@@ -1932,7 +2170,15 @@ function ModelProbeTool() {
     if (r.target.overrides.responses) md += `- Responses Base URL: ${r.target.overrides.responses}\n`
     if (r.target.overrides.anthropic) md += `- Anthropic Base URL: ${r.target.overrides.anthropic}\n`
     md += `- 模型: ${r.target.model}\n`
-    md += `- 通过: ${r.summary.passed} · 失败: ${r.summary.failed} · 不支持: ${r.summary.unsupported} · 跳过: ${r.summary.skipped}\n\n`
+    md += `- 通过: ${r.summary.passed} · 失败: ${r.summary.failed} · 异常: ${r.summary.abnormal || 0} · 不支持: ${r.summary.unsupported} · 符合预期: ${r.summary.expected} · 未测: ${r.summary.untested} · 跳过: ${r.summary.skipped}\n`
+    if (r.verdict) {
+      const layerLine = (label: string, layer: ProbeVerdictLayer) =>
+        `- ${label}: ${layer.label}${layer.reasons.length ? `（${layer.reasons.join('；')}）` : ''}\n`
+      md += layerLine('家族', r.verdict.family)
+      md += layerLine('接入层', r.verdict.access)
+      md += layerLine('上游', r.verdict.upstream)
+    }
+    md += '\n'
     for (const t of probeCatalog()) {
       const keys = probeResultKeysOf(t, r.results)
       if (!keys.length) continue
@@ -1967,7 +2213,7 @@ function ModelProbeTool() {
       const fmtText = keys.map(k => {
         const f = k.split('@')[1]
         const s = statuses[k].status
-        const mark = s === 'passed' ? '✓' : s === 'failed' ? '✗' : s === 'unsupported' ? '△' : s === 'skipped' ? '−' : '…'
+        const mark = probeFormatMark(s)
         return `${f}${mark}`
       }).join('  ')
       const agg: ProbeStatus = probeAggregateStatus(sts.filter(x => x.status !== 'running' && x.status !== 'pending').map(x => ({ status: x.status as ProbeStatus })))
@@ -2058,7 +2304,7 @@ function ModelProbeTool() {
         </div>
       </div>
 
-      <div className="flex-1 flex overflow-hidden">
+      <div className="flex-1 flex min-h-0 flex-col overflow-hidden lg:flex-row">
         {/* 左侧配置栏 */}
         <ProbeConfigPane
           channels={channels} activeChId={activeChId} onActiveChId={setActiveChId}
@@ -2071,8 +2317,8 @@ function ModelProbeTool() {
         />
 
         {/* 右侧结果区 */}
-        <div className="flex-1 flex flex-col overflow-hidden">
-          <div className="glass flex items-center px-6 py-3 flex-shrink-0" style={{ borderBottom: '1px solid var(--border)' }}>
+        <div className="flex-1 flex min-h-0 min-w-0 flex-col overflow-hidden">
+          <div className="probe-tabs glass flex items-center px-4 py-3 flex-shrink-0 min-w-0 overflow-x-auto" style={{ borderBottom: '1px solid var(--border)' }}>
             <SegmentedControl value={pane} onChange={v => setPane(v as 'live' | 'logs' | 'report' | 'history' | 'channels')} options={[
               { value: 'live', label: '实时进度' },
               { value: 'logs', label: `请求日志 (${logs.length})` },
@@ -2085,10 +2331,10 @@ function ModelProbeTool() {
           <div className="flex-1 overflow-y-auto">
             {pane === 'live' && (
               <div className="flex flex-col">
-                <div className="flex items-center justify-between px-6 pt-4 pb-3 flex-shrink-0">
-                  <div className="flex items-center gap-3">
-                    <h3 className="text-sm font-bold" style={{ color: 'var(--text)' }}>测试用例</h3>
-                    <span className="text-xs" style={{ color: 'var(--t3)' }}>参数、流式、缓存与补充场景只对已勾选的基础格式执行；「纯流式」仅 Chat；「图片输入」与「原生工具调用」默认不勾选（后者可能单独计费）</span>
+                <div className="flex flex-col gap-2 px-6 pt-4 pb-3 flex-shrink-0 lg:flex-row lg:items-start lg:justify-between">
+                  <div className="min-w-0 lg:flex lg:items-start lg:gap-3">
+                    <h3 className="text-sm font-bold shrink-0" style={{ color: 'var(--text)' }}>测试用例</h3>
+                    <p className="text-xs mt-1 leading-5 lg:mt-0.5" style={{ color: 'var(--t3)' }}>参数、流式、缓存与补充场景只对已勾选的基础格式执行；「纯流式」仅 Chat；「预期拒绝」「图片输入」与「原生工具调用」默认不勾选。原生工具可能单独计费，没执行却返回成功时记为异常</p>
                   </div>
                   <div className="flex items-center gap-3 text-xs flex-shrink-0">
                     <button onClick={() => { setSelected(prev => ({ ...prev, ...Object.fromEntries(visibleTests.map(t => [t.id, true])) })) }} disabled={running} className="cursor-pointer border-0 outline-none font-semibold" style={{ background: 'transparent', color: 'var(--accent)', fontFamily: 'inherit' }}>全选</button>
@@ -2133,7 +2379,7 @@ function ModelProbeTool() {
                     ) : (
                       visibleTests.filter(t => t.group === group).map(t => {
                       const st = statusOf(t)
-                      const color = st.status === 'failed' ? 'var(--err)' : st.status === 'passed' ? 'var(--ok)' : st.status === 'unsupported' ? 'var(--warn)' : st.status === 'running' ? 'var(--accent)' : 'var(--t3)'
+                      const color = probeStatusColor(st.status)
                       const formatDisabled = !!t.format && t.kind !== 'basic' && !uiActiveFormats.includes(t.format)
                       const desc = formatDisabled ? `已随「${PROBE_FORMAT_LABELS[t.format!]}」基础测试禁用` : (st.detail || t.desc)
                       return (
@@ -2178,22 +2424,23 @@ function ModelProbeTool() {
               ) : (
                 <div className="p-6">
                   <div className="surface-card rounded-2xl p-5" style={{ background: 'var(--bg)', border: '1px solid var(--border)', boxShadow: 'var(--shadow)' }}>
-                    <div className="flex flex-wrap items-start justify-between gap-6">
-                      <div className="min-w-0 flex-1">
+                    <div className="flex flex-wrap items-start justify-between gap-x-6 gap-y-2">
+                      <div className="min-w-[min(100%,18rem)] flex-1">
                         <div className="text-xs font-semibold uppercase tracking-wide" style={{ color: 'var(--accent)', letterSpacing: '0.12em' }}>测试报告</div>
                         <h3 className="text-xl font-bold mt-1 break-words" style={{ color: 'var(--text)' }}>{report.name}</h3>
-                        <p className="text-sm mt-1 break-all" style={{ color: 'var(--t2)' }}>{report.target.baseUrl} · {report.target.model}</p>
+                        <p className="text-sm mt-1 break-words" style={{ color: 'var(--t2)' }}>{report.target.baseUrl} · {report.target.model}</p>
                       </div>
-                      <div className="text-right">
+                      <div className="shrink-0 text-right">
                         <div className="font-mono text-2xl font-bold tabular-nums" style={{ color: 'var(--text)', fontFamily: PROBE_MONO }}>{(report.durationMs / 1000).toFixed(1)}s</div>
                         <div className="text-xs mt-1" style={{ color: 'var(--t3)' }}>总耗时 · {new Date(report.completedAt).toLocaleString()}</div>
                       </div>
                     </div>
-                    <div className="mt-5 flex flex-wrap gap-x-8 gap-y-2">
-                      {(['passed', 'failed', 'unsupported', 'skipped'] as ProbeStatus[]).map(s => (
-                        <div key={s}>
-                          <span className="text-xs" style={{ color: 'var(--t3)' }}>{PROBE_STATUS_LABELS[s]} </span>
-                          <span className="font-mono text-lg font-bold tabular-nums" style={{ color: s === 'passed' ? 'var(--ok)' : s === 'failed' ? 'var(--err)' : s === 'unsupported' ? 'var(--warn)' : 'var(--t2)', fontFamily: PROBE_MONO }}>{report.summary[s] || 0}</span>
+                    {report.verdict && <ProbeVerdictBlock verdict={report.verdict} />}
+                    <div className="mt-5 grid grid-cols-3 min-[1180px]:grid-cols-7 gap-x-3 gap-y-3">
+                      {PROBE_STATUS_ORDER.map(s => (
+                        <div key={s} className="min-w-0">
+                          <div className="text-xs leading-4 whitespace-nowrap" style={{ color: 'var(--t3)' }}>{PROBE_STATUS_LABELS[s]} </div>
+                          <div className="font-mono text-lg font-bold tabular-nums leading-7" style={{ color: (report.summary[s] || 0) > 0 ? probeStatusColor(s) : 'var(--t3)', fontFamily: PROBE_MONO }}>{report.summary[s] || 0}</div>
                         </div>
                       ))}
                     </div>
@@ -2221,16 +2468,16 @@ function ModelProbeTool() {
                     {history.map(h => {
                       const histSummary = probeSanitizeReport(h).summary
                       return (
-                        <div key={h.id} className="surface-card rounded-2xl p-4 flex items-center gap-4" style={{ background: 'var(--bg)', border: '1px solid var(--border)', boxShadow: 'var(--shadow)' }}>
+                        <div key={h.id} className="surface-card rounded-2xl p-4 flex flex-col gap-3 sm:flex-row sm:items-center sm:gap-4" style={{ background: 'var(--bg)', border: '1px solid var(--border)', boxShadow: 'var(--shadow)' }}>
                           <div className="min-w-0 flex-1">
                             <div className="text-sm font-bold truncate" style={{ color: 'var(--text)' }}>{h.name}</div>
                             <div className="text-xs mt-1 flex flex-wrap gap-x-4 gap-y-0.5" style={{ color: 'var(--t3)' }}>
                               <span>{new Date(h.completedAt).toLocaleString()}</span>
                               <span className="font-mono min-w-0 max-w-full truncate">{h.target.baseUrl} · {h.target.model}</span>
-                              <span>通过 {histSummary.passed} · 失败 {histSummary.failed} · 不支持 {histSummary.unsupported}</span>
+                              <span>{probeSummaryLine(histSummary)}</span>
                             </div>
                           </div>
-                          <div className="flex gap-2 flex-shrink-0">
+                          <div className="flex flex-wrap gap-2 flex-shrink-0">
                             <Btn small variant="soft" onClick={() => viewHistoryReport(h)}>查看</Btn>
                             <Btn small variant="soft" onClick={() => reuseHistoryConfig(h)}>回填配置</Btn>
                             <Btn small variant="ghost" onClick={() => { deleteProbeHistory(h.id).then(setHistory) }}>删除</Btn>
