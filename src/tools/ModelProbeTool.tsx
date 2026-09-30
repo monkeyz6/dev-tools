@@ -4,7 +4,7 @@ import { createPortal } from 'react-dom'
 import { Btn, Label, Card, Badge, CustomInput, CustomSelect, SearchableSelect, CustomTextarea, Toggle, SegmentedControl, SectionTitle, CopyBtn } from '../shared/ui'
 import { highlightJson } from '../shared/json'
 import { decryptLlmApiKey, encryptLlmApiKey } from '../shared/api-key-crypto'
-import { historyDbGetAll, historyDbPutOne, historyDbDeleteOne, historyDbDeleteMany, historyDbClear, historyDbMigrateFromLocalStorage } from '../shared/history-db'
+import { historyDbGetAll, historyDbPutOne, historyDbPutMany, historyDbDeleteOne, historyDbDeleteMany, historyDbClear, historyDbMigrateFromLocalStorage } from '../shared/history-db'
 import { useDebouncedPersist } from '../shared/use-debounced-persist'
 import { uniqueCopyName } from '../shared/channel-copy'
 import { downloadProbeMatrixHtml, downloadProbeReportHtml, probeMatrixCellScored, probeMatrixColumnLabels, probeMatrixColumnText, probeMatrixHasProblems } from './ModelProbeExport'
@@ -24,6 +24,7 @@ import {
   type ProbeCheck,
   oracleTruncation, oracleToolNamed, oracleSchemaOk, oracleSystemOk, oracleCodeword,
   oracleDominantRed, oracleUnsupportedVision, probeCheck,
+  PROBE_OUTPUT_LIMIT_DETAIL, probeOutputLimitReached, probeRescoreOutputLimitResults,
 } from './model-probe/oracles'
 import {
   type BuiltinProbeCase,
@@ -35,7 +36,7 @@ import {
   aggregateProbeStatus, anthropicBaseBlocked, anthropicCapAction, anthropicMaxTokensConclusion,
   basicProtocolGate, decideFamily, nameSuggestsGpt, profileFromName, reclassifyExpected, scoreProtocolGate,
 } from './model-probe/profiles'
-import { decideOrigin, signalsFromProbeLogs } from './model-probe/origin'
+import { decideOrigin, probeRefreshedOrigin, probeShownSource, signalsFromProbeLogs } from './model-probe/origin'
 import { probeRequestIdFromHeaders, probeRequestIdFromRecord, probeRequestIdHeaders, probeShownRequestId } from './model-probe/request-id'
 import { probeKeptResponseBody, probeTopPRangeBody, scoreTopPRange } from './model-probe/negative'
 import { probeMatchRetryChannel, probeReplaceCellLogs } from './model-probe/cell'
@@ -196,7 +197,7 @@ const PROBE_TESTS: ProbeTestDef[] = [
   { id: 'top_p', group: '参数与特性', name: 'top_p', desc: '核采样参数支持情况', explain: 'top_p 与 temperature 同为采样参数。默认按是否接受来判。勾选「预期拒绝」后，GPT 推理模型不接受 top_p 记为符合预期，请求成功记异常。', kind: 'parameter' },
   { id: 'top_p_range', group: '参数与特性', name: 'top_p 越界', desc: '发送 top_p=2，只看状态码是否拒绝', explain: '三种协议都在基础请求上带 top_p=2。Anthropic 固定 max_tokens=120，不跟随本轮改成 max_completion_tokens。其它 4xx 记通过，2xx 记失败；401、403、408、429、5xx、超时和网络错误记异常。不看错误正文是否提到 top_p，也不走「预期拒绝」。', kind: 'extra', subtype: 'top-p-range' },
   { id: 'reasoning_effort', group: '参数与特性', name: 'reasoning_effort', desc: '推理强度参数支持情况', explain: 'reasoning_effort（low/medium/high）仅推理模型支持，普通模型通常会报参数错误。勾选「预期拒绝」后，Claude 拒绝该参数记为符合预期，接受则记异常。', kind: 'parameter' },
-  { id: 'max_tokens', group: '参数与特性', name: 'Token 上限参数', desc: 'Chat 同时试 max_tokens 与 max_completion_tokens，并核验截断原因', explain: 'Chat Completions 在同一发里带 max_tokens 与 max_completion_tokens；其中一个被拒就丢掉该字段再试，互斥则拆开各测一次。Responses 用 max_output_tokens，Anthropic 默认用 max_tokens。推理模型若被要求改用 max_completion_tokens，会改字段再测；勾选「预期拒绝」时这一次拒绝记为符合预期。接受后再发长输出 + 很小 cap 核验截断原因。', kind: 'parameter' },
+  { id: 'max_tokens', group: '参数与特性', name: 'Token 上限参数', desc: 'Chat 同时试 max_tokens 与 max_completion_tokens，并核验截断原因', explain: 'Chat Completions 在同一发里带 max_tokens 与 max_completion_tokens；其中一个被拒就丢掉该字段再试，互斥则拆开各测一次。Responses 用 max_output_tokens，Anthropic 默认用 max_tokens。推理模型若被要求改用 max_completion_tokens，会改字段再测；勾选「预期拒绝」时这一次拒绝记为符合预期。接受后再发长输出 + 很小 cap 核验截断原因。finish_reason=length 记通过；请求若返回 400，且正文是 Could not finish the message because max_tokens or model output limit was reached，也记通过，组合里的上限字段算接受。每次语义重试都单独看这句，命中就停止。其它状态码仍记失败。', kind: 'parameter' },
   { id: 'structured_output', group: '参数与特性', name: '结构化输出', desc: '接受 Schema 约束并校验返回 JSON', explain: 'combo 先验证 json_schema / text.format / output_config 是否被接受。接受后再发充足 cap 的 Schema 请求，解析 JSON 并校验 ok 为布尔值。Anthropic 走 output_config.format。', kind: 'parameter' },
   { id: 'tool_calling', group: '参数与特性', name: '工具调用', desc: '接受 tools，并强制调用 get_weather', explain: 'combo 用双工具 + tool_choice=auto 验证请求被接受。接受后再发强制指定 get_weather，核验响应里真有该调用。thinking 模式拒绝 required/object 的 tool_choice 时降级为 auto 再核验。无调用但 HTTP 成功记失败。', kind: 'parameter' },
   { id: 'stream-false', group: '传输与稳定性', name: '非流式响应', desc: '验证 stream=false 的完整 JSON 响应与 usage', explain: '非流式是计费与解析最简单的路径。HTTP 成功时必须带回 input 与 output Token，否则视为计费无法落地。', kind: 'stream' },
@@ -967,7 +968,7 @@ function ProbeOriginDialog({ origin, onClose }: { origin: { column: string; labe
       <div role="dialog" aria-modal="true" aria-labelledby="probe-origin-title" className="probe-matrix-sheet w-full max-w-lg" onClick={e => e.stopPropagation()}>
         <div className="flex items-start justify-between gap-3">
           <div className="min-w-0">
-            <h2 id="probe-origin-title" className="text-lg font-semibold" style={{ color: 'var(--text)', letterSpacing: '-0.01em' }}>渠道判断</h2>
+            <h2 id="probe-origin-title" className="text-lg font-semibold" style={{ color: 'var(--text)', letterSpacing: '-0.01em' }}>来源判断</h2>
             <p className="mt-1 text-xs break-words" style={{ color: 'var(--t3)' }}>{origin.column}</p>
           </div>
           <button type="button" className="probe-matrix-icon" aria-label="关闭" title="关闭" onClick={onClose}>{PROBE_CLOSE_SVG}</button>
@@ -1017,7 +1018,7 @@ function ProbeMatrixView({ reports }: { reports: ProbeReport[] }) {
             variant="soft"
             className="whitespace-nowrap"
             disabled={!hasProblems}
-            title={hasProblems ? '表格与导出 HTML 相同，失败、异常和不支持可看请求' : '这次没有失败、异常或不支持'}
+            title={hasProblems ? '只导出失败、异常和不支持，可看请求，不带来源判断' : '这次没有失败、异常或不支持'}
             onClick={() => downloadProbeMatrixHtml(reports, probeCatalog(), PROBE_FORMAT_LABELS, 'problems')}
           >异常导出</Btn>
         </div>
@@ -1030,22 +1031,22 @@ function ProbeMatrixView({ reports }: { reports: ProbeReport[] }) {
               {reports.map((report, index) => {
                 const column = labels[index]
                 const text = probeMatrixColumnText(column)
-                const upstream = report.verdict?.upstream
+                const source = probeShownSource(report.verdict)
                 const lines = (
                   <>
                     <span className="probe-matrix-model">{column.model}</span>
                     {column.source ? <span className="probe-matrix-source">{column.source}</span> : null}
-                    {upstream ? <span className="probe-matrix-source">{upstream.label}</span> : null}
+                    {source ? <span className="probe-matrix-source">{source.label}</span> : null}
                   </>
                 )
                 return (
                   <th key={report.id} scope="col">
-                    {upstream ? (
+                    {source ? (
                       <button
                         type="button"
                         className="probe-matrix-col"
-                        aria-label={`渠道判断 ${text}`}
-                        onClick={() => setOrigin({ column: text, label: upstream.label, reasons: upstream.reasons })}
+                        aria-label={`来源判断 ${text}`}
+                        onClick={() => setOrigin({ column: text, label: source.label, reasons: source.reasons })}
                       >
                         {lines}
                       </button>
@@ -1787,8 +1788,22 @@ function ModelProbeTool() {
         format, duration: r.log.duration, usage: r.log.usage, repro: probeReproOf(r.log),
       }), check)
     }
+    // 只有 HTTP 400 的这句是额度耗尽。每次语义尝试都先认它，避免被当成字段冲突再重试；其它状态仍是失败。
+    const passOutputLimit = (row: { ok: boolean; status: number; data: any; log: ProbeLog }) => {
+      if (id !== 'max_tokens' || row.ok || row.status !== 400 || !probeOutputLimitReached(probeExtractError(row.data))) return null
+      const check = probeCheck('truncation', true, PROBE_OUTPUT_LIMIT_DETAIL)
+      return mergeAcceptedSemantic(accepted, acceptedLabel, probeResult('passed', check.detail, {
+        format, duration: row.log.duration, usage: row.log.usage, repro: probeReproOf(row.log),
+      }), check)
+    }
+    const failOutputLimitStatus = (row: { ok: boolean; status: number; data: any; log: ProbeLog }) => {
+      if (id !== 'max_tokens' || row.ok || row.status === 400 || !probeOutputLimitReached(probeExtractError(row.data))) return null
+      return failSemantic(row, probeExtractError(row.data))
+    }
     try {
       let r = await probeRequest(log, format, body)
+      const limited = passOutputLimit(r) || failOutputLimitStatus(r)
+      if (limited) return limited
       if (!r.ok && id === 'max_tokens' && format === 'chat' && (chatKeys?.length || 0) > 1) {
         const blame = probeChatMaxTokenBlame(probeExtractError(r.data))
         const retryKeys = blame === 'conflict'
@@ -1800,6 +1815,8 @@ function ModelProbeTool() {
           proto.applyMaxTokens(retryBody, PROBE_TRUNCATION_CAP, [key])
           const retryLog = probeNewLog(probeKey(id, format), `${probeParamLabel(id)} 语义（${PROBE_FORMAT_LABELS[format]}）`, format)
           r = await probeRequest(retryLog, format, retryBody)
+          const retried = passOutputLimit(r) || failOutputLimitStatus(r)
+          if (retried) return retried
           if (r.ok) break
         }
       }
@@ -1812,6 +1829,8 @@ function ModelProbeTool() {
         r = await probeRequest(retryLog, format, retryBody)
         toolChoiceFallback = true
       }
+      const limitedAfterRetry = passOutputLimit(r) || failOutputLimitStatus(r)
+      if (limitedAfterRetry) return limitedAfterRetry
       if (!r.ok) return failSemantic(r, probeExtractError(r.data))
       const check = id === 'max_tokens' ? oracleTruncation(proto.stopOf(r.data))
         : id === 'tool_calling' ? oracleToolNamed(proto.toolCallsOf(r.data), 'get_weather')
@@ -1850,6 +1869,9 @@ function ModelProbeTool() {
     const chatMaxKeys = new Set<string>(format === 'chat' && pending.has('max_tokens') ? CHAT_MAX_TOKEN_KEYS : [])
     const rejectedMax: string[] = []
     let soloAlias: string | null = null
+    const outputLimitSentence = (data: any) => probeOutputLimitReached(probeExtractError(data))
+    const outputLimitAccepted = (row: { ok: boolean; status: number; data: any }) =>
+      !row.ok && row.status === 400 && outputLimitSentence(row.data)
     const finishPassed = async (ids: string[], accepted: ProbeResult, label: string) => {
       const chatKeys = [...chatMaxKeys]
       for (const id of ids) {
@@ -1882,7 +1904,7 @@ function ModelProbeTool() {
         for (const id of pending) outcomes[probeKey(id, format)] = probeCatchResult(e, format, log)
         break
       }
-      if (r.ok) {
+      if (r.ok || outputLimitAccepted(r)) {
         if (soloAlias && format === 'chat' && pending.has('max_tokens')) {
           const proto = probeProtocolOf(format)
           const soloBody = proto.baseBody(cfgRef.current!.model, 'Reply with exactly: OK')
@@ -1890,8 +1912,8 @@ function ModelProbeTool() {
           const soloLog = probeNewLog(probeKey('max_tokens', format), `Token 上限 ${soloAlias}（${PROBE_FORMAT_LABELS[format]}）`, format)
           try {
             const solo = await probeRequest(soloLog, format, soloBody)
-            if (solo.ok) chatMaxKeys.add(soloAlias)
-            else rejectedMax.push(soloAlias)
+            if (solo.ok || outputLimitAccepted(solo)) chatMaxKeys.add(soloAlias)
+            else if (!outputLimitSentence(solo.data)) rejectedMax.push(soloAlias)
           } catch {
             rejectedMax.push(soloAlias)
           }
@@ -1904,7 +1926,8 @@ function ModelProbeTool() {
         break
       }
       const errText = probeExtractError(r.data).toLowerCase()
-      if (format === 'chat' && pending.has('max_tokens') && chatMaxKeys.size) {
+      const limitSentence = outputLimitSentence(r.data)
+      if (!limitSentence && format === 'chat' && pending.has('max_tokens') && chatMaxKeys.size) {
         const blame = probeChatMaxTokenBlame(errText)
         if (blame === 'conflict' && chatMaxKeys.size > 1) {
           chatMaxKeys.delete('max_tokens')
@@ -1919,7 +1942,7 @@ function ModelProbeTool() {
           continue
         }
       }
-      const sole = probeSoleParamMatch(pending, errText, format)
+      const sole = limitSentence ? null : probeSoleParamMatch(pending, errText, format)
       if (sole) {
         outcomes[probeKey(sole, format)] = probeResult('unsupported', probeExtractError(r.data), { format, duration: r.log.duration, usage: r.log.usage, repro: probeReproOf(r.log) })
         pending.delete(sole)
@@ -1939,37 +1962,60 @@ function ModelProbeTool() {
         const singleBody = probeComboBody(cfgRef.current!, format, [id], id === 'max_tokens' && format === 'chat' ? [...chatMaxKeys] : undefined)
         try {
           const one = await probeRequest(singleLog, format, singleBody)
-          if (one.ok) {
+          if (one.ok || (id === 'max_tokens' && outputLimitAccepted(one))) {
             const maxNote = format === 'chat' && id === 'max_tokens' ? probeChatMaxAcceptLabel(chatMaxKeys, rejectedMax) : ''
             const label = [maxNote ? `独立降级请求通过；${maxNote}` : '独立降级请求通过', splitNote].filter(Boolean).join(' ')
             const accepted = probeResult('passed', label, { format, duration: one.log.duration, usage: one.log.usage, repro: probeReproOf(one.log) })
             await finishPassed([id], accepted, label)
+          } else if (id === 'max_tokens' && outputLimitSentence(one.data)) {
+            outcomes[probeKey(id, format)] = probeResult('failed', probeExtractError(one.data), { format, duration: one.log.duration, usage: one.log.usage, repro: probeReproOf(one.log) })
           } else if (format === 'chat' && id === 'max_tokens' && chatMaxKeys.size > 1) {
             const proto = probeProtocolOf(format)
             let okAlias: string | null = null
+            let stoppedOnLimit = false
+            const limitKeys: string[] = []
+            let limitRow: { log: ProbeLog } | null = null
             let last = one
             for (const key of [...chatMaxKeys]) {
               const aliasBody = proto.baseBody(cfgRef.current!.model, 'Reply with exactly: OK')
               proto.applyMaxTokens(aliasBody, PROBE_DEFAULT_CAP, [key])
               const aliasLog = probeNewLog(probeKey('max_tokens', format), `Token 上限 ${key}（${PROBE_FORMAT_LABELS[format]}）`, format)
               last = await probeRequest(aliasLog, format, aliasBody)
+              if (outputLimitAccepted(last)) {
+                limitKeys.push(key)
+                limitRow = last
+                continue
+              }
               if (last.ok) {
                 okAlias = key
                 for (const other of [...chatMaxKeys]) {
-                  if (other !== key) rejectedMax.push(other)
+                  if (other !== key && !limitKeys.includes(other)) rejectedMax.push(other)
                 }
                 chatMaxKeys.clear()
                 chatMaxKeys.add(key)
+                for (const kept of limitKeys) chatMaxKeys.add(kept)
+                break
+              }
+              if (outputLimitSentence(last.data)) {
+                outcomes[probeKey(id, format)] = probeResult('failed', probeExtractError(last.data), { format, duration: last.log.duration, usage: last.log.usage, repro: probeReproOf(last.log) })
+                stoppedOnLimit = true
                 break
               }
               rejectedMax.push(key)
             }
-            if (okAlias) {
-              const label = `独立降级请求通过；${probeChatMaxAcceptLabel(chatMaxKeys, rejectedMax)}`
-              const accepted = probeResult('passed', label, { format, duration: last.log.duration, usage: last.log.usage, repro: probeReproOf(last.log) })
-              await finishPassed([id], accepted, label)
-            } else {
-              markMaxUnsupported(last.log, probeExtractError(last.data))
+            if (!stoppedOnLimit) {
+              const source = okAlias ? last : limitRow
+              if (source) {
+                if (!okAlias) {
+                  chatMaxKeys.clear()
+                  for (const key of limitKeys) chatMaxKeys.add(key)
+                }
+                const label = `独立降级请求通过；${probeChatMaxAcceptLabel(chatMaxKeys, rejectedMax)}`
+                const accepted = probeResult('passed', label, { format, duration: source.log.duration, usage: source.log.usage, repro: probeReproOf(source.log) })
+                await finishPassed([id], accepted, label)
+              } else {
+                markMaxUnsupported(last.log, probeExtractError(last.data))
+              }
             }
           } else {
             const raw = probeExtractError(one.data)
@@ -2681,17 +2727,62 @@ function ModelProbeTool() {
     }
   }
 
-  const viewHistoryReport = (rep: ProbeReport) => {
+  const persistRefreshedOrigins = async (reports: ProbeReport[]): Promise<ProbeReport[]> => {
+    const changed: ProbeReport[] = []
+    const next = reports.map(report => {
+      const rescored = probeRescoreOutputLimitResults(report.results)
+      const results = rescored ?? report.results
+      const fresh = probeRefreshedOrigin({
+        requestModel: report.target.model,
+        baseUrl: report.target.baseUrl,
+        results,
+        verdict: report.verdict,
+      })
+      if (!fresh && !rescored) return report
+      const summary = rescored ? probeEmptySummary() : report.summary
+      if (rescored) {
+        for (const [key, result] of Object.entries(rescored)) {
+          if (!probeResultVisible(key, result)) continue
+          if (summary[result.status] != null) summary[result.status]++
+        }
+      }
+      const updated: ProbeReport = {
+        ...report,
+        ...(rescored ? { results: rescored, summary } : {}),
+        ...(fresh ? {
+          verdict: {
+            family: report.verdict?.family ?? { label: '不确定', reasons: [] },
+            access: fresh.access,
+            upstream: fresh.upstream,
+          },
+        } : {}),
+      }
+      changed.push(updated)
+      return updated
+    })
+    if (changed.length) {
+      try {
+        await historyDbPutMany('modelprobe', changed)
+        setHistory(await loadProbeHistory())
+      } catch {
+        // 落盘失败仍把改判后的报告交给页面，避免「查看」打不开。
+      }
+    }
+    return next
+  }
+  const viewHistoryReport = async (rep: ProbeReport) => {
+    const [stored] = await persistRefreshedOrigins([rep])
     setMatrixReports(null)
-    setReport(probeSanitizeReport(rep))
+    setReport(probeSanitizeReport(stored))
     setPane('report')
   }
-  const viewPicked = () => {
-    const rows = history.filter(item => picked.has(item.id)).map(probeSanitizeReport)
-    if (rows.length === 1) viewHistoryReport(rows[0])
+  const viewPicked = async () => {
+    const rows = history.filter(item => picked.has(item.id))
+    if (rows.length === 1) await viewHistoryReport(rows[0])
     else if (rows.length > 1) {
+      const next = await persistRefreshedOrigins(rows)
       setReport(null)
-      setMatrixReports(rows)
+      setMatrixReports(next.map(probeSanitizeReport))
       setPane('report')
     }
   }

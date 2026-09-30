@@ -200,7 +200,8 @@ describe('buildProbeMatrixHtml', () => {
     assert.equal(html.includes('基础请求返回成功'), false)
     assert.equal(html.includes('"explain"'), false)
     assert.match(html, /data-origin="0"/)
-    assert.match(html, /渠道判断 gpt-4o · 渠道甲/)
+    assert.match(html, /来源判断 gpt-4o · 渠道甲/)
+    assert.equal(html.includes('渠道判断'), false)
     assert.match(html, /OpenAI 官方/)
     assert.match(html, /响应头 openai-organization/)
     assert.equal(html.includes('data-origin="1"'), false)
@@ -222,10 +223,44 @@ describe('buildProbeMatrixHtml', () => {
     assert.equal(problems.includes('3/3'), false)
     assert.equal(problems.split('"body"').length - 1, 1)
     assert.equal(problems.includes('Bearer secret'), false)
+    assert.equal(problems.includes('data-origin="'), false)
+    assert.equal(problems.includes('来源判断'), false)
+    assert.equal(problems.includes('渠道判断'), false)
+    assert.equal(problems.includes('OpenAI 官方'), false)
+    assert.match(problems, /__PROBE_ORIGINS = \[\]/)
     assert.equal(probeMatrixHasProblems([left, right]), true)
     assert.equal(probeMatrixHasProblems([left]), false)
     assert.equal(probeMatrixHtmlFileName(2), '模型探测_2.html')
     assert.equal(probeMatrixHtmlFileName(2, 'problems'), '模型探测_异常_2.html')
+  })
+
+  it('完整矩阵优先显示 Codex 反代，异常文件不写来源', () => {
+    const one = report({
+      completedAt: '2026-09-29T01:00:01.000Z',
+      target: { baseUrl: 'https://a.example', model: 'gpt-5', channelName: '渠道甲', overrides: {} },
+      verdict: {
+        family: { label: 'GPT 推理', reasons: ['家族依据'] },
+        access: { label: 'Codex 反代', reasons: ['短提示输入 Token 为 640，高于官方基线（约 8–20）'] },
+        upstream: { label: 'Azure OpenAI', reasons: ['成功响应含 prompt_filter_results'] },
+      },
+      results: {
+        'chat-basic': cell('failed', '失败', errorBody),
+      },
+    })
+    const html = buildProbeMatrixHtml([one], tests, labels)
+    assert.match(html, /aria-label="来源判断 gpt-5"/)
+    assert.match(html, /Codex 反代/)
+    assert.match(html, /短提示输入 Token 为 640/)
+    assert.equal(html.includes('Azure OpenAI'), false)
+    assert.equal(html.includes('成功响应含 prompt_filter_results'), false)
+    assert.equal(html.includes('渠道判断'), false)
+    const problems = buildProbeMatrixHtml([one], tests, labels, undefined, 'problems')
+    assert.match(problems, /<span class="col-model">gpt-5<\/span>/)
+    assert.equal(problems.includes('data-origin="'), false)
+    assert.equal(problems.includes('来源判断'), false)
+    assert.equal(problems.includes('Codex 反代'), false)
+    assert.equal(problems.includes('Azure OpenAI'), false)
+    assert.match(problems, /__PROBE_ORIGINS = \[\]/)
   })
 
   it('弹层 Request ID 按响应头顺序取，不把响应头原文写进文件', () => {

@@ -1,6 +1,6 @@
 import { describe, it } from 'node:test'
 import assert from 'node:assert/strict'
-import { decideOrigin, signalsFromProbeLogs, type ProbeOriginLog } from './origin.ts'
+import { decideOrigin, probeRefreshedOrigin, probeShownSource, signalsFromProbeLogs, type ProbeOriginLog } from './origin.ts'
 import { probeProtocolOf, setProbeAnthropicCapField } from './protocol.ts'
 import {
   aggregateProbeStatus, anthropicBaseBlocked, anthropicCapAction, anthropicMaxTokensConclusion,
@@ -108,6 +108,7 @@ describe('gpt-6-sol 样本', () => {
     assert.ok(origin.access.reasons.some(r => r.includes('分组')))
     assert.ok(origin.access.reasons.some(r => r.includes('distributor')))
     assert.equal(origin.upstream.label, 'Azure OpenAI')
+    assert.equal(origin.upstream.reasons.some(r => r.includes('Chat Completions')), false)
     assert.ok(origin.upstream.reasons.some(r => r.includes('prompt_filter_results')))
     assert.ok(origin.upstream.reasons.some(r => r.includes('content_filters')))
     assert.ok(origin.upstream.reasons.some(r => r.includes('serving_pipereplica')))
@@ -294,6 +295,201 @@ describe('来源边界', () => {
     assert.equal(origin.upstream.label, '混合')
     assert.ok(origin.upstream.reasons.some(r => r.includes('prompt_filter_results')))
     assert.ok(origin.upstream.reasons.some(r => r.includes('openai-organization')))
+  })
+
+  it('req_ 配上 Chat Completions 形状是 OpenAI 官方，不是 Anthropic', () => {
+    const origin = decideOrigin(signalsFromProbeLogs({
+      requestModel: 'gpt-5.6-terra',
+      baseUrl: 'https://www.amutes.com',
+      logs: [{
+        url: 'https://www.amutes.com/v1/chat/completions',
+        status: 200,
+        resultKey: 'temperature@chat',
+        format: 'chat',
+        requestBody: { model: 'gpt-5.6-terra', messages: [{ role: 'user', content: 'Return a JSON object with ok=true.' }] },
+        responseHeaders: { 'content-type': 'application/json', 'request-id': 'req_7c4a8fd042564ffab61635771423cfc7' },
+        responseBody: {
+          id: 'chatcmpl-ETe3C1QlvB033nIZjWTM8NTvCWRF6',
+          object: 'chat.completion',
+          model: 'gpt-5.6-terra',
+          choices: [{ message: { role: 'assistant', content: '{"ok":true}' } }],
+        },
+        usage: { input: 27 },
+      }],
+    }))
+    assert.equal(origin.upstream.label, 'OpenAI 官方')
+    assert.ok(origin.upstream.reasons.some(r => r.includes('Chat Completions')))
+    assert.equal(origin.upstream.reasons.some(r => /req_|Anthropic/.test(r)), false)
+  })
+
+  it('带日期的 Claude 响应仍是 Anthropic，req_ 只作补充', () => {
+    const origin = decideOrigin(signalsFromProbeLogs({
+      requestModel: 'claude-opus-4-5',
+      baseUrl: 'https://api.anthropic.com',
+      logs: [{
+        url: 'https://api.anthropic.com/v1/messages',
+        status: 200,
+        resultKey: 'anthropic-basic',
+        format: 'anthropic',
+        requestBody: { model: 'claude-opus-4-5', max_tokens: 120 },
+        responseHeaders: { 'request-id': 'req_abc' },
+        responseBody: { model: 'claude-opus-4-5-20251101', stop_reason: 'end_turn', usage: { input_tokens: 10, output_tokens: 2 } },
+        usage: { input: 10 },
+      }],
+    }))
+    assert.equal(origin.upstream.label, 'Anthropic 官方')
+    assert.ok(origin.upstream.reasons.some(r => r.includes('claude-opus-4-5-20251101')))
+    assert.ok(origin.upstream.reasons.some(r => r.includes('req_')))
+  })
+
+  it('来源显示优先 Codex 反代，网关和混合接入仍看上游', () => {
+    assert.deepEqual(probeShownSource({
+      access: { label: 'Codex 反代', reasons: ['短提示输入 Token 为 640，高于官方基线（约 8–20）'] },
+      upstream: { label: 'Azure OpenAI', reasons: ['成功响应含 prompt_filter_results'] },
+    }), {
+      label: 'Codex 反代',
+      reasons: ['短提示输入 Token 为 640，高于官方基线（约 8–20）'],
+    })
+    assert.equal(probeShownSource({
+      access: { label: '网关', reasons: ['错误含「分组」'] },
+      upstream: { label: 'OpenAI 官方', reasons: ['响应头 openai-organization'] },
+    })?.label, 'OpenAI 官方')
+    assert.equal(probeShownSource({
+      access: { label: '混合', reasons: ['两边都有'] },
+      upstream: { label: 'Azure OpenAI', reasons: ['成功响应含 prompt_filter_results'] },
+    })?.label, 'Azure OpenAI')
+  })
+
+  it('残留响应体能把存错的 Anthropic 重算成 OpenAI，没有请求则不动', () => {
+    const fresh = probeRefreshedOrigin({
+      requestModel: 'gpt-5.6-terra',
+      baseUrl: 'https://www.amutes.com',
+      verdict: {
+        access: { label: '官方直连', reasons: ['响应头 request-id 为 req_'] },
+        upstream: { label: 'Anthropic 官方', reasons: ['响应头 request-id 为 req_'] },
+      },
+      results: {
+        'chat-basic': {
+          format: 'chat',
+          usage: { input: 27 },
+          repro: {
+            url: 'https://www.amutes.com/v1/chat/completions',
+            status: 200,
+            body: { model: 'gpt-5.6-terra' },
+            requestId: 'req_7c4a8fd042564ffab61635771423cfc7',
+            responseHeaders: { 'request-id': 'req_7c4a8fd042564ffab61635771423cfc7' },
+            responseBody: { id: 'chatcmpl-ETe3', object: 'chat.completion', model: 'gpt-5.6-terra' },
+          },
+        },
+      },
+    })
+    assert.equal(fresh?.upstream.label, 'OpenAI 官方')
+    assert.ok(fresh?.upstream.reasons.some(r => r.includes('Chat Completions')))
+    assert.equal(probeRefreshedOrigin({
+      requestModel: 'gpt-4o',
+      baseUrl: 'https://a.example',
+      verdict: { upstream: { label: 'OpenAI 官方', reasons: ['响应头 openai-organization'] } },
+      results: { 'chat-basic': { format: 'chat', repro: null } },
+    }), null)
+  })
+
+  it('残留没有机构头时不把混合接入改成 Codex，裸 req_ 也不变成官方直连', () => {
+    const mixed = probeRefreshedOrigin({
+      requestModel: 'gpt-5.4',
+      baseUrl: 'https://gw.example',
+      verdict: {
+        access: {
+          label: '混合',
+          reasons: ['短提示输入 Token 为 640，高于官方基线（约 8–20）', '响应头 openai-organization'],
+        },
+        upstream: { label: 'Azure OpenAI', reasons: ['成功响应含 prompt_filter_results'] },
+      },
+      results: {
+        'chat-basic': {
+          format: 'chat',
+          usage: { input: 640 },
+          repro: {
+            url: 'https://gw.example/v1/chat/completions',
+            status: 200,
+            body: { model: 'gpt-5.4', messages: [{ role: 'user', content: 'Reply with exactly: OK' }] },
+            requestId: 'req_not_a_header',
+            responseBody: { id: 'chatcmpl-az', object: 'chat.completion', prompt_filter_results: [{}] },
+          },
+        },
+      },
+    })
+    assert.equal(mixed, null)
+
+    const gateway = probeRefreshedOrigin({
+      requestModel: 'gpt-4o',
+      baseUrl: 'https://gw.example',
+      verdict: {
+        access: { label: '网关', reasons: ['错误或响应头指向 new-api / oneapi'] },
+        upstream: { label: '不确定', reasons: ['这次响应里没有官方、Azure、Bedrock 或 Vertex 的稳定字段'] },
+      },
+      results: {
+        'chat-basic': {
+          format: 'chat',
+          usage: { input: 12 },
+          repro: {
+            url: 'https://gw.example/v1/chat/completions',
+            status: 200,
+            body: { model: 'gpt-4o', messages: [{ role: 'user', content: 'Reply with exactly: OK' }] },
+            requestId: 'req_gateway_only',
+            responseBody: { id: 'chatcmpl-gw', object: 'chat.completion', model: 'gpt-4o' },
+          },
+        },
+      },
+    })
+    assert.equal(gateway?.access.label, '网关')
+    assert.deepEqual(gateway?.access.reasons, ['错误或响应头指向 new-api / oneapi'])
+    assert.equal(gateway?.upstream.label, 'OpenAI 官方')
+  })
+
+  it('没有 x-amzn-requestid 时不把 Bedrock 改成 Anthropic，正文里的 Azure 仍能补上上游', () => {
+    assert.equal(probeRefreshedOrigin({
+      requestModel: 'claude-opus-4-5',
+      baseUrl: 'https://gw.example',
+      verdict: {
+        access: { label: '网关', reasons: ['错误含「分组」'] },
+        upstream: { label: 'Bedrock', reasons: ['响应头 x-amzn-requestid'] },
+      },
+      results: {
+        'anthropic-basic': {
+          format: 'anthropic',
+          repro: {
+            url: 'https://gw.example/v1/messages',
+            status: 200,
+            body: { model: 'claude-opus-4-5' },
+            responseBody: { model: 'claude-opus-4-5-20251101', stop_reason: 'end_turn' },
+          },
+        },
+      },
+    }), null)
+
+    const azure = probeRefreshedOrigin({
+      requestModel: 'gpt-4o',
+      baseUrl: 'https://gw.example',
+      verdict: {
+        access: { label: '网关', reasons: ['错误含「分组」'] },
+        upstream: { label: '不确定', reasons: ['这次响应里没有官方、Azure、Bedrock 或 Vertex 的稳定字段'] },
+      },
+      results: {
+        'chat-basic': {
+          format: 'chat',
+          usage: { input: 12 },
+          repro: {
+            url: 'https://gw.example/v1/chat/completions',
+            status: 200,
+            body: { messages: [{ role: 'user', content: 'hi' }] },
+            responseHeaders: { 'content-type': 'application/json' },
+            responseBody: { id: 'chatcmpl-x', object: 'chat.completion', prompt_filter_results: [{}] },
+          },
+        },
+      },
+    })
+    assert.equal(azure?.access.label, '网关')
+    assert.equal(azure?.upstream.label, 'Azure OpenAI')
   })
 })
 

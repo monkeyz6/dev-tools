@@ -1,3 +1,5 @@
+import { probeRequestIdFromRecord } from './request-id.ts'
+
 export type ProbeBasicState = 'ok' | 'fail' | 'absent'
 
 export interface ProbeSignalFlags {
@@ -12,6 +14,8 @@ export interface ProbeSignalFlags {
   cacheCreation: boolean
   cacheReadField: boolean
   systemFingerprint: string | null
+  openaiChat: boolean
+  openaiResponse: boolean
 }
 
 export interface ProbeSignals {
@@ -68,6 +72,8 @@ const emptyFlags = (): ProbeSignalFlags => ({
   cacheCreation: false,
   cacheReadField: false,
   systemFingerprint: null,
+  openaiChat: false,
+  openaiResponse: false,
 })
 
 const hostOf = (url: string): string => {
@@ -108,6 +114,15 @@ const walk = (value: unknown, flags: ProbeSignalFlags, depth: number) => {
   }
 }
 
+const noteOpenAiShape = (body: unknown, flags: ProbeSignalFlags) => {
+  if (!body || typeof body !== 'object' || Array.isArray(body)) return
+  const record = body as Record<string, unknown>
+  const id = typeof record.id === 'string' ? record.id : ''
+  const object = typeof record.object === 'string' ? record.object : ''
+  if (/^chatcmpl-/i.test(id) || object === 'chat.completion' || object === 'chat.completion.chunk') flags.openaiChat = true
+  if (/^resp_/i.test(id) || object === 'response') flags.openaiResponse = true
+}
+
 const isShortPrompt = (body: unknown): boolean => {
   if (!body || typeof body !== 'object') return false
   const o = body as Record<string, any>
@@ -145,6 +160,7 @@ export function signalsFromProbeLogs(input: {
 
   for (const log of input.logs) {
     walk(log.responseBody, flags, 0)
+    noteOpenAiShape(log.responseBody, flags)
     const body = log.responseBody
     if (body && typeof body === 'object' && typeof (body as Record<string, any>).model === 'string') {
       responseModels.push((body as Record<string, any>).model)
@@ -254,13 +270,18 @@ export function decideOrigin(signals: ProbeSignals): OriginDecision {
     if (headerValue(signals.headerHits, 'openai-version')) official.push('响应头 openai-version')
     if (signals.flags.systemFingerprint) official.push(`system_fingerprint 为 ${signals.flags.systemFingerprint}`)
   }
+  if (!azure.length) {
+    if (signals.flags.openaiChat) official.push('响应是 Chat Completions（chatcmpl- / object=chat.completion）')
+    if (signals.flags.openaiResponse) official.push('响应是 Responses（resp_ / object=response）')
+  }
 
   const datedClaude = signals.responseModels.find(model => /^claude-.+-\d{8}$/i.test(model))
   const anthropic: string[] = []
-  if (/^req_/i.test(requestId)) anthropic.push('响应头 request-id 为 req_')
   if (datedClaude && (signals.flags.cacheCreation || signals.flags.cacheReadField || signals.flags.stopReason)) {
     anthropic.push(`响应模型 ${datedClaude}`)
   }
+  const claudeShaped = anthropic.length > 0 || signals.flags.anthropicNative || host === 'api.anthropic.com'
+  if (/^req_/i.test(requestId) && claudeShaped) anthropic.push('响应头 request-id 为 req_')
 
   const bedrock: string[] = []
   if (headerValue(signals.headerHits, 'x-amzn-requestid')) bedrock.push('响应头 x-amzn-requestid')
@@ -291,5 +312,132 @@ export function decideOrigin(signals: ProbeSignals): OriginDecision {
     upstream = layer('uncertain', '不确定', ['这次响应里没有官方、Azure、Bedrock 或 Vertex 的稳定字段'])
   }
 
+  return { access, upstream }
+}
+
+export interface ProbeSourceLayer {
+  label: string
+  reasons: string[]
+}
+
+export interface ProbeOriginResidueCell {
+  format?: string
+  usage?: { input: number | null } | null
+  repro?: {
+    url?: string
+    status?: number | null
+    body?: unknown
+    requestId?: string | null
+    responseHeaders?: Record<string, string> | null
+    responseBody?: unknown
+  } | null
+}
+
+const layerReasons = (layer?: { reasons?: string[] } | null): string[] => layer?.reasons ?? []
+
+export function probeShownSource(verdict: {
+  access?: ProbeSourceLayer | null
+  upstream?: ProbeSourceLayer | null
+} | null | undefined): ProbeSourceLayer | null {
+  if (verdict?.access?.label === 'Codex 反代') {
+    return { label: verdict.access.label, reasons: layerReasons(verdict.access) }
+  }
+  if (verdict?.upstream?.label) {
+    return { label: verdict.upstream.label, reasons: layerReasons(verdict.upstream) }
+  }
+  return null
+}
+
+/** 历史丢掉整段日志后，用每一格留下的地址、请求体、响应体和 Request ID 头重跑来源判断。裸的 requestId 不补成 request-id：它也可能来自网关头。没有任何残留请求时返回空。 */
+export function probeOriginLogsFromResults(
+  results: Record<string, ProbeOriginResidueCell | null | undefined> | null | undefined,
+): ProbeOriginLog[] {
+  const logs: ProbeOriginLog[] = []
+  for (const [key, result] of Object.entries(results || {})) {
+    const repro = result?.repro
+    if (!repro) continue
+    const headers = { ...(repro.responseHeaders || {}) }
+    const headerId = probeRequestIdFromRecord(headers)
+    const hasUrl = typeof repro.url === 'string' && repro.url.trim().length > 0
+    const hasStatus = typeof repro.status === 'number'
+    const hasRequest = repro.body != null
+    const hasResponse = repro.responseBody !== undefined && repro.responseBody !== null
+    if (!hasUrl && !hasStatus && !hasRequest && !hasResponse && !headerId) continue
+    logs.push({
+      url: typeof repro.url === 'string' ? repro.url : '',
+      status: typeof repro.status === 'number' ? repro.status : null,
+      resultKey: key,
+      format: result?.format || '',
+      requestBody: repro.body,
+      responseHeaders: headers,
+      responseBody: repro.responseBody,
+      usage: result?.usage ? { input: result.usage.input ?? null } : null,
+    })
+  }
+  return logs
+}
+
+const sameSourceLayer = (prev: ProbeSourceLayer | null | undefined, next: ProbeSourceLayer): boolean => {
+  if (!prev || prev.label !== next.label || layerReasons(prev).length !== next.reasons.length) return false
+  return layerReasons(prev).every((reason, index) => reason === next.reasons[index])
+}
+
+/** 这几项会参与来源判断，但历史只留 Request ID 头，打开报告时已经不在残留里。 */
+const UNSTORED_ORIGIN_HEADERS = [
+  'openai-organization',
+  'openai-processing-ms',
+  'openai-version',
+  'x-amzn-requestid',
+] as const
+
+const residueHeaderNames = (
+  results: Record<string, ProbeOriginResidueCell | null | undefined> | null | undefined,
+): Set<string> => {
+  const names = new Set<string>()
+  for (const result of Object.values(results || {})) {
+    for (const [name, value] of Object.entries(result?.repro?.responseHeaders || {})) {
+      if (typeof value === 'string' && value.trim()) names.add(name.toLowerCase())
+    }
+  }
+  return names
+}
+
+const citesMissingOriginHeader = (prev: ProbeSourceLayer | null | undefined, headers: Set<string>): boolean => {
+  if (!prev?.label) return false
+  const blob = layerReasons(prev).join('\n').toLowerCase()
+  return UNSTORED_ORIGIN_HEADERS.some(name => blob.includes(name) && !headers.has(name))
+}
+
+/** 残留表达不了原先的头证据，或重算变成不确定时，保留这一层，避免把混合、Bedrock 写成别的。 */
+const keepStoredLayer = (
+  prev: ProbeSourceLayer | null | undefined,
+  next: ProbeSourceLayer,
+  headers: Set<string>,
+): ProbeSourceLayer => {
+  if (!prev?.label) return next
+  if ((next.label === '不确定' && prev.label !== '不确定') || citesMissingOriginHeader(prev, headers)) {
+    return { label: prev.label, reasons: layerReasons(prev) }
+  }
+  return next
+}
+
+/** 有残留时重算接入层和上游。与已存结论相同则返回 null。残留里没有原先依据的头，或这一层重算成不确定时，该层保留原标签。 */
+export function probeRefreshedOrigin(input: {
+  requestModel: string
+  baseUrl: string
+  results: Record<string, ProbeOriginResidueCell | null | undefined> | null | undefined
+  verdict?: { access?: ProbeSourceLayer | null; upstream?: ProbeSourceLayer | null } | null
+}): { access: ProbeSourceLayer; upstream: ProbeSourceLayer } | null {
+  const logs = probeOriginLogsFromResults(input.results)
+  if (!logs.length) return null
+  const origin = decideOrigin(signalsFromProbeLogs({
+    requestModel: input.requestModel,
+    baseUrl: input.baseUrl,
+    logs,
+  }))
+  const headers = residueHeaderNames(input.results)
+  const access = keepStoredLayer(input.verdict?.access, { label: origin.access.label, reasons: origin.access.reasons }, headers)
+  const upstream = keepStoredLayer(input.verdict?.upstream, { label: origin.upstream.label, reasons: origin.upstream.reasons }, headers)
+  if (sameSourceLayer(input.verdict?.access, access) && sameSourceLayer(input.verdict?.upstream, upstream)) return null
   return { access, upstream }
 }

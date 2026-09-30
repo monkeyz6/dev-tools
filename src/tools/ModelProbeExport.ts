@@ -1,6 +1,7 @@
 // 模型探测：自包含单文件 HTML 报告（网格卡片 + 弹层，请求体可复制，不含请求头 / key）
 
 import { matrixFormatSubtitle, matrixTokenValues, presentMatrixNote, probeMatrixProblem, stripSplitRetestNote } from './model-probe/matrix-present'
+import { probeShownSource } from './model-probe/origin'
 import { probeShownRequestId } from './model-probe/request-id'
 
 export type ProbeHtmlStatus = 'passed' | 'failed' | 'abnormal' | 'unsupported' | 'skipped' | 'expected' | 'untested'
@@ -1114,10 +1115,10 @@ function matrixCellHtml(name: string, subtitle: string, result: ProbeHtmlResult 
   return `<td><button type="button" class="matrix-cell dot-st ${esc(result.status)}" data-i="${index}" aria-label="${esc(aria)}">${esc(item.statusLabel)}</button></td>`
 }
 
-function matrixColumnHead(column: ProbeMatrixColumn, upstream: { label: string } | null | undefined, index: number): string {
-  const lines = `<span class="col-model">${esc(column.model)}</span>${column.source ? `<span class="col-src">${esc(column.source)}</span>` : ''}${upstream ? `<span class="col-src">${esc(upstream.label)}</span>` : ''}`
-  if (!upstream) return `<th scope="col">${lines}</th>`
-  return `<th scope="col"><button type="button" class="matrix-col" data-origin="${index}" aria-label="${esc(`渠道判断 ${probeMatrixColumnText(column)}`)}">${lines}</button></th>`
+function matrixColumnHead(column: ProbeMatrixColumn, source: { label: string } | null | undefined, index: number, showSource: boolean): string {
+  const lines = `<span class="col-model">${esc(column.model)}</span>${column.source ? `<span class="col-src">${esc(column.source)}</span>` : ''}${showSource && source ? `<span class="col-src">${esc(source.label)}</span>` : ''}`
+  if (!showSource || !source) return `<th scope="col">${lines}</th>`
+  return `<th scope="col"><button type="button" class="matrix-col" data-origin="${index}" aria-label="${esc(`来源判断 ${probeMatrixColumnText(column)}`)}">${lines}</button></th>`
 }
 
 const MATRIX_SHEET_SCRIPT = `
@@ -1266,7 +1267,7 @@ const MATRIX_SHEET_SCRIPT = `
     if (!item) return;
     openIndex = -1;
     hideExtras();
-    $('sheetTitle').textContent = '渠道判断';
+    $('sheetTitle').textContent = '__ORIGIN_TITLE__';
     var pill = $('sheetPill');
     pill.className = 'pill';
     pill.textContent = item.label || '';
@@ -1316,7 +1317,7 @@ const MATRIX_SHEET_SCRIPT = `
 })();
 `
 
-function probeMatrixSheet(payload: string, originsPayload: string): string {
+function probeMatrixSheet(payload: string, originsPayload: string, originTitle: string): string {
   return `<div class="overlay" id="overlay" hidden>
   <div class="sheet" role="dialog" aria-modal="true" aria-labelledby="sheetTitle">
     <div class="sheet-head">
@@ -1349,7 +1350,7 @@ function probeMatrixSheet(payload: string, originsPayload: string): string {
   </div>
 </div>
 <script>window.__PROBE_ITEMS = ${payload};window.__PROBE_ORIGINS = ${originsPayload}</script>
-<script>${MATRIX_SHEET_SCRIPT}</script>`
+<script>${MATRIX_SHEET_SCRIPT.replace('__ORIGIN_TITLE__', originTitle)}</script>`
 }
 
 // 两份表静止时状态字一样。能打开的弹层带上地址、请求体、已留下的响应体和 Request ID，不写请求头和响应头原文。
@@ -1380,12 +1381,13 @@ export function buildProbeMatrixHtml(
       rows += `<tr><th class="rowh" scope="row">${esc(test.name)}${subtitle ? `<span class="row-sub">${esc(subtitle)}</span>` : ''}</th>${cells}</tr>`
     }
   }
-  const origins = list.map((report, index) => {
-    const upstream = report.verdict?.upstream
-    if (!upstream) return null
-    return { column: probeMatrixColumnText(labels[index]), label: upstream.label, reasons: upstream.reasons }
-  })
-  const head = labels.map((column, index) => matrixColumnHead(column, list[index]?.verdict?.upstream, index)).join('')
+  const showSource = kind !== 'problems'
+  const origins = showSource ? list.map((report, index) => {
+    const source = probeShownSource(report.verdict)
+    if (!source) return null
+    return { column: probeMatrixColumnText(labels[index]), label: source.label, reasons: source.reasons }
+  }) : []
+  const head = labels.map((column, index) => matrixColumnHead(column, probeShownSource(list[index]?.verdict), index, showSource)).join('')
   const initial = theme?.initialTheme === 'dark' ? 'dark' : 'light'
   const docTitle = kind === 'problems' ? '模型探测 · 异常' : '模型探测'
   return `<!doctype html>
@@ -1418,7 +1420,7 @@ export function buildProbeMatrixHtml(
     </table>
   </div>
 </main>
-${probeMatrixSheet(embedJson(flat), embedJson(origins))}
+${probeMatrixSheet(embedJson(flat), embedJson(origins), showSource ? '来源判断' : '')}
 </body>
 </html>`
 }

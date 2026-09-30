@@ -1692,6 +1692,197 @@ test.describe('模型探测', () => {
     await expect(tile).toContainText('不是截断')
   })
 
+  const OUTPUT_LIMIT_BODY = JSON.stringify({
+    error: {
+      message: 'Could not finish the message because max_tokens or model output limit was reached. Please try again with higher max_tokens.',
+      type: 'invalid_request_error',
+      param: '',
+      code: null,
+    },
+  })
+
+  test('Token 上限语义：额度用尽的 400 记通过', async ({ page }) => {
+    const bodies: any[] = []
+    await page.route('**/v1/chat/completions', async route => {
+      const body = route.request().postDataJSON()
+      bodies.push(body)
+      if (capOf(body) === 16) {
+        await route.fulfill({ status: 400, contentType: 'application/json', body: OUTPUT_LIMIT_BODY })
+        return
+      }
+      if (body?.max_tokens != null && body?.max_completion_tokens != null) {
+        await route.fulfill({
+          status: 400, contentType: 'application/json',
+          body: JSON.stringify({ error: { message: 'unknown parameter: max_tokens' } }),
+        })
+        return
+      }
+      await route.fulfill({ status: 200, contentType: 'application/json', body: CHAT_OK(12) })
+    })
+
+    await goto(page, /模型探测/)
+    await page.getByRole('button', { name: '全不选' }).click()
+    await check(page, 'chat-basic')
+    await check(page, 'max_tokens')
+    await setupRun(page, 'e2e-额度用尽')
+
+    const tile = page.locator('main').locator('[data-probe-tile]').filter({ hasText: /Token 上限参数/ })
+    await expect(tile.locator('.probe-status-text')).toHaveText('通过', { timeout: 10000 })
+    await expect(tile).toContainText('输出额度用尽')
+    await expect(tile).toContainText('已排除 max_tokens')
+    const semantic = bodies.filter(b => capOf(b) === 16)
+    expect(semantic).toHaveLength(1)
+    expect(semantic[0].max_completion_tokens).toBe(16)
+    expect(semantic[0].max_tokens).toBeUndefined()
+    expect(semantic[0].messages[0].content).toContain('Count from 1 to 200')
+    await tile.click()
+    const dialog = page.getByRole('dialog')
+    await expect(dialog).toContainText('HTTP 400')
+    await expect(dialog).toContainText('invalid_request_error')
+    await expect(dialog).toContainText('max_completion_tokens')
+  })
+
+  test('Token 上限语义：两字段同时在场时额度用尽只发一次', async ({ page }) => {
+    const bodies: any[] = []
+    await page.route('**/v1/chat/completions', async route => {
+      const body = route.request().postDataJSON()
+      bodies.push(body)
+      if (capOf(body) === 16) {
+        await route.fulfill({ status: 400, contentType: 'application/json', body: OUTPUT_LIMIT_BODY })
+        return
+      }
+      await route.fulfill({ status: 200, contentType: 'application/json', body: CHAT_OK(12) })
+    })
+
+    await goto(page, /模型探测/)
+    await page.getByRole('button', { name: '全不选' }).click()
+    await check(page, 'chat-basic')
+    await check(page, 'max_tokens')
+    await setupRun(page, 'e2e-额度用尽一次')
+
+    const tile = page.locator('main').locator('[data-probe-tile]').filter({ hasText: /Token 上限参数/ })
+    await expect(tile.locator('.probe-status-text')).toHaveText('通过', { timeout: 10000 })
+    const semantic = bodies.filter(b => capOf(b) === 16)
+    expect(semantic).toHaveLength(1)
+    expect(semantic[0].max_tokens).toBe(16)
+    expect(semantic[0].max_completion_tokens).toBe(16)
+  })
+
+  test('Token 上限语义：上游 500 仍记失败', async ({ page }) => {
+    await page.route('**/v1/chat/completions', async route => {
+      const body = route.request().postDataJSON()
+      if (capOf(body) === 16) {
+        await route.fulfill({
+          status: 500, contentType: 'application/json',
+          body: JSON.stringify({ error: { message: 'upstream error: do request failed (request id: 202609291715298694339828268d9d6XtKpv4iB)' } }),
+        })
+        return
+      }
+      await route.fulfill({ status: 200, contentType: 'application/json', body: CHAT_OK(12) })
+    })
+
+    await goto(page, /模型探测/)
+    await page.getByRole('button', { name: '全不选' }).click()
+    await check(page, 'chat-basic')
+    await check(page, 'max_tokens')
+    await setupRun(page, 'e2e-上游500')
+
+    const tile = page.locator('main').locator('[data-probe-tile]').filter({ hasText: /Token 上限参数/ })
+    await expect(tile.locator('.probe-status-text')).toHaveText('失败', { timeout: 10000 })
+    await expect(tile).toContainText('upstream error')
+    await expect(tile).not.toContainText('输出额度用尽')
+  })
+
+  test('Token 上限语义：带额度用尽句子的 500 仍记失败', async ({ page }) => {
+    await page.route('**/v1/chat/completions', async route => {
+      const body = route.request().postDataJSON()
+      if (capOf(body) === 16) {
+        await route.fulfill({ status: 500, contentType: 'application/json', body: OUTPUT_LIMIT_BODY })
+        return
+      }
+      await route.fulfill({ status: 200, contentType: 'application/json', body: CHAT_OK(12) })
+    })
+
+    await goto(page, /模型探测/)
+    await page.getByRole('button', { name: '全不选' }).click()
+    await check(page, 'chat-basic')
+    await check(page, 'max_tokens')
+    await setupRun(page, 'e2e-额度句子500')
+
+    const tile = page.locator('main').locator('[data-probe-tile]').filter({ hasText: /Token 上限参数/ })
+    await expect(tile.locator('.probe-status-text')).toHaveText('失败', { timeout: 10000 })
+    await expect(tile).not.toContainText('输出额度用尽')
+  })
+
+  test('Token 上限：组合请求的额度用尽 400 不算字段被拒', async ({ page }) => {
+    const bodies: any[] = []
+    await page.route('**/v1/chat/completions', async route => {
+      const body = route.request().postDataJSON()
+      bodies.push(body)
+      if (capOf(body) === 16 || (body?.max_tokens != null && body?.max_completion_tokens != null)) {
+        await route.fulfill({ status: 400, contentType: 'application/json', body: OUTPUT_LIMIT_BODY })
+        return
+      }
+      await route.fulfill({ status: 200, contentType: 'application/json', body: CHAT_OK(12) })
+    })
+
+    await goto(page, /模型探测/)
+    await page.getByRole('button', { name: '全不选' }).click()
+    await check(page, 'chat-basic')
+    await check(page, 'max_tokens')
+    await setupRun(page, 'e2e-组合额度用尽')
+
+    const tile = page.locator('main').locator('[data-probe-tile]').filter({ hasText: /Token 上限参数/ })
+    await expect(tile.locator('.probe-status-text')).toHaveText('通过', { timeout: 10000 })
+    await expect(tile).toContainText('输出额度用尽')
+    await expect(tile).toContainText('同时接受')
+    await expect(tile).not.toContainText('已排除')
+    const semantic = bodies.filter(b => capOf(b) === 16)
+    expect(semantic).toHaveLength(1)
+    expect(semantic[0].max_tokens).toBe(16)
+    expect(semantic[0].max_completion_tokens).toBe(16)
+    expect(bodies.filter(b => capOf(b) !== 16 && (b.max_tokens != null) !== (b.max_completion_tokens != null))).toHaveLength(0)
+  })
+
+  test('Token 上限语义：互斥后先遇到额度用尽就通过，不再发下一个字段', async ({ page }) => {
+    const bodies: any[] = []
+    await page.route('**/v1/chat/completions', async route => {
+      const body = route.request().postDataJSON()
+      bodies.push(body)
+      if (body?.max_tokens != null && body?.max_completion_tokens != null) {
+        await route.fulfill({
+          status: 400, contentType: 'application/json',
+          body: JSON.stringify({ error: { message: 'Cannot specify both max_tokens and max_completion_tokens' } }),
+        })
+        return
+      }
+      if (capOf(body) === 16 && body?.max_completion_tokens != null) {
+        await route.fulfill({ status: 400, contentType: 'application/json', body: OUTPUT_LIMIT_BODY })
+        return
+      }
+      if (capOf(body) === 16) {
+        await route.fulfill({ status: 200, contentType: 'application/json', body: CHAT_OK(12, 0, { content: '1 2 3', finishReason: 'stop' }) })
+        return
+      }
+      await route.fulfill({ status: 200, contentType: 'application/json', body: CHAT_OK(12) })
+    })
+
+    await goto(page, /模型探测/)
+    await page.getByRole('button', { name: '全不选' }).click()
+    await check(page, 'chat-basic')
+    await check(page, 'max_tokens')
+    await setupRun(page, 'e2e-互斥后额度用尽')
+
+    const tile = page.locator('main').locator('[data-probe-tile]').filter({ hasText: /Token 上限参数/ })
+    await expect(tile.locator('.probe-status-text')).toHaveText('通过', { timeout: 10000 })
+    await expect(tile).toContainText('输出额度用尽')
+    const semantic = bodies.filter(b => capOf(b) === 16)
+    expect(semantic.map(b => ({ max_tokens: b.max_tokens ?? null, max_completion_tokens: b.max_completion_tokens ?? null }))).toEqual([
+      { max_tokens: 16, max_completion_tokens: 16 },
+      { max_tokens: null, max_completion_tokens: 16 },
+    ])
+  })
+
   test('工具调用语义：2xx 但没有 tool_calls 判失败', async ({ page }) => {
     await page.route('**/v1/chat/completions', async route => {
       await route.fulfill({ status: 200, contentType: 'application/json', body: CHAT_OK(12, 0, { content: '明天上海晴' }) })
@@ -1910,6 +2101,277 @@ test.describe('模型探测', () => {
     await expect(page.getByRole('checkbox', { name: '选择 批量回归 · beta-two' })).toBeChecked()
   })
 
+  test('历史里的额度用尽 400 打开后改判通过', async ({ page }) => {
+    const accepted = '独立降级请求通过；接受 max_completion_tokens（已排除 max_tokens）'
+    const limitBody = {
+      error: {
+        message: 'Could not finish the message because max_tokens or model output limit was reached. Please try again with higher max_tokens.',
+        type: 'invalid_request_error',
+        param: '',
+        code: null,
+      },
+    }
+    await goto(page, /模型探测/)
+    await page.evaluate(({ accepted, limitBody }) => new Promise<void>((resolve, reject) => {
+      const req = indexedDB.open('dev-toolkit-history')
+      req.onupgradeneeded = () => {
+        const db = req.result
+        if (!db.objectStoreNames.contains('modelprobe')) db.createObjectStore('modelprobe', { keyPath: 'id' })
+      }
+      req.onsuccess = () => {
+        const db = req.result
+        const tx = db.transaction('modelprobe', 'readwrite')
+        tx.objectStore('modelprobe').put({
+          id: 'p-limit-old',
+          name: 'e2e-额度旧记录',
+          startedAt: '2026-09-29T03:00:00.000Z',
+          completedAt: '2026-09-29T03:00:01.000Z',
+          durationMs: 1000,
+          summary: { passed: 0, failed: 2, abnormal: 0, unsupported: 1, skipped: 0, expected: 0, untested: 0 },
+          logs: [],
+          target: { baseUrl: 'https://gw.example', model: 'gpt-5.6-terra', channelName: '官转', overrides: { chat: null, responses: null, anthropic: null } },
+          verdict: {
+            family: { label: 'GPT 推理', reasons: ['名字命中'] },
+            access: { label: '网关', reasons: ['主机不像官方'] },
+            upstream: { label: '不确定', reasons: [] },
+          },
+          results: {
+            'max_tokens@chat': {
+              status: 'failed',
+              detail: `${accepted}，但${JSON.stringify(limitBody)}`,
+              duration: 20,
+              format: 'chat',
+              checks: [
+                { id: 'accepted', passed: true, detail: accepted },
+                { id: 'truncation', passed: false, detail: 'Could not finish the message because max_tokens or model output li' },
+              ],
+              repro: {
+                url: 'https://gw.example/v1/chat/completions',
+                headers: {},
+                body: {
+                  model: 'gpt-5.6-terra',
+                  messages: [{ role: 'user', content: 'Count from 1 to 200, writing each integer on its own line. Do not stop until you reach 200.' }],
+                  max_completion_tokens: 16,
+                },
+                status: 400,
+                requestId: 'req_terra',
+                responseBody: limitBody,
+              },
+            },
+            'max_tokens@responses': {
+              status: 'failed',
+              detail: 'upstream error: do request failed',
+              duration: 30,
+              format: 'responses',
+              checks: [
+                { id: 'accepted', passed: true, detail: '组合请求通过' },
+                { id: 'truncation', passed: false, detail: 'upstream error: do request failed' },
+              ],
+              repro: {
+                url: 'https://gw.example/v1/responses',
+                headers: {},
+                body: { model: 'gpt-5.6-terra', input: 'Count from 1 to 200', max_output_tokens: 16 },
+                status: 500,
+                requestId: 'req-azure',
+                responseBody: { error: { message: 'upstream error: do request failed (request id: 202609291715298694339828268d9d6XtKpv4iB)' } },
+              },
+            },
+            'structured_output@anthropic': {
+              status: 'unsupported',
+              detail: '无原生 response_format',
+              duration: 1,
+              format: 'anthropic',
+              repro: null,
+            },
+          },
+        })
+        tx.oncomplete = () => resolve()
+        tx.onerror = () => reject(tx.error)
+      }
+      req.onerror = () => reject(req.error)
+    }), { accepted, limitBody })
+    await page.reload()
+    await goto(page, /模型探测/)
+    await page.getByRole('button', { name: /历史/ }).click()
+    await page.locator('[data-testid="probe-history-row"]').filter({ hasText: 'e2e-额度旧记录' }).getByRole('button', { name: '查看' }).click()
+    await expect(page.getByRole('heading', { name: 'e2e-额度旧记录' })).toBeVisible()
+    const tiles = page.locator('main').locator('[data-probe-tile]').filter({ hasText: /Token 上限参数/ })
+    await expect(tiles.filter({ hasText: 'Chat Completions' }).locator('.probe-status-text')).toHaveText('通过')
+    await expect(tiles.filter({ hasText: 'Chat Completions' })).toContainText('输出额度用尽')
+    await expect(tiles.filter({ hasText: 'Responses' }).locator('.probe-status-text')).toHaveText('失败')
+    const rows = await readHistoryStore(page, 'modelprobe')
+    const saved = rows.find(row => row.id === 'p-limit-old')
+    expect(saved.completedAt).toBe('2026-09-29T03:00:01.000Z')
+    expect(saved.results['max_tokens@chat'].status).toBe('passed')
+    expect(saved.results['max_tokens@chat'].repro.status).toBe(400)
+    expect(saved.results['max_tokens@chat'].repro.body.max_completion_tokens).toBe(16)
+    expect(saved.results['max_tokens@responses'].status).toBe('failed')
+    expect(saved.results['structured_output@anthropic'].detail).toContain('无原生 response_format')
+  })
+
+  test('历史里的额度用尽句子在 500 上打开后仍是失败', async ({ page }) => {
+    const limitBody = {
+      error: {
+        message: 'Could not finish the message because max_tokens or model output limit was reached. Please try again with higher max_tokens.',
+        type: 'invalid_request_error',
+        param: '',
+        code: null,
+      },
+    }
+    await goto(page, /模型探测/)
+    await page.evaluate(limitBody => new Promise<void>((resolve, reject) => {
+      const req = indexedDB.open('dev-toolkit-history')
+      req.onupgradeneeded = () => {
+        const db = req.result
+        if (!db.objectStoreNames.contains('modelprobe')) db.createObjectStore('modelprobe', { keyPath: 'id' })
+      }
+      req.onsuccess = () => {
+        const db = req.result
+        const tx = db.transaction('modelprobe', 'readwrite')
+        tx.objectStore('modelprobe').put({
+          id: 'p-limit-500',
+          name: 'e2e-额度500旧记录',
+          startedAt: '2026-09-29T04:00:00.000Z',
+          completedAt: '2026-09-29T04:00:01.000Z',
+          durationMs: 1000,
+          summary: { passed: 0, failed: 1, abnormal: 0, unsupported: 0, skipped: 0, expected: 0, untested: 0 },
+          logs: [],
+          target: { baseUrl: 'https://gw.example', model: 'gpt-5.6-terra', channelName: '官转', overrides: { chat: null, responses: null, anthropic: null } },
+          verdict: {
+            family: { label: 'GPT 推理', reasons: ['名字命中'] },
+            access: { label: '网关', reasons: ['主机不像官方'] },
+            upstream: { label: '不确定', reasons: [] },
+          },
+          results: {
+            'max_tokens@chat': {
+              status: 'failed',
+              detail: 'Could not finish the message because max_tokens or model output limit was reached. Please try again with higher max_tokens.',
+              duration: 20,
+              format: 'chat',
+              checks: [{ id: 'truncation', passed: false, detail: 'Could not finish the message because max_tokens or model output limit was reached. Please try again with higher max_tokens.' }],
+              repro: {
+                url: 'https://gw.example/v1/chat/completions',
+                headers: {},
+                body: { model: 'gpt-5.6-terra', max_completion_tokens: 16 },
+                status: 500,
+                responseBody: limitBody,
+              },
+            },
+          },
+        })
+        tx.oncomplete = () => resolve()
+        tx.onerror = () => reject(tx.error)
+      }
+      req.onerror = () => reject(req.error)
+    }), limitBody)
+    await page.reload()
+    await goto(page, /模型探测/)
+    await page.getByRole('button', { name: /历史/ }).click()
+    await page.locator('[data-testid="probe-history-row"]').filter({ hasText: 'e2e-额度500旧记录' }).getByRole('button', { name: '查看' }).click()
+    const tile = page.locator('main').locator('[data-probe-tile]').filter({ hasText: /Token 上限参数/ })
+    await expect(tile.locator('.probe-status-text')).toHaveText('失败')
+    await expect(tile).not.toContainText('输出额度用尽')
+    const rows = await readHistoryStore(page, 'modelprobe')
+    expect(rows.find(row => row.id === 'p-limit-500').results['max_tokens@chat'].status).toBe('failed')
+  })
+
+  test('打开历史不把缺机构头的混合接入改成 Codex 反代', async ({ page }) => {
+    await goto(page, /模型探测/)
+    await page.evaluate(() => new Promise<void>((resolve, reject) => {
+      const req = indexedDB.open('dev-toolkit-history')
+      req.onupgradeneeded = () => {
+        const db = req.result
+        if (!db.objectStoreNames.contains('modelprobe')) db.createObjectStore('modelprobe', { keyPath: 'id' })
+      }
+      req.onsuccess = () => {
+        const db = req.result
+        const tx = db.transaction('modelprobe', 'readwrite')
+        const os = tx.objectStore('modelprobe')
+        const base = {
+          startedAt: '2026-09-29T05:00:00.000Z',
+          durationMs: 1000,
+          summary: { passed: 1, failed: 0, abnormal: 0, unsupported: 0, skipped: 0, expected: 0, untested: 0 },
+          logs: [],
+        }
+        os.put({
+          ...base,
+          id: 'p-origin-mixed',
+          name: 'e2e-混合来源',
+          completedAt: '2026-09-29T05:00:01.000Z',
+          target: { baseUrl: 'https://gw.example', model: 'gpt-5.4', channelName: '渠道甲', overrides: { chat: null, responses: null, anthropic: null } },
+          verdict: {
+            family: { label: 'GPT 推理', reasons: ['名字命中'] },
+            access: {
+              label: '混合',
+              reasons: ['短提示输入 Token 为 640，高于官方基线（约 8–20）', '响应头 openai-organization'],
+            },
+            upstream: { label: 'Azure OpenAI', reasons: ['成功响应含 prompt_filter_results'] },
+          },
+          results: {
+            'chat-basic': {
+              status: 'passed',
+              detail: '基础请求返回成功',
+              duration: 10,
+              format: 'chat',
+              usage: { input: 640, output: 2, cacheRead: null, cacheWrite: null },
+              repro: {
+                url: 'https://gw.example/v1/chat/completions',
+                headers: {},
+                body: { model: 'gpt-5.4', messages: [{ role: 'user', content: 'Reply with exactly: OK' }] },
+                status: 200,
+                requestId: 'req_not_a_header',
+                responseBody: { id: 'chatcmpl-az', object: 'chat.completion', prompt_filter_results: [{}] },
+              },
+            },
+          },
+        })
+        os.put({
+          ...base,
+          id: 'p-origin-other',
+          name: 'e2e-对照来源',
+          completedAt: '2026-09-29T05:00:02.000Z',
+          target: { baseUrl: 'https://b.example', model: 'gpt-4o', channelName: '渠道乙', overrides: { chat: null, responses: null, anthropic: null } },
+          verdict: {
+            family: { label: 'GPT 经典', reasons: ['名字命中'] },
+            access: { label: '网关', reasons: ['主机不像官方'] },
+            upstream: { label: '不确定', reasons: [] },
+          },
+          results: {
+            'chat-basic': {
+              status: 'failed',
+              detail: '失败',
+              duration: 10,
+              format: 'chat',
+              usage: { input: 1, output: 2, cacheRead: null, cacheWrite: null },
+              repro: null,
+            },
+          },
+        })
+        tx.oncomplete = () => resolve()
+        tx.onerror = () => reject(tx.error)
+      }
+      req.onerror = () => reject(req.error)
+    }))
+    await page.reload()
+    await goto(page, /模型探测/)
+    await page.getByRole('button', { name: /历史/ }).click()
+    await page.getByRole('checkbox', { name: '选择 e2e-混合来源' }).check()
+    await page.getByRole('checkbox', { name: '选择 e2e-对照来源' }).check()
+    await page.getByRole('button', { name: '查看所选' }).click()
+    const matrix = page.getByTestId('probe-matrix-view')
+    await expect(matrix).toContainText('Azure OpenAI')
+    await expect(matrix).not.toContainText('Codex 反代')
+    await matrix.getByRole('button', { name: '来源判断 gpt-5.4 · 渠道甲' }).click()
+    const dialog = page.getByRole('dialog')
+    await expect(dialog).toContainText('Azure OpenAI')
+    await expect(dialog).toContainText('成功响应含 prompt_filter_results')
+    await expect(dialog).not.toContainText('Codex 反代')
+    const rows = await readHistoryStore(page, 'modelprobe')
+    const saved = rows.find(row => row.id === 'p-origin-mixed')
+    expect(saved.verdict.access.label).toBe('混合')
+    expect(saved.verdict.upstream.label).toBe('Azure OpenAI')
+  })
+
   test('历史多选：先查看详情，再导出卡片或矩阵', async ({ page }) => {
     test.setTimeout(60_000)
     await goto(page, /模型探测/)
@@ -1941,7 +2403,7 @@ test.describe('模型探测', () => {
             upstream: { label: 'OpenAI 官方', reasons: ['响应头 openai-organization'] },
           },
           results: {
-            'chat-basic': { status: 'passed', detail: '基础请求返回成功', duration: 10, format: 'chat', usage: { input: 1, output: 2, cacheRead: null, cacheWrite: null }, repro: { url: 'https://a.example/v1/chat/completions', headers: { Authorization: 'Bearer secret' }, body: { model: 'gpt-4o' }, status: 200, requestId: 'req-e2e-pass' } },
+            'chat-basic': { status: 'passed', detail: '基础请求返回成功', duration: 10, format: 'chat', usage: { input: 1, output: 2, cacheRead: null, cacheWrite: null }, repro: { url: 'https://a.example/v1/chat/completions', headers: { Authorization: 'Bearer secret' }, body: { model: 'gpt-4o' }, status: 200, requestId: 'req-e2e-pass', responseHeaders: { 'openai-organization': 'org-e2e' } } },
             'temperature@chat': { status: 'skipped', detail: '用户未勾选', duration: null, format: 'chat', repro: null },
             'image-input@chat': { status: 'untested', detail: '未测', duration: null, format: 'chat', repro: null },
             'concurrency@chat': { status: 'passed', detail: '3/3 个并发请求成功', duration: 12, format: 'chat', usage: { input: 1, output: 2, cacheRead: null, cacheWrite: null }, repro: null },
@@ -2010,7 +2472,7 @@ test.describe('模型探测', () => {
     await expect(matrix.locator('.probe-matrix-gap')).toBeVisible()
     await expect(matrix.locator('.probe-tile')).toHaveCount(0)
     await expect(matrix.locator('[data-probe-retry]')).toHaveCount(0)
-    await matrix.getByRole('button', { name: '渠道判断 gpt-4o · 渠道甲' }).click()
+    await matrix.getByRole('button', { name: '来源判断 gpt-4o · 渠道甲' }).click()
     await expect(page.getByRole('dialog')).toContainText('OpenAI 官方')
     await expect(page.getByRole('dialog')).toContainText('响应头 openai-organization')
     await page.getByRole('dialog').getByRole('button', { name: '关闭' }).click()
@@ -2043,7 +2505,8 @@ test.describe('模型探测', () => {
     expect(manyHtml).toContain('>deepseek-chat<')
     expect(manyHtml).toContain('>渠道乙<')
     expect(manyHtml).toContain('data-origin="1"')
-    expect(manyHtml).toContain('渠道判断 gpt-4o · 渠道甲')
+    expect(manyHtml).toContain('来源判断 gpt-4o · 渠道甲')
+    expect(manyHtml).not.toContain('渠道判断')
     expect(manyHtml).toContain('OpenAI 官方')
     expect(manyHtml).toContain('响应头 openai-organization')
     expect(manyHtml).not.toContain('data-origin="0"')
@@ -2075,6 +2538,10 @@ test.describe('模型探测', () => {
     expect(badHtml).not.toContain('基础请求返回成功')
     expect(badHtml).not.toContain('req-e2e-pass')
     expect(badHtml).not.toContain('"body"')
+    expect(badHtml).not.toContain('data-origin="')
+    expect(badHtml).not.toContain('来源判断')
+    expect(badHtml).not.toContain('渠道判断')
+    expect(badHtml).not.toContain('OpenAI 官方')
 
     const preview = await page.context().newPage()
     await preview.setContent(manyHtml, { waitUntil: 'domcontentloaded' })

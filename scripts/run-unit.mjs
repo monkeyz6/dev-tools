@@ -8,6 +8,7 @@ const root = join(dirname(fileURLToPath(import.meta.url)), '..')
 const files = [
   'src/tools/model-probe/protocol.ts',
   'src/tools/model-probe/oracles.ts',
+  'src/tools/model-probe/oracles.test.ts',
   'src/tools/model-probe/origin.ts',
   'src/tools/model-probe/profiles.ts',
   'src/tools/model-probe/batch.ts',
@@ -67,6 +68,7 @@ const r = spawnSync(
     join(outDir, 'src/tools/ModelProbeExport.test.js'),
     join(outDir, 'src/tools/model-probe/builtin-tools.test.js'),
     join(outDir, 'src/tools/model-probe/protocol.test.js'),
+    join(outDir, 'src/tools/model-probe/oracles.test.js'),
     join(outDir, 'src/tools/model-probe/profiles.test.js'),
     join(outDir, 'src/tools/model-probe/request-id.test.js'),
     join(outDir, 'src/tools/model-probe/negative.test.js'),
