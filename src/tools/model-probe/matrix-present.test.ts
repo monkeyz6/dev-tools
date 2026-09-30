@@ -1,6 +1,6 @@
 import { describe, it } from 'node:test'
 import assert from 'node:assert/strict'
-import { matrixFormatSubtitle, matrixTokenValues, presentMatrixNote } from './matrix-present.ts'
+import { matrixFormatSubtitle, matrixTokenValues, presentMatrixNote, stripSplitRetestNote } from './matrix-present.ts'
 
 describe('presentMatrixNote', () => {
   it('收掉和状态重复的成功句，原因句留下，JSON 单独放', () => {
@@ -31,6 +31,11 @@ describe('presentMatrixNote', () => {
     assert.equal(presentMatrixNote('对应协议格式未启用（未勾选 Anthropic Messages 基础测试）').detail, '对应协议格式未启用（未勾选 Anthropic Messages 基础测试）')
     assert.equal(presentMatrixNote('测试被用户中止').detail, '测试被用户中止')
     assert.equal(presentMatrixNote('响应含 web_search_call，已调用 web_search').detail, '')
+    assert.equal(stripSplitRetestNote('独立降级请求通过。组合互斥符合预期，已拆开重测。'), '独立降级请求通过。')
+    assert.equal(stripSplitRetestNote('独立降级请求通过 组合互斥符合预期，已拆开重测。'), '独立降级请求通过')
+    assert.equal(stripSplitRetestNote('错误文本 组合里工具与 reasoning_effort 互相点名，已拆开重测。'), '错误文本')
+    assert.equal(stripSplitRetestNote('一条错误同时点名多个参数，已拆开重测。'), '')
+    assert.equal(presentMatrixNote('独立降级请求通过。组合互斥符合预期，已拆开重测。').detail, '独立降级请求通过')
   })
 })
 

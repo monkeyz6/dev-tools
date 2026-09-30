@@ -1,6 +1,6 @@
 // 模型探测：自包含单文件 HTML 报告（网格卡片 + 弹层，请求体可复制，不含请求头 / key）
 
-import { matrixFormatSubtitle, matrixTokenValues, presentMatrixNote, probeMatrixProblem } from './model-probe/matrix-present'
+import { matrixFormatSubtitle, matrixTokenValues, presentMatrixNote, probeMatrixProblem, stripSplitRetestNote } from './model-probe/matrix-present'
 import { probeShownRequestId } from './model-probe/request-id'
 
 export type ProbeHtmlStatus = 'passed' | 'failed' | 'abnormal' | 'unsupported' | 'skipped' | 'expected' | 'untested'
@@ -417,7 +417,7 @@ function buildGroups(report: ProbeHtmlReport, tests: ProbeHtmlTestMeta[], format
         explain: t.explain,
         formatLabel: fmt ? (formatLabels[fmt] || fmt) : '',
         status: r.status,
-        detail: r.detail,
+        detail: stripSplitRetestNote(r.detail),
         duration: r.duration,
         usage: r.usage,
         cache: r.cache,

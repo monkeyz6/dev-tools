@@ -292,6 +292,23 @@ describe('buildProbeMatrixHtml', () => {
     assert.equal(problems.includes('https://example/v1/chat/completions'), false)
     assert.equal(problems.includes('"body"'), false)
   })
+
+  it('导出报告去掉组合互斥已拆开重测', () => {
+    const one = report({
+      completedAt: '2026-09-29T01:00:01.000Z',
+      name: '拆开重测',
+      target: { baseUrl: 'https://a.example', model: 'gpt-5', channelName: '渠道甲', overrides: {} },
+      results: {
+        'temperature@chat': cell('passed', '独立降级请求通过。组合互斥符合预期，已拆开重测。'),
+      },
+    })
+    const card = buildProbeReportHtml(one, tests, labels)
+    const matrix = buildProbeMatrixHtml([one], tests, labels)
+    assert.match(card, /独立降级请求通过/)
+    assert.equal(card.includes('组合互斥符合预期，已拆开重测'), false)
+    assert.match(matrix, /独立降级请求通过/)
+    assert.equal(matrix.includes('组合互斥符合预期，已拆开重测'), false)
+  })
 })
 
 describe('buildProbeReportHtml', () => {

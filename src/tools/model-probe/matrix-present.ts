@@ -59,6 +59,18 @@ function isToolCallNote(text: string): boolean {
   return /^响应含\s*\S.*?，已调用/.test(text)
 }
 
+const SPLIT_RETEST_NOTE = /(?:组合互斥符合预期，已拆开重测|组合里工具与 reasoning_effort 互相点名，已拆开重测|一条错误同时点名多个参数，已拆开重测)。?/g
+
+/** 导出和矩阵展示去掉「已拆开重测」这句过程提示，不改历史原文。 */
+export function stripSplitRetestNote(detail: string): string {
+  return detail
+    .replace(SPLIT_RETEST_NOTE, '')
+    .replace(/[ \t]{2,}/g, ' ')
+    .replace(/[ \t]+([。；])/g, '$1')
+    .replace(/(^|[。；])[ \t]+/g, '$1')
+    .trim()
+}
+
 function dropClause(clause: string): boolean {
   const text = tidy(clause)
   if (!text) return true
@@ -70,7 +82,7 @@ function dropClause(clause: string): boolean {
 }
 
 export function presentMatrixNote(detail: string): MatrixNote {
-  const extracted = extractJson(detail || '')
+  const extracted = extractJson(stripSplitRetestNote(detail || ''))
   const stripped = extracted.text.replace(STATUS_PREFIX, '').trim()
   const kept: string[] = []
   for (const sentence of stripped.split('。')) {

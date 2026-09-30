@@ -8,7 +8,7 @@ import { historyDbGetAll, historyDbPutOne, historyDbDeleteOne, historyDbDeleteMa
 import { useDebouncedPersist } from '../shared/use-debounced-persist'
 import { uniqueCopyName } from '../shared/channel-copy'
 import { downloadProbeMatrixHtml, downloadProbeReportHtml, probeMatrixCellScored, probeMatrixColumnLabels, probeMatrixColumnText, probeMatrixHasProblems } from './ModelProbeExport'
-import { matrixFormatSubtitle, matrixTokenValues, presentMatrixNote } from './model-probe/matrix-present'
+import { matrixFormatSubtitle, matrixTokenValues, presentMatrixNote, stripSplitRetestNote } from './model-probe/matrix-present'
 import { probeHistoryNewestFirst, probeHistoryOverflow, probeLogsSince, probeNameForModel, probeSplitModels, probeUnionBuiltinCases, probeViewAfterDelete } from './model-probe/batch'
 import {
   type ProbeFormat, type ProbeSseEvent, type ProbeUsage,
@@ -2779,7 +2779,7 @@ function ModelProbeTool() {
         const x = r.results[key]
         const fmtLabel = probeFormatOfKey(key) ? `（${PROBE_FORMAT_LABELS[probeFormatOfKey(key)!]}）` : ''
         md += `### ${t.name}${fmtLabel} — ${PROBE_STATUS_LABELS[x.status]}\n\n`
-        md += `- 结论: ${x.detail.split('\n').join(' ')}\n`
+        md += `- 结论: ${stripSplitRetestNote(x.detail).split('\n').join(' ')}\n`
         if (x.checks?.length) md += `- 检查: ${x.checks.map(c => `${c.passed ? '✓' : '✗'} ${c.detail}`).join('；')}\n`
         if (x.duration != null) md += `- 耗时: ${x.duration} ms\n`
         md += `- 用量: 输入 ${x.usage?.input ?? '—'} · 输出 ${x.usage?.output ?? '—'} · 缓存读 ${x.usage?.cacheRead ?? '—'} · 缓存写 ${x.usage?.cacheWrite ?? '—'}\n`
