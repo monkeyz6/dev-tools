@@ -81,8 +81,9 @@ interface ProbeLog {
   responseHeaders: Record<string, string>
   responseBody: any
   sse: ProbeSseEvent[]
-  // 只记网络块数：拼接后的原始流就是流式请求的 responseBody（字符串），不再另存一份 chunks
+  // 只记网络块数；拼接后的原始流存在 streamRaw（流式请求才有），responseBody 保持解析后的数据
   chunkCount: number
+  streamRaw?: string
   usage: ProbeUsage
   requestId: string | null
 }
@@ -317,6 +318,7 @@ const probeResetLogResponse = (log: ProbeLog) => {
   log.duration = 0
   log.responseHeaders = {}
   log.responseBody = null
+  log.streamRaw = undefined
   log.sse = []
   log.chunkCount = 0
   log.usage = probeEmptyUsage()
@@ -587,7 +589,7 @@ function ProbeLogDetail({ log }: { log: ProbeLog }) {
           </div>
           <ProbeLazyDetails className="mt-3" summaryClassName="cursor-pointer text-xs font-semibold" summaryStyle={{ color: 'var(--accent)' }} summary="查看拼接后的原始流">
             {() => (
-              <pre className="mt-2 overflow-auto max-h-80 rounded-xl p-3 font-mono text-[11px] leading-5" style={{ background: 'var(--code)', border: '1px solid var(--border)', color: 'var(--text)', fontFamily: PROBE_MONO }}>{typeof log.responseBody === 'string' ? log.responseBody : ''}</pre>
+              <pre className="mt-2 overflow-auto max-h-80 rounded-xl p-3 font-mono text-[11px] leading-5" style={{ background: 'var(--code)', border: '1px solid var(--border)', color: 'var(--text)', fontFamily: PROBE_MONO }}>{log.streamRaw ?? ''}</pre>
             )}
           </ProbeLazyDetails>
         </div>
@@ -1744,6 +1746,7 @@ function ModelProbeTool() {
       const chunk = decoder.decode(value, { stream: true })
       log.chunkCount++
       raw += chunk
+      log.streamRaw = raw
       buffer += chunk
       const blocks = buffer.split(/\r?\n\r?\n/)
       buffer = blocks.pop() || ''

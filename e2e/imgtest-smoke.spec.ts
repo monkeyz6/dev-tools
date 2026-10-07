@@ -51,7 +51,9 @@ test('完整流程：渠道+用例运行+校验+历史', async ({ page }) => {
   await page.getByText('方形 1024×1024').click()
   await page.getByRole('button', { name: '▶ 运行此用例' }).click()
   await expect(page.getByText('req-test-123').first()).toBeVisible()
-  await expect(page.getByText('✓ 通过 3/3')).toBeVisible()
+  await expect(page.getByText('✓ 通过 4/4')).toBeVisible()
+  await expect(page.getByRole('row').filter({ hasText: '返回载体' })).toContainText('b64_json')
+  await expect.poll(() => readHistoryStore(page, 'imgtest').then(list => list[0]?.images?.[0]?.carrier)).toBe('b64_json')
   expect(sentBodies[0]).toMatchObject({ model: 'gpt-image-2', size: '1024x1024', n: 1, prompt: expect.any(String) })
   await page.getByRole('button', { name: /^历史记录/ }).click()
   await expect(page.getByRole('cell', { name: '测试渠道' })).toBeVisible()
@@ -59,6 +61,48 @@ test('完整流程：渠道+用例运行+校验+历史', async ({ page }) => {
   await page.getByRole('button', { name: '详情' }).click()
   await expect(page.getByText('测试记录详情')).toBeVisible()
   await expect(page.getByText('req-test-123', { exact: true })).toBeVisible()
+})
+
+test('GPT Image 返回 https 地址时载体不通过', async ({ page }) => {
+  const imageUrl = 'https://cdn.example/gpt-image-url.png'
+  await page.goto('/')
+  const png = await page.evaluate(() => {
+    const canvas = document.createElement('canvas')
+    canvas.width = 1024
+    canvas.height = 1024
+    const context = canvas.getContext('2d')!
+    context.fillStyle = '#ff3344'
+    context.fillRect(0, 0, 1024, 1024)
+    return canvas.toDataURL('image/png').split(',')[1]
+  })
+  await page.route(imageUrl, route => route.fulfill({
+    status: 200, contentType: 'image/png', headers: CORS, body: Buffer.from(png, 'base64'),
+  }))
+  await page.route('**/v1/images/generations', route => route.fulfill({
+    status: 200,
+    contentType: 'application/json',
+    headers: CORS,
+    body: JSON.stringify({ data: [{ url: imageUrl }] }),
+  }))
+
+  await page.getByText('图片接口测试').click()
+  await page.getByRole('button', { name: '渠道管理', exact: true }).click()
+  await page.getByPlaceholder('例如：主线-oinone').fill('GPT URL 渠道')
+  await page.getByPlaceholder('https://api.oinone.top').fill('https://mock.example')
+  await page.getByPlaceholder('sk-xxxxxxxx').fill('sk-test-1234567890')
+  await page.getByRole('button', { name: '保存渠道' }).click()
+  await page.getByRole('button', { name: '批量测试', exact: true }).click()
+  await page.getByText('方形 1024×1024').click()
+  await page.getByRole('button', { name: '▶ 运行此用例' }).click()
+
+  await expect(page.getByText('✕ 3/4 通过')).toBeVisible()
+  await expect(page.getByText('! 请求失败')).toHaveCount(0)
+  const carrier = page.getByRole('row').filter({ hasText: '返回载体' })
+  await expect(carrier).toContainText('b64_json')
+  await expect(carrier).toContainText('http(s) url')
+  await expect(carrier).toContainText('未通过')
+  await expect(page.getByText('1024×1024').first()).toBeVisible()
+  await expect.poll(() => readHistoryStore(page, 'imgtest').then(list => list[0]?.images?.[0]?.carrier)).toBe('http-url')
 })
 
 test('1K 横版按等效分辨率档位通过，并完整格式化响应 JSON', async ({ page }) => {
@@ -122,11 +166,18 @@ test('2K 横版多图按分辨率档位通过', async ({ page }) => {
     context.fillRect(0, 0, canvas.width, canvas.height)
     return canvas.toDataURL('image/png').split(',')[1]
   })
+  const urlA = 'https://cdn.example/grok-2k-a.png'
+  const urlB = 'https://cdn.example/grok-2k-b.png'
+  const png = (url: string) => page.route(url, route => route.fulfill({
+    status: 200, contentType: 'image/png', headers: CORS, body: Buffer.from(b64, 'base64'),
+  }))
+  await png(urlA)
+  await png(urlB)
   await page.route('**/v1/images/generations', route => route.fulfill({
     status: 200,
     contentType: 'application/json',
     headers: CORS,
-    body: JSON.stringify({ data: [{ url: `data:image/png;base64,${b64}` }, { url: `data:image/png;base64,${b64}` }] }),
+    body: JSON.stringify({ data: [{ url: urlA }, { url: urlB }] }),
   }))
 
   await page.getByText('图片接口测试').click()
@@ -165,12 +216,20 @@ test('分辨率不足或横竖颠倒都会失败', async ({ page }) => {
     context.fillRect(0, 0, canvas.width, canvas.height)
     return canvas.toDataURL('image/png').split(',')[1]
   })
+  const lowUrl = 'https://cdn.example/grok-low.png'
+  const invertedUrl = 'https://cdn.example/grok-inverted.png'
+  await page.route(lowUrl, route => route.fulfill({
+    status: 200, contentType: 'image/png', headers: CORS, body: Buffer.from(lowB64, 'base64'),
+  }))
+  await page.route(invertedUrl, route => route.fulfill({
+    status: 200, contentType: 'image/png', headers: CORS, body: Buffer.from(invertedB64, 'base64'),
+  }))
   let call = 0
   await page.route('**/v1/images/generations', route => {
     call++
     const data = call === 1
-      ? [{ url: `data:image/png;base64,${lowB64}` }]
-      : [{ url: `data:image/png;base64,${invertedB64}` }, { url: `data:image/png;base64,${invertedB64}` }]
+      ? [{ url: lowUrl }]
+      : [{ url: invertedUrl }, { url: invertedUrl }]
     return route.fulfill({ status: 200, contentType: 'application/json', headers: CORS, body: JSON.stringify({ data }) })
   })
 
@@ -217,7 +276,7 @@ test('旧历史记录加载后自动迁移并重新判定', async ({ page }) => 
   await expect(page.getByText('✓ 通过 7/7')).toBeVisible()
   await expect(page.getByText('2K 档 16:9 ×2')).toBeVisible()
   await expect.poll(() => readHistoryStore(page, 'imgtest').then(list => list[0])).toMatchObject({
-    validationVersion: 2,
+    validationVersion: 3,
     targets: { resolutionTierBaseReq: 2048, resolutionTierLabelReq: '2K' },
   })
   // 迁移成功后旧版 localStorage key 应被清空
@@ -242,6 +301,25 @@ test('请求失败时记录错误并可查看', async ({ page }) => {
   await expect(page.getByText('! 失败').first()).toBeVisible()
   await page.getByRole('button', { name: '详情' }).click()
   await expect(page.getByText('unsupported parameter: size').first()).toBeVisible()
+})
+
+test('data[] 里没有成图字段时记请求失败，不判成 b64_json 通过', async ({ page }) => {
+  await page.route('**/v1/images/generations', route => route.fulfill({
+    status: 200, contentType: 'application/json', headers: CORS, body: JSON.stringify({ data: [{ revised_prompt: 'x' }] }),
+  }))
+  await page.goto('/')
+  await page.getByText('图片接口测试').click()
+  await page.getByRole('button', { name: '渠道管理', exact: true }).click()
+  await page.getByPlaceholder('例如：主线-oinone').fill('空图渠道')
+  await page.getByPlaceholder('https://api.oinone.top').fill('https://mock.example')
+  await page.getByPlaceholder('sk-xxxxxxxx').fill('sk-test-1234567890')
+  await page.getByRole('button', { name: '保存渠道' }).click()
+  await page.getByRole('button', { name: '批量测试', exact: true }).click()
+  await page.getByText('方形 1024×1024').click()
+  await page.getByRole('button', { name: '▶ 运行此用例' }).click()
+  await expect(page.getByText('! 请求失败')).toBeVisible()
+  await expect(page.getByText('响应中未找到图片数据').first()).toBeVisible()
+  await expect(page.getByRole('row').filter({ hasText: '返回载体' })).toHaveCount(0)
 })
 
 test('隐藏价格开关生效，且导出的 HTML 报告不含任何价格信息', async ({ page }) => {
@@ -359,14 +437,14 @@ test('历史批次：两轮两批、补跑只留最新、一键还原到工作�
   await older.getByRole('button', { name: '↺ 还原到工作台' }).click()
   await expect(page.getByTestId('imgtest-restored-note')).toBeVisible()
   await expect(page.getByTestId('imgtest-restored-note')).toContainText('缩略图')
-  await expect(page.getByText('✓ 通过 3/3')).toBeVisible()
+  await expect(page.getByText('✓ 通过 4/4')).toBeVisible()
   await expect(modelInput).toHaveValue('gpt-image-batch')
   await expect(page.getByRole('button', { name: '导出 HTML' })).toBeEnabled()
 
   // 「清除」把结果与批次一起清掉
   await page.getByTestId('imgtest-restored-note').getByRole('button', { name: '清除' }).click()
   await expect(page.getByTestId('imgtest-restored-note')).toHaveCount(0)
-  await expect(page.getByText('✓ 通过 3/3')).toHaveCount(0)
+  await expect(page.getByText('✓ 通过 4/4')).toHaveCount(0)
 })
 
 test('渠道管理：复制渠道不切换当前使用', async ({ page }) => {

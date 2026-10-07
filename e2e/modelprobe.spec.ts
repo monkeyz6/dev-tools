@@ -857,6 +857,31 @@ test.describe('模型探测', () => {
     expect(streamBody.stream_options).toBeUndefined()
   })
 
+  test('流式响应体是合法 JSON 时原始流仍展示拼接原文', async ({ page }) => {
+    const jsonBody = JSON.stringify({ error: { message: 'STREAM-JSON-BODY-MARKER' } })
+    await page.route('**/v1/chat/completions', async route => {
+      const body = route.request().postDataJSON()
+      if (body?.stream) {
+        await route.fulfill({ status: 200, contentType: 'application/json', body: jsonBody })
+        return
+      }
+      await route.fulfill({ status: 200, contentType: 'application/json', body: CHAT_OK(10) })
+    })
+
+    await goto(page, /模型探测/)
+    await page.getByRole('button', { name: '全不选' }).click()
+    await check(page, 'chat-basic')
+    await check(page, 'stream-pure')
+    await setupRun(page, 'e2e-流式JSON原文')
+
+    const main = page.locator('main')
+    await page.getByRole('button', { name: /请求日志/ }).click()
+    await main.locator('span').filter({ hasText: '纯流式（无 Token 上限）' }).click()
+    await expect(main).toContainText('SSE 事件')
+    await main.getByText('查看拼接后的原始流').click()
+    await expect(main.locator('pre', { hasText: 'STREAM-JSON-BODY-MARKER' })).toBeVisible()
+  })
+
   test('SSE 流式带 Token 上限；无上限纯流式缺 usage 则对照失败', async ({ page }) => {
     const chatBodies: any[] = []
     const responsesBodies: any[] = []

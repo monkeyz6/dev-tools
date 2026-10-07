@@ -28,7 +28,7 @@ const IMG_CAPABILITY_LABEL: Record<string, string> = {
   ratio: '宽高比 aspect_ratio',
   n: '多图 n 参数',
   outputFormat: 'output_format 输出格式',
-  responseFormat: 'response_format（url / b64_json）',
+  responseFormat: '返回载体',
 }
 
 function imgCapabilityKey(rawName: string): string | null {
@@ -39,7 +39,7 @@ function imgCapabilityKey(rawName: string): string | null {
   if (name === '宽高比') return 'ratio'
   if (name === '返回张数 (n)') return 'n'
   if (name === '输出格式') return 'outputFormat'
-  if (name === 'response_format') return 'responseFormat'
+  if (name === 'response_format' || name === '返回载体') return 'responseFormat'
   return null
 }
 

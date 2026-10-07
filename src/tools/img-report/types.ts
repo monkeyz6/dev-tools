@@ -8,7 +8,25 @@ export const IMG_API_LABEL: Record<ImgApiType, string> = {
   openai: 'OpenAI', grok: 'Grok', gemini: 'Gemini', seedream: 'Seedream', volcanoArk: 'ZeroFA /ark',
 }
 
-export interface ImgRecImage { dataUri: string | null; thumb: string | null; url: string | null; w: number; h: number; format: string }
+/** 成图落在哪个字段。历史会丢掉 dataUri，所以解析时就把这一档记在图片上。 */
+export type ImgCarrier =
+  | 'b64_json'
+  | 'b64_prefixed'
+  | 'inline'
+  | 'inline_prefixed'
+  | 'http-url'
+  | 'data-url'
+  | 'other-url'
+
+export interface ImgRecImage {
+  dataUri: string | null
+  thumb: string | null
+  url: string | null
+  w: number
+  h: number
+  format: string
+  carrier?: ImgCarrier
+}
 
 export interface ImgCheck { name: string; target: string | number; actual: string | number; pass: boolean; info?: boolean }
 

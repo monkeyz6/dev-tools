@@ -38,7 +38,7 @@ test('导出图片和 HTML 报告：成功生成、离线可渲染，且不含�
   await page.getByRole('button', { name: '批量测试', exact: true }).click()
   await page.getByText('方形 1024×1024').click()
   await page.getByRole('button', { name: '▶ 运行此用例' }).click()
-  await expect(page.getByText('✓ 通过 3/3')).toBeVisible()
+  await expect(page.getByText('✓ 通过 4/4')).toBeVisible()
   await expect(page.getByText('参考价格', { exact: false })).toBeVisible() // 确认这条记录本身带价格
 
   // 「历史记录」两级视图：一批一行，导出直接对整批，不用先勾选记录

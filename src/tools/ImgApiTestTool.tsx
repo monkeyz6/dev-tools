@@ -6,8 +6,9 @@ import { historyDbGetAll, historyDbPutOne, historyDbDeleteOne, historyDbDeleteMa
 import { useDebouncedPersist } from '../shared/use-debounced-persist'
 import { uniqueCopyName } from '../shared/channel-copy'
 import { IMG_API_LABEL, imgFmtTime } from './img-report/types'
-import type { ImgApiType, ImgCheck, ImgRecImage, ImgRecord } from './img-report/types'
+import type { ImgApiType, ImgCarrier, ImgCheck, ImgRecImage, ImgRecord } from './img-report/types'
 import { imgClassify, imgVerdict } from './img-report/summary'
+import { imgCarrierCheck, imgClassifyGeminiPart, imgClassifyOpenAiImage } from './img-report/carrier'
 import { imgGroupBatches, imgTrimByBatch } from './img-report/batches'
 import type { ImgBatch } from './img-report/batches'
 import ImgReportView from './img-report/ImgReportView'
@@ -22,7 +23,7 @@ const IMG_HIST_KEY = 'imgtest-history'
 const IMG_UI_KEY = 'imgtest-ui'
 const IMG_HIDEPRICES_KEY = 'imgtest-hideprices'
 const IMG_DEFAULT_RATE = 7
-const IMG_VALIDATION_VERSION = 2
+const IMG_VALIDATION_VERSION = 3
 const IMG_RESOLUTION_TIER_MIN_SCALE = 0.88
 
 const IMG_KEY_PASSPHRASE = 'dev-toolkit-imgtest-v1'
@@ -614,11 +615,17 @@ async function imgExecutePlan(plan: ImgPlan, channel: { baseUrl: string; apiKey:
   return { resp, headers: rh, httpStatus: resp.status, text }
 }
 
+interface ImgParsedImage {
+  url: string | null
+  dataUri: string | null
+  mimeType: string | null
+  carrier?: ImgCarrier
+}
 interface ImgParsedResponse {
   ok: boolean
   httpStatus: number
   headers: Record<string, string>
-  images: { url: string | null; dataUri: string | null; mimeType: string | null }[]
+  images: ImgParsedImage[]
   rawSnippet: string
   error: string | null
 }
@@ -632,20 +639,33 @@ function imgParseResponse(type: ImgApiType, text: string, headers: Record<string
     return out
   }
   if (type === 'gemini') {
-    ;(json.candidates || []).forEach((c: any) => (c.content?.parts || []).forEach((p: any) => {
-      const d = p.inlineData || p.inline_data
-      if (d && d.data) {
-        const mime = d.mimeType || d.mime_type || 'image/png'
-        out.images.push({ dataUri: imgB64ToDataURI(d.data, mime.split('/')[1]), url: null, mimeType: mime })
+    for (const candidate of json.candidates || []) {
+      for (const part of candidate?.content?.parts || []) {
+        const hit = imgClassifyGeminiPart(part)
+        if (!hit) continue
+        const mime = hit.mime || 'image/png'
+        out.images.push({
+          url: hit.url,
+          dataUri: hit.inline ? imgB64ToDataURI(hit.inline, mime.split('/')[1] || 'png') : null,
+          mimeType: mime,
+          carrier: hit.carrier,
+        })
       }
-    }))
+    }
   } else {
     const arr = json.data || []
-    out.images = arr.map((d: any) => ({
-      url: d.url || null,
-      dataUri: d.b64_json ? imgB64ToDataURI(d.b64_json, fmtHint || 'png') : null,
-      mimeType: d.mime_type || d.mimeType || null,
-    }))
+    // data[] 里没有 url / b64_json 的项（如只有 revised_prompt）不算图
+    out.images = []
+    for (const d of arr) {
+      const hit = imgClassifyOpenAiImage(d)
+      if (!hit) continue
+      out.images.push({
+        url: hit.url,
+        dataUri: hit.b64 ? imgB64ToDataURI(hit.b64, fmtHint || 'png') : null,
+        mimeType: d.mime_type || d.mimeType || null,
+        carrier: hit.carrier,
+      })
+    }
   }
   out.ok = out.images.length > 0
   if (!out.ok) out.error = '响应中未找到图片数据'
@@ -709,10 +729,21 @@ function imgBuildChecks(rec: ImgRecord): ImgCheck[] {
       c.push({ name: tag + '输出格式', target: t._of, actual: im.format, pass: norm(im.format) === norm(t._of) })
     }
   })
-  if (t._rf) {
-    const hasUrl = rec.images.some(im => im.url)
-    const got = hasUrl ? 'url' : 'b64_json'
-    c.push({ name: 'response_format', target: t._rf, actual: got, pass: got === t._rf })
+  if (!rec.images.some(im => im.carrier)) {
+    // 旧记录没存 carrier：沿用当时的 response_format 校验，结论不随新规则翻转
+    if (t._rf) {
+      const hasUrl = rec.images.some(im => im.url)
+      const got = hasUrl ? 'url' : 'b64_json'
+      c.push({ name: 'response_format', target: t._rf, actual: got, pass: got === t._rf })
+    }
+  } else {
+    const carrier = imgCarrierCheck({
+      apiType: rec.apiType,
+      model: rec.model,
+      responseFormat: t._rf,
+      images: rec.images,
+    })
+    if (carrier) c.push(carrier)
   }
   return c
 }
@@ -1450,6 +1481,7 @@ function ImgApiTestTool() {
           imgs.push({
             dataUri, thumb, url: im.url || null, w: dim.w, h: dim.h,
             format: uriFormat === 'unknown' ? imgDetectResponseFormat(im.mimeType, im.url) : uriFormat,
+            carrier: im.carrier,
           })
         }
         rec.images = imgs
