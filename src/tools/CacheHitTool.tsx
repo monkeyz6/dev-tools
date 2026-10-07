@@ -1,11 +1,15 @@
 import React, { useState, useCallback, useRef, useEffect, Suspense } from 'react'
+import { createPortal } from 'react-dom'
 import { kvGet, kvSet, kvRemove } from '../shared/app-kv'
-import { Btn, Label, Card, CustomInput, CustomSelect, SegmentedControl, SectionTitle } from '../shared/ui'
+import { Btn, Label, Card, CustomInput, CustomSelect, CustomTextarea, SegmentedControl, SectionTitle } from '../shared/ui'
 import { highlightJson } from '../shared/json'
 import { decryptLlmApiKey, encryptLlmApiKey } from '../shared/api-key-crypto'
 import { historyDbGetAll, historyDbPutOne, historyDbDeleteOne, historyDbDeleteMany, historyDbClear } from '../shared/history-db'
 import { useDebouncedPersist } from '../shared/use-debounced-persist'
 import { uniqueCopyName } from '../shared/channel-copy'
+import { probeHistoryNewestFirst, probeHistoryOverflow, probeNameForModel, probeSplitModels, probeViewAfterDelete } from './model-probe/batch'
+import { cacheCasesOf, cacheMatrixCell, cacheMatrixColumns, cacheMatrixGroups, cachePct, cacheVerdictOf, CACHE_CASE_LABELS, CACHE_FORMAT_LABELS, type CacheCaseId, type CacheFormat } from './cache-hit/matrix'
+import { downloadCacheMatrixHtml } from './cache-hit/export'
 
 // ─── Tool: LLM 缓存命中率测试 ──────────────────────────────────────────────────
 // 定位：对三种协议（OpenAI Chat / OpenAI Responses / Anthropic Messages）跑
@@ -21,8 +25,6 @@ import { uniqueCopyName } from '../shared/channel-copy'
 //   cache_read_input_tokens > 0，写入时 cache_creation_input_tokens > 0；注意
 //   input_tokens 不含缓存部分（与 OpenAI 相反），指标归一化时补齐。
 
-type CacheFormat = 'chat' | 'responses' | 'anthropic'
-type CacheCaseId = 'repeat' | 'multiturn' | 'suffix'
 type CacheTurn = { role: 'user' | 'assistant'; content: string }
 
 export interface CacheUsage {
@@ -136,21 +138,10 @@ const CACHE_HISTORY_MAX = 20
 
 const CACHE_MONO = '"JetBrains Mono", "JetBrainsMono Nerd Font", "SF Mono", "Fira Code", "Fira Mono", "Roboto Mono", "Droid Sans Mono", "Cascadia Code", Consolas, "Courier New", monospace'
 const CACHE_FORMATS: CacheFormat[] = ['chat', 'responses', 'anthropic']
-const CACHE_FORMAT_LABELS: Record<CacheFormat, string> = {
-  chat: 'OpenAI Chat Completions', responses: 'OpenAI Responses', anthropic: 'Anthropic Messages',
-}
 const CACHE_ENDPOINTS: Record<CacheFormat, string> = {
   chat: '/v1/chat/completions', responses: '/v1/responses', anthropic: '/v1/messages',
 }
-const CACHE_FIELD_HINTS: Record<CacheFormat, string> = {
-  chat: 'usage.prompt_tokens_details.cached_tokens',
-  responses: 'usage.input_tokens_details.cached_tokens',
-  anthropic: 'usage.cache_read_input_tokens / cache_creation_input_tokens',
-}
 const CACHE_CASES: CacheCaseId[] = ['repeat', 'multiturn', 'suffix']
-const CACHE_CASE_LABELS: Record<CacheCaseId, string> = {
-  repeat: '重复请求', multiturn: '多轮对话', suffix: '尾部变化',
-}
 const CACHE_CASE_HINTS: Record<CacheCaseId, string> = {
   repeat: '整份请求体原样重放，测相同 prompt 能否命中',
   multiturn: '长前缀保留，把真实回复拼进下一轮，测前缀在对话变长后是否仍命中',
@@ -199,7 +190,6 @@ const cacheSafeName = (v: string): string => v.replace(/[\\/:*?"<>|\s]+/g, '_')
 const cacheJsonPretty = (v: any): string => {
   try { return JSON.stringify(v, null, 2) } catch { return String(v) }
 }
-const cachePct = (v: number | null): string => (v == null ? '—' : (v * 100).toFixed(1) + '%')
 const cacheMaskValue = (v: string): string => (v.length > 10 ? v.slice(0, 7) + '***' + v.slice(-4) : '***')
 const cacheMaskHeaders = (headers: Record<string, string>): Record<string, string> => {
   const out: Record<string, string> = {}
@@ -290,11 +280,6 @@ function cacheExtractAssistantText(format: CacheFormat, data: any): string {
   return content.filter((b: any) => b?.type === 'text' && typeof b.text === 'string').map((b: any) => b.text).join('').trim()
 }
 
-function cacheCasesOf(report: CacheReport): CacheCaseResult[] {
-  if (report.caseResults && report.caseResults.length) return report.caseResults
-  return [{ caseId: 'suffix', nonce: report.params.nonce, rounds: report.params.rounds, results: report.results }]
-}
-
 // ── 指标计算与结论判定 ──
 function cacheComputeMetrics(rounds: CacheRound[]): CacheMetrics {
   const okMeasured = rounds.filter(r => !r.warmup && r.status === 'ok')
@@ -319,23 +304,6 @@ function cacheComputeMetrics(rounds: CacheRound[]): CacheMetrics {
     hitAvgMs: avg(hits.map(r => r.durationMs ?? 0).filter(v => v > 0)),
     missAvgMs: avg(misses.map(r => r.durationMs ?? 0).filter(v => v > 0)),
   }
-}
-
-function cacheVerdictOf(r: CacheProtocolResult, caseId: CacheCaseId = 'suffix'): { tone: 'ok' | 'warn' | 'err'; text: string } {
-  if (r.status === 'error') return { tone: 'err', text: `测试未完成：${r.error || '预热请求失败'}` }
-  if (r.status === 'stopped') return { tone: 'warn', text: '测试已停止，以下为已完成轮次。' }
-  if (!r.measured) return { tone: 'err', text: '没有成功的测量轮次，无法计算命中率。' }
-  if (r.fieldMissing === r.measured) {
-    return { tone: 'warn', text: `渠道未返回缓存字段（${CACHE_FIELD_HINTS[r.format]}），无法判定命中。` }
-  }
-  const rate = r.hitRate ?? 0
-  if (rate >= 1) {
-    if (caseId === 'multiturn') return { tone: 'ok', text: `前缀仍命中 · ${r.hitCount}/${r.measured} 轮` }
-    if ((r.coverage ?? 0) >= 0.8) return { tone: 'ok', text: `全部命中 · 覆盖率 ${cachePct(r.coverage)}` }
-    return { tone: 'warn', text: `全部命中，但 Token 覆盖率仅 ${cachePct(r.coverage)}` }
-  }
-  if (rate > 0) return { tone: 'warn', text: `部分命中（${r.hitCount}/${r.measured} 轮）` }
-  return { tone: 'err', text: '全部未命中' }
 }
 
 // ── 持久化：配置 / 渠道 / 历史 ──
@@ -408,17 +376,18 @@ async function cacheBuildCfgFromChannel(ch: CacheChannel, model: string): Promis
 
 async function loadCacheHistory(): Promise<CacheReport[]> {
   const list = await historyDbGetAll<CacheReport>('cachehit')
-  return list.sort((a, b) => b.completedAt.localeCompare(a.completedAt))
+  return probeHistoryNewestFirst(list)
 }
-async function saveCacheHistory(rep: CacheReport): Promise<CacheReport[]> {
+async function putCacheHistory(rep: CacheReport): Promise<void> {
   await historyDbPutOne('cachehit', rep)
-  let list = await loadCacheHistory()
-  if (list.length > CACHE_HISTORY_MAX) {
-    const overflow = list.slice(CACHE_HISTORY_MAX)
-    await historyDbDeleteMany('cachehit', overflow.map(r => r.id))
-    list = list.slice(0, CACHE_HISTORY_MAX)
-  }
-  return list
+}
+/** 一批多模型连续写入。写一条就裁会把本批更早的模型删掉，所以裁剪留到整批结束。 */
+async function trimCacheHistory(): Promise<CacheReport[]> {
+  const list = await loadCacheHistory()
+  const overflow = probeHistoryOverflow(list, CACHE_HISTORY_MAX)
+  if (overflow.length) await historyDbDeleteMany('cachehit', overflow.map(r => r.id))
+  const dropped = new Set(overflow.map(r => r.id))
+  return list.filter(r => !dropped.has(r.id))
 }
 async function deleteCacheHistory(id: string): Promise<CacheReport[]> {
   await historyDbDeleteOne('cachehit', id)
@@ -812,7 +781,8 @@ const CacheConfigPane = React.memo(function CacheConfigPane({
       </div>
       <div>
         <Label className="block mb-1.5">模型名称</Label>
-        <CustomInput value={model} onChange={onModel} placeholder="gpt-4o-mini / claude-sonnet-4-5" />
+        <CustomTextarea value={model} onChange={onModel} rows={3} placeholder={'gpt-4o-mini\nclaude-sonnet-4-5'} />
+        <p className="text-xs mt-1.5 leading-5" style={{ color: 'var(--t3)' }}>多个模型用逗号或回车分隔，按顺序逐个测试。</p>
       </div>
 
       <div style={{ borderTop: '1px solid var(--border)', paddingTop: 14 }}>
@@ -967,6 +937,200 @@ const CacheChannelsPane = React.memo(function CacheChannelsPane({
   )
 })
 
+function cachePortal(node: React.ReactNode) {
+  if (typeof document === 'undefined') return null
+  return createPortal(node, document.querySelector('.app-shell') || document.body)
+}
+
+const CACHE_CLOSE_SVG = (
+  <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" aria-hidden="true">
+    <path d="M4 4l8 8M12 4l-8 8" />
+  </svg>
+)
+
+/** 长报告里的一格，矩阵弹层复用同一块，避免结论和轮次表分叉。 */
+function CacheProtocolBlock({ result, caseId }: { result: CacheProtocolResult; caseId: CacheCaseId }) {
+  const verdict = cacheVerdictOf(result, caseId)
+  const toneStyle = verdict.tone === 'ok' ? { background: 'var(--okBg)', color: 'var(--ok)' }
+    : verdict.tone === 'warn' ? { background: 'var(--warnBg)', color: 'var(--warn)' }
+    : { background: 'var(--errBg)', color: 'var(--err)' }
+  const latencySub = result.warmupMs != null && result.hitAvgMs != null
+    ? `预热 ${result.warmupMs} → 命中 ${result.hitAvgMs} ms`
+    : undefined
+  const chartFoot = caseId === 'multiturn'
+    ? '理想形态：预热写入 system 前缀，后续轮次前缀仍被读取；未缓存部分会随对话变长而增加。'
+    : undefined
+  return (
+    <>
+      <div className="flex items-center gap-2.5 flex-wrap">
+        <h4 className="text-[17px] font-semibold" style={{ color: 'var(--text)', letterSpacing: '-0.012em' }}>{CACHE_FORMAT_LABELS[result.format]}</h4>
+        <span className="inline-flex items-center rounded-full px-2.5 py-1 text-[12px] font-semibold" style={toneStyle}>{verdict.text}</span>
+        {result.promptCacheKeyDropped && (
+          <span className="text-[11px] px-2 py-0.5 rounded-full" style={{ background: 'var(--warnBg)', color: 'var(--warn)' }}>已去掉 prompt_cache_key</span>
+        )}
+      </div>
+      <div className="mt-5 grid grid-cols-2 sm:grid-cols-3 xl:grid-cols-5 gap-3.5">
+        <CacheStat label="请求级命中率" value={cachePct(result.hitRate)} sub={`${result.hitCount}/${result.measured} 轮${result.failedRounds ? ` · 失败 ${result.failedRounds}` : ''}`}
+          color={result.hitRate == null ? undefined : result.hitRate >= 1 ? 'var(--ok)' : result.hitRate > 0 ? 'var(--warn)' : 'var(--err)'} />
+        <CacheStat label="Token 覆盖率" value={cachePct(result.coverage)} />
+        <CacheStat label="节省 Token" value={String(result.savedTokens)} />
+        <CacheStat label="缓存写入" value={result.cacheWriteTokens > 0 ? String(result.cacheWriteTokens) : '—'} />
+        <CacheStat label="命中均延迟" value={result.hitAvgMs != null ? `${result.hitAvgMs} ms` : '—'} sub={latencySub} />
+      </div>
+      <div className="mt-6">
+        <table className="w-full text-[12.5px]" style={{ borderCollapse: 'separate', borderSpacing: 0 }}>
+          <thead>
+            <tr>
+              {CACHE_ROUND_COLUMNS.map(col => (
+                <th key={col.key} className="px-4 py-2.5 font-semibold whitespace-nowrap"
+                  style={{ color: 'var(--t2)', textAlign: col.numeric ? 'right' : 'left', fontSize: 11, letterSpacing: '0.05em', borderTop: '1px solid var(--border)', borderBottom: '1px solid var(--border)', position: 'sticky', top: 0, zIndex: 1, background: 'var(--inputBg)' }}>{col.key}</th>
+              ))}
+            </tr>
+          </thead>
+          <tbody>
+            {result.rounds.map((rd, idx) => {
+              const uncached = rd.usage.totalPrompt != null ? Math.max(0, rd.usage.totalPrompt - (rd.usage.cacheRead ?? 0) - (rd.usage.cacheWrite ?? 0)) : null
+              const cell = (v: number | null) => (v == null ? '—' : String(v))
+              const line = idx === result.rounds.length - 1 ? 'none' : '1px solid var(--border)'
+              const num = { fontFamily: CACHE_MONO, borderBottom: line }
+              const tone = (v: number | null, on: string) => (v ? on : 'var(--t3)')
+              return (
+                <tr key={rd.round}>
+                  <td className="px-4 py-3 font-mono" style={{ color: 'var(--text)', ...num }}>{rd.warmup ? '预热' : `#${rd.round}`}</td>
+                  <td className="px-4 py-3" style={{ borderBottom: line }}><CacheHitBadge round={rd} /></td>
+                  <td className="px-4 py-3 font-mono text-right tabular-nums" style={{ color: rd.status === 'ok' ? 'var(--t2)' : 'var(--err)', ...num }}>{rd.httpStatus ?? 'ERR'}</td>
+                  <td className="px-4 py-3 font-mono text-right tabular-nums" style={{ color: 'var(--text)', ...num }}>{cell(rd.usage.totalPrompt)}</td>
+                  <td className="px-4 py-3 font-mono text-right tabular-nums" style={{ color: tone(rd.usage.cacheRead, 'var(--ok)'), ...num }}>{cell(rd.usage.cacheRead)}</td>
+                  <td className="px-4 py-3 font-mono text-right tabular-nums" style={{ color: tone(rd.usage.cacheWrite, 'var(--warn)'), ...num }}>{cell(rd.usage.cacheWrite)}</td>
+                  <td className="px-4 py-3 font-mono text-right tabular-nums" style={{ color: 'var(--t2)', ...num }}>{cell(uncached)}</td>
+                  <td className="px-4 py-3 font-mono text-right tabular-nums" style={{ color: 'var(--t2)', ...num }}>{cell(rd.usage.output)}</td>
+                  <td className="px-4 py-3 font-mono text-right tabular-nums" style={{ color: 'var(--t2)', ...num }}>{rd.durationMs != null ? `${rd.durationMs} ms` : '—'}</td>
+                </tr>
+              )
+            })}
+          </tbody>
+        </table>
+      </div>
+      {result.rounds.some(rd => rd.status === 'error') && (
+        <div className="mt-3 space-y-1.5">
+          {result.rounds.filter(rd => rd.status === 'error').map(rd => (
+            <p key={rd.round} className="text-xs leading-[1.5]" style={{ color: 'var(--err)' }}>{rd.warmup ? '预热' : `#${rd.round}`} 失败：{rd.error}</p>
+          ))}
+        </div>
+      )}
+      <div className="mt-6 pt-5" style={{ borderTop: '1px solid var(--border)' }}>
+        <CacheRoundsChartLazy result={result} footnote={chartFoot} />
+      </div>
+    </>
+  )
+}
+
+function CacheMatrixDialog({ detail, onClose }: {
+  detail: { report: CacheReport; caseId: CacheCaseId; result: CacheProtocolResult }
+  onClose: () => void
+}) {
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') onClose() }
+    window.addEventListener('keydown', onKey)
+    const prev = document.body.style.overflow
+    document.body.style.overflow = 'hidden'
+    return () => {
+      window.removeEventListener('keydown', onKey)
+      document.body.style.overflow = prev
+    }
+  }, [onClose])
+  return cachePortal(
+    <div className="probe-matrix-scrim fixed inset-0 z-50 flex items-center justify-center p-4" onClick={e => { if (e.target === e.currentTarget) onClose() }}>
+      <div
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="cache-matrix-sheet-title"
+        data-testid="cache-matrix-dialog"
+        className="probe-matrix-sheet w-full max-w-[1120px] max-h-[86vh] overflow-y-auto"
+        onClick={e => e.stopPropagation()}
+      >
+        <div className="flex items-start justify-between gap-3">
+          <div className="min-w-0">
+            <h2 id="cache-matrix-sheet-title" className="text-lg font-semibold" style={{ color: 'var(--text)', letterSpacing: '-0.01em' }}>
+              {CACHE_CASE_LABELS[detail.caseId]} · {detail.report.target.model}
+            </h2>
+          </div>
+          <button type="button" className="probe-matrix-icon" aria-label="关闭" title="关闭" onClick={onClose}>{CACHE_CLOSE_SVG}</button>
+        </div>
+        <div className="mt-5">
+          <CacheProtocolBlock result={detail.result} caseId={detail.caseId} />
+        </div>
+      </div>
+    </div>,
+  )
+}
+
+function CacheMatrixView({ reports }: { reports: CacheReport[] }) {
+  const [detail, setDetail] = useState<{ report: CacheReport; caseId: CacheCaseId; result: CacheProtocolResult } | null>(null)
+  const columns = cacheMatrixColumns(reports)
+  const groups = cacheMatrixGroups(reports)
+  const colspan = reports.length + 1
+  return (
+    <div className="flex min-h-0 flex-1 flex-col" data-testid="cache-matrix-view">
+      <div className="flex shrink-0 items-center justify-between gap-3 overflow-x-auto px-4 py-3 sm:px-6" style={{ borderBottom: '1px solid color-mix(in srgb, var(--text) 8%, transparent)' }}>
+        <h3 className="shrink-0 whitespace-nowrap text-sm font-semibold" style={{ color: 'var(--text)' }}>缓存命中率</h3>
+        <Btn small variant="soft" className="whitespace-nowrap" onClick={() => downloadCacheMatrixHtml(reports)}>导出 HTML</Btn>
+      </div>
+      <div className="probe-matrix-scroll min-h-0 flex-1 overflow-auto">
+        <table className="probe-matrix">
+          <thead>
+            <tr>
+              <th className="probe-matrix-rowh" scope="col">协议</th>
+              {reports.map((report, index) => {
+                const column = columns[index]
+                return (
+                  <th key={report.id} scope="col">
+                    <span className="probe-matrix-model">{column.model}</span>
+                    {column.source ? <span className="probe-matrix-source">{column.source}</span> : null}
+                  </th>
+                )
+              })}
+            </tr>
+          </thead>
+          <tbody>
+            {groups.map(group => (
+              <React.Fragment key={group.caseId}>
+                <tr className="probe-matrix-group">
+                  <td colSpan={colspan}><span>{group.title}</span></td>
+                </tr>
+                {group.rows.map(row => (
+                  <tr key={`${group.caseId}-${row.format}`}>
+                    <th className="probe-matrix-rowh" scope="row">{row.label}</th>
+                    {reports.map(report => {
+                      const result = cacheMatrixCell(report, group.caseId, row.format)
+                      if (!result) return <td key={report.id} className="probe-matrix-gap">—</td>
+                      const verdict = cacheVerdictOf(result, group.caseId)
+                      const aria = `${group.title} ${row.label} ${verdict.word} ${verdict.text}`
+                      return (
+                        <td key={report.id}>
+                          <button
+                            type="button"
+                            className="probe-matrix-cell"
+                            aria-label={aria}
+                            onClick={() => setDetail({ report, caseId: group.caseId, result })}
+                          >
+                            <span className={`probe-matrix-status is-${verdict.tone}`}>{verdict.word}</span>
+                          </button>
+                        </td>
+                      )
+                    })}
+                  </tr>
+                ))}
+              </React.Fragment>
+            ))}
+          </tbody>
+        </table>
+      </div>
+      {detail && <CacheMatrixDialog detail={detail} onClose={() => setDetail(null)} />}
+    </div>
+  )
+}
+
 // ── 报告视图（导出捕获的根节点）──
 function CacheReportView({ report, reportRef }: { report: CacheReport; reportRef: React.RefObject<HTMLDivElement | null> }) {
   const exporting = useRef(false)
@@ -1036,89 +1200,11 @@ function CacheReportView({ report, reportRef }: { report: CacheReport; reportRef
               <h3 className="text-[20px] font-bold" style={{ color: 'var(--text)', letterSpacing: '-0.018em' }}>{CACHE_CASE_LABELS[block.caseId]}</h3>
               <p className="text-sm mt-1.5 leading-[1.55]" style={{ color: 'var(--t2)' }}>{CACHE_CASE_HINTS[block.caseId]}</p>
             </div>
-            {block.results.map(r => {
-          const verdict = cacheVerdictOf(r, block.caseId)
-          const toneStyle = verdict.tone === 'ok' ? { background: 'var(--okBg)', color: 'var(--ok)' }
-            : verdict.tone === 'warn' ? { background: 'var(--warnBg)', color: 'var(--warn)' }
-            : { background: 'var(--errBg)', color: 'var(--err)' }
-          const latencySub = r.warmupMs != null && r.hitAvgMs != null
-            ? `预热 ${r.warmupMs} → 命中 ${r.hitAvgMs} ms`
-            : undefined
-          const chartFoot = block.caseId === 'multiturn'
-            ? '理想形态：预热写入 system 前缀，后续轮次前缀仍被读取；未缓存部分会随对话变长而增加。'
-            : undefined
-          return (
-            <div key={r.format} data-format-report={r.format} className="surface-card rounded-2xl px-7 py-6 mt-6" style={{ background: 'var(--bg)', border: '1px solid var(--border)' }}>
-              {/* 结论跟标题同排：省掉一条大面积色块，结论仍在第一眼位置 */}
-              <div className="flex items-center gap-2.5 flex-wrap">
-                <h4 className="text-[17px] font-semibold" style={{ color: 'var(--text)', letterSpacing: '-0.012em' }}>{CACHE_FORMAT_LABELS[r.format]}</h4>
-                <span className="inline-flex items-center rounded-full px-2.5 py-1 text-[12px] font-semibold" style={toneStyle}>{verdict.text}</span>
-                {r.promptCacheKeyDropped && (
-                  <span className="text-[11px] px-2 py-0.5 rounded-full" style={{ background: 'var(--warnBg)', color: 'var(--warn)' }}>已去掉 prompt_cache_key</span>
-                )}
+            {block.results.map(r => (
+              <div key={r.format} data-format-report={r.format} className="surface-card rounded-2xl px-7 py-6 mt-6" style={{ background: 'var(--bg)', border: '1px solid var(--border)' }}>
+                <CacheProtocolBlock result={r} caseId={block.caseId} />
               </div>
-
-              <div className="mt-5 grid grid-cols-2 sm:grid-cols-3 xl:grid-cols-5 gap-3.5">
-                <CacheStat label="请求级命中率" value={cachePct(r.hitRate)} sub={`${r.hitCount}/${r.measured} 轮${r.failedRounds ? ` · 失败 ${r.failedRounds}` : ''}`}
-                  color={r.hitRate == null ? undefined : r.hitRate >= 1 ? 'var(--ok)' : r.hitRate > 0 ? 'var(--warn)' : 'var(--err)'} />
-                <CacheStat label="Token 覆盖率" value={cachePct(r.coverage)} />
-                <CacheStat label="节省 Token" value={String(r.savedTokens)} />
-                <CacheStat label="缓存写入" value={r.cacheWriteTokens > 0 ? String(r.cacheWriteTokens) : '—'} />
-                <CacheStat label="命中均延迟" value={r.hitAvgMs != null ? `${r.hitAvgMs} ms` : '—'} sub={latencySub} />
-              </div>
-
-              {/* 每轮明细表：表头 sticky 吸在报告滚动容器顶部——所以这里不能包滚动容器（overflow 非
-                  visible 会让 sticky 只相对该容器生效，等于失效）；border-separate 才能让 sticky 稳定生效 */}
-              <div className="mt-6">
-                <table className="w-full text-[12.5px]" style={{ borderCollapse: 'separate', borderSpacing: 0 }}>
-                  <thead>
-                    <tr>
-                      {CACHE_ROUND_COLUMNS.map(col => (
-                        <th key={col.key} className="px-4 py-2.5 font-semibold whitespace-nowrap"
-                          style={{ color: 'var(--t2)', textAlign: col.numeric ? 'right' : 'left', fontSize: 11, letterSpacing: '0.05em', borderTop: '1px solid var(--border)', borderBottom: '1px solid var(--border)', position: 'sticky', top: 0, zIndex: 1, background: 'var(--inputBg)' }}>{col.key}</th>
-                      ))}
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {r.rounds.map((rd, idx) => {
-                      const uncached = rd.usage.totalPrompt != null ? Math.max(0, rd.usage.totalPrompt - (rd.usage.cacheRead ?? 0) - (rd.usage.cacheWrite ?? 0)) : null
-                      const cell = (v: number | null) => (v == null ? '—' : String(v))
-                      // 末行不画分隔线，避免与容器圆角边框叠成双线
-                      const line = idx === r.rounds.length - 1 ? 'none' : '1px solid var(--border)'
-                      const num = { fontFamily: CACHE_MONO, borderBottom: line }
-                      // 语义色只留给真正有量的数字，0 与「—」保持中性，避免读成告警
-                      const tone = (v: number | null, on: string) => (v ? on : 'var(--t3)')
-                      return (
-                        <tr key={rd.round}>
-                          <td className="px-4 py-3 font-mono" style={{ color: 'var(--text)', ...num }}>{rd.warmup ? '预热' : `#${rd.round}`}</td>
-                          <td className="px-4 py-3" style={{ borderBottom: line }}><CacheHitBadge round={rd} /></td>
-                          <td className="px-4 py-3 font-mono text-right tabular-nums" style={{ color: rd.status === 'ok' ? 'var(--t2)' : 'var(--err)', ...num }}>{rd.httpStatus ?? 'ERR'}</td>
-                          <td className="px-4 py-3 font-mono text-right tabular-nums" style={{ color: 'var(--text)', ...num }}>{cell(rd.usage.totalPrompt)}</td>
-                          <td className="px-4 py-3 font-mono text-right tabular-nums" style={{ color: tone(rd.usage.cacheRead, 'var(--ok)'), ...num }}>{cell(rd.usage.cacheRead)}</td>
-                          <td className="px-4 py-3 font-mono text-right tabular-nums" style={{ color: tone(rd.usage.cacheWrite, 'var(--warn)'), ...num }}>{cell(rd.usage.cacheWrite)}</td>
-                          <td className="px-4 py-3 font-mono text-right tabular-nums" style={{ color: 'var(--t2)', ...num }}>{cell(uncached)}</td>
-                          <td className="px-4 py-3 font-mono text-right tabular-nums" style={{ color: 'var(--t2)', ...num }}>{cell(rd.usage.output)}</td>
-                          <td className="px-4 py-3 font-mono text-right tabular-nums" style={{ color: 'var(--t2)', ...num }}>{rd.durationMs != null ? `${rd.durationMs} ms` : '—'}</td>
-                        </tr>
-                      )
-                    })}
-                  </tbody>
-                </table>
-              </div>
-              {r.rounds.some(rd => rd.status === 'error') && (
-                <div className="mt-3 space-y-1.5">
-                  {r.rounds.filter(rd => rd.status === 'error').map(rd => (
-                    <p key={rd.round} className="text-xs leading-[1.5]" style={{ color: 'var(--err)' }}>{rd.warmup ? '预热' : `#${rd.round}`} 失败：{rd.error}</p>
-                  ))}
-                </div>
-              )}
-
-              <div className="mt-6 pt-5" style={{ borderTop: '1px solid var(--border)' }}>
-                <CacheRoundsChartLazy result={r} footnote={chartFoot} />
-              </div>
-            </div>
-          )
-            })}
+            ))}
           </div>
         ))}
         </div>
@@ -1245,6 +1331,9 @@ function CacheHitTool() {
   const [nameModal, setNameModal] = useState(false)
   const [testName, setTestName] = useState('')
   const [report, setReport] = useState<CacheReport | null>(null)
+  const [matrixReports, setMatrixReports] = useState<CacheReport[] | null>(null)
+  const [picked, setPicked] = useState<Set<string>>(new Set())
+  const [historyNote, setHistoryNote] = useState('')
   const [history, setHistory] = useState<CacheReport[]>([])
   const [logs, setLogs] = useState<CacheLog[]>([])
   const [openLogs, setOpenLogs] = useState<Record<string, boolean>>({})
@@ -1256,6 +1345,12 @@ function CacheHitTool() {
   const stopRef = useRef(false)
   const activeAbortRef = useRef<AbortController | null>(null)
   const reportRef = useRef<HTMLDivElement | null>(null)
+  const openReportRef = useRef<CacheReport | null>(null)
+  const matrixRef = useRef<CacheReport[] | null>(null)
+  const progressTagRef = useRef('')
+  const logPrefixRef = useRef('')
+  openReportRef.current = report
+  matrixRef.current = matrixReports
 
   useEffect(() => {
     let cancelled = false
@@ -1336,7 +1431,8 @@ function CacheHitTool() {
 
     const doRound = async (round: number, isRetry = false): Promise<{ rec: CacheRound; assistantText: string }> => {
       const warmup = round === 0
-      const label = `${caseLabel} · ${CACHE_FORMAT_LABELS[format]} · ${warmup ? '预热' : `第 ${round} 轮`}${isRetry ? '（重试）' : ''}`
+      const modelPrefix = logPrefixRef.current
+      const label = `${modelPrefix ? `${modelPrefix} · ` : ''}${caseLabel} · ${CACHE_FORMAT_LABELS[format]} · ${warmup ? '预热' : `第 ${round} 轮`}${isRetry ? '（重试）' : ''}`
       const turns = cacheTurnsForRound(caseId, round, history)
       const body = cacheBodyOf(format, cfg.model, prefix, turns, promptCacheKey, useCacheKey)
       try {
@@ -1389,7 +1485,11 @@ function CacheHitTool() {
     }
 
     // 第 0 轮：预热写缓存。失败则该协议终止（后续轮次没有测量意义）。
-    setProgress(p => ({ ...p, label: `${caseLabel} · ${CACHE_FORMAT_LABELS[format]}：预热写缓存` }))
+    {
+      const text = `${caseLabel} · ${CACHE_FORMAT_LABELS[format]}：预热写缓存`
+      const tag = progressTagRef.current
+      setProgress(p => ({ ...p, label: tag ? `${tag} · ${text}` : text }))
+    }
     const warmupRound = await runRound(0)
     roundsArr.push(warmupRound)
     onRound(snapshot('ok'))
@@ -1398,7 +1498,11 @@ function CacheHitTool() {
     // 顺序执行 N 轮测量（顺序而非并发：缓存写入需在首个响应后才可用，并发会全部 miss）
     for (let i = 1; i <= measureRounds; i++) {
       if (stopRef.current) return snapshot('stopped')
-      setProgress(p => ({ ...p, label: `${caseLabel} · ${CACHE_FORMAT_LABELS[format]}：测量第 ${i}/${measureRounds} 轮` }))
+      {
+        const text = `${caseLabel} · ${CACHE_FORMAT_LABELS[format]}：测量第 ${i}/${measureRounds} 轮`
+        const tag = progressTagRef.current
+        setProgress(p => ({ ...p, label: tag ? `${tag} · ${text}` : text }))
+      }
       const rd = await runRound(i)
       roundsArr.push(rd)
       onRound(snapshot('ok'))
@@ -1409,9 +1513,10 @@ function CacheHitTool() {
 
   const runTest = async (name: string) => {
     const ch = activeChannel
+    const models = probeSplitModels(model)
     const errs: string[] = []
     if (!ch) errs.push('请先在「渠道管理」添加并选择一个渠道。')
-    if (!model.trim()) errs.push('模型名称不能为空。')
+    if (!models.length) errs.push('模型名称不能为空。')
     const activeFormats = CACHE_FORMATS.filter(f => formats[f])
     if (!activeFormats.length) errs.push('请至少勾选一个测试协议。')
     const activeCases = CACHE_CASES.filter(c => cases[c])
@@ -1422,81 +1527,117 @@ function CacheHitTool() {
       suffix: cacheClampRounds(caseRounds.suffix),
     }
     const prefixTok = Math.max(256, Math.min(32000, Math.round(Number(prefixTokens)) || 2048))
-    const cfg = ch ? await cacheBuildCfgFromChannel(ch, model.trim()) : null
-    if (ch && cfg && !cfg.apiKey.trim()) errs.push('渠道 API Key 解密失败，请重新编辑渠道并保存。')
+    const cfgProbe = ch && models.length ? await cacheBuildCfgFromChannel(ch, models[0]) : null
+    if (ch && models.length && !cfgProbe?.apiKey.trim()) errs.push('渠道 API Key 解密失败，请重新编辑渠道并保存。')
     if (errs.length) { setStartErr(errs.join('\n')); return }
+    if (!ch) return
     setStartErr('')
 
     stopRef.current = false
+    progressTagRef.current = ''
+    logPrefixRef.current = ''
     logsRef.current = []
     setLogs([])
     setOpenLogs({})
     setReport(null)
+    setMatrixReports(null)
+    setHistoryNote('')
     setLiveResults({})
     setRunning(true)
     setPane('live')
 
-    const totalRounds = activeCases.reduce((sum, c) => sum + activeFormats.length * (roundsOf[c] + 1), 0)
+    const perModelRounds = activeCases.reduce((sum, c) => sum + activeFormats.length * (roundsOf[c] + 1), 0)
+    const totalRounds = perModelRounds * models.length
     let done = 0
     setProgress({ done: 0, total: totalRounds, label: '准备测试' })
-
-    const runNonce = cacheMakeNonce()
-    const startedAt = new Date().toISOString()
-    const startMs = Date.now()
-    const caseResults: CacheCaseResult[] = []
+    const newIds: string[] = []
     try {
-      for (const caseId of activeCases) {
+      for (let index = 0; index < models.length; index++) {
         if (stopRef.current) break
-        const measureRounds = roundsOf[caseId]
-        const results: CacheProtocolResult[] = []
-        for (const f of activeFormats) {
-          if (stopRef.current) break
-          // 每个 case × 协议用独立 nonce，避免场景之间的前缀在网关侧串缓存
-          const scopedNonce = `${runNonce}-${caseId}-${f}`
-          const prefix = cacheBuildPrefix(scopedNonce, prefixTok)
-          const out = await runFormatTest(cfg!, f, prefix, scopedNonce, measureRounds, caseId, partial => {
-            done++
-            setProgress(p => ({ ...p, done: Math.min(done, totalRounds) }))
-            setLiveResults(prev => ({ ...prev, [caseId]: { ...prev[caseId], [f]: partial } }))
-          })
-          results.push(out)
-          setLiveResults(prev => ({ ...prev, [caseId]: { ...prev[caseId], [f]: out } }))
-        }
-        for (const f of activeFormats) {
-          if (!results.some(r => r.format === f)) {
-            results.push({ format: f, status: 'stopped', rounds: [], ...cacheComputeMetrics([]) })
-          }
-        }
-        caseResults.push({ caseId, nonce: `${runNonce}-${caseId}`, rounds: measureRounds, results })
-      }
-      for (const caseId of activeCases) {
-        if (!caseResults.some(c => c.caseId === caseId)) {
-          caseResults.push({
-            caseId, nonce: `${runNonce}-${caseId}`, rounds: roundsOf[caseId],
-            results: activeFormats.map(f => ({ format: f, status: 'stopped' as const, rounds: [], ...cacheComputeMetrics([]) })),
-          })
-        }
+        const modelName = models[index]
+        const cfg = await cacheBuildCfgFromChannel(ch, modelName)
+        progressTagRef.current = models.length > 1 ? `第 ${index + 1}/${models.length} 个 · ${modelName}` : ''
+        logPrefixRef.current = models.length > 1 ? modelName : ''
+        setLiveResults({})
+        const id = await runOneModel(cfg, probeNameForModel(name, modelName, models.length), index)
+        if (id) newIds.push(id)
       }
     } finally {
-      const flatResults = caseResults.length === 1 ? caseResults[0].results : caseResults.flatMap(c => c.results)
-      const primaryRounds = caseResults[0]?.rounds ?? roundsOf.suffix
-      const rep: CacheReport = {
-        id: 'c' + Date.now() + '_' + Math.random().toString(36).slice(2, 7),
-        name, startedAt, completedAt: new Date().toISOString(), durationMs: Date.now() - startMs,
-        target: { baseUrl: cfg!.baseUrl, model: cfg!.model, channelName: ch?.name, keyMask: ch?.keyMask },
-        params: {
-          prefixTokens: prefixTok, rounds: primaryRounds, nonce: runNonce,
-          cases: activeCases,
-          caseRounds: Object.fromEntries(activeCases.map(c => [c, roundsOf[c]])),
-        },
-        results: flatResults,
-        caseResults,
-      }
-      setReport(rep)
-      try { setHistory(await saveCacheHistory(rep)) } catch { /* IndexedDB 不可用时仅当前会话可见 */ }
+      progressTagRef.current = ''
+      logPrefixRef.current = ''
       setRunning(false)
-      setProgress(p => ({ ...p, done: p.total, label: '测试完成' }))
-      setPane('report')
+      let list: CacheReport[] = []
+      try { list = await trimCacheHistory() } catch { list = [] }
+      setHistory(list)
+      const alive = new Set(list.map(item => item.id))
+      const dropped = newIds.filter(id => !alive.has(id))
+      setPicked(new Set(newIds.filter(id => alive.has(id))))
+      setHistoryNote(dropped.length
+        ? `本批 ${newIds.length} 个模型里，较早的 ${dropped.length} 份超出历史上限 ${CACHE_HISTORY_MAX} 条，已不保留。`
+        : '')
+      setPane('history')
+      setProgress(p => ({ ...p, done: stopRef.current ? p.done : p.total, label: stopRef.current ? '已停止' : '测试完成' }))
+    }
+
+    async function runOneModel(cfg: CacheCfg, reportName: string, index: number): Promise<string | null> {
+      const runNonce = cacheMakeNonce()
+      const startedAt = new Date().toISOString()
+      const startMs = Date.now()
+      const caseResults: CacheCaseResult[] = []
+      try {
+        for (const caseId of activeCases) {
+          if (stopRef.current) break
+          const measureRounds = roundsOf[caseId]
+          const results: CacheProtocolResult[] = []
+          for (const f of activeFormats) {
+            if (stopRef.current) break
+            const scopedNonce = `${runNonce}-${caseId}-${f}`
+            const prefix = cacheBuildPrefix(scopedNonce, prefixTok)
+            const out = await runFormatTest(cfg, f, prefix, scopedNonce, measureRounds, caseId, partial => {
+              done++
+              setProgress(p => ({ ...p, done: Math.min(done, totalRounds) }))
+              setLiveResults(prev => ({ ...prev, [caseId]: { ...prev[caseId], [f]: partial } }))
+            })
+            results.push(out)
+            setLiveResults(prev => ({ ...prev, [caseId]: { ...prev[caseId], [f]: out } }))
+          }
+          for (const f of activeFormats) {
+            if (!results.some(r => r.format === f)) {
+              results.push({ format: f, status: 'stopped', rounds: [], ...cacheComputeMetrics([]) })
+            }
+          }
+          caseResults.push({ caseId, nonce: `${runNonce}-${caseId}`, rounds: measureRounds, results })
+        }
+        for (const caseId of activeCases) {
+          if (!caseResults.some(c => c.caseId === caseId)) {
+            caseResults.push({
+              caseId, nonce: `${runNonce}-${caseId}`, rounds: roundsOf[caseId],
+              results: activeFormats.map(f => ({ format: f, status: 'stopped' as const, rounds: [], ...cacheComputeMetrics([]) })),
+            })
+          }
+        }
+      } finally {
+        const flatResults = caseResults.length === 1 ? caseResults[0].results : caseResults.flatMap(c => c.results)
+        const primaryRounds = caseResults[0]?.rounds ?? roundsOf.suffix
+        const rep: CacheReport = {
+          id: 'c' + Date.now().toString(36) + '_' + index + '_' + Math.random().toString(36).slice(2, 7),
+          name: reportName, startedAt, completedAt: new Date().toISOString(), durationMs: Date.now() - startMs,
+          target: { baseUrl: cfg.baseUrl, model: cfg.model, channelName: ch?.name, keyMask: ch?.keyMask },
+          params: {
+            prefixTokens: prefixTok, rounds: primaryRounds, nonce: runNonce,
+            cases: activeCases,
+            caseRounds: Object.fromEntries(activeCases.map(c => [c, roundsOf[c]])),
+          },
+          results: flatResults,
+          caseResults,
+        }
+        try {
+          await putCacheHistory(rep)
+          return rep.id
+        } catch {
+          return null
+        }
+      }
     }
   }
 
@@ -1509,8 +1650,70 @@ function CacheHitTool() {
 
   const uiActiveFormats = CACHE_FORMATS.filter(f => formats[f])
   const uiActiveCases = CACHE_CASES.filter(c => cases[c])
-  const canStart = !!activeChannel && !!model.trim() && uiActiveFormats.length > 0 && uiActiveCases.length > 0
+  const canStart = !!activeChannel && probeSplitModels(model).length > 0 && uiActiveFormats.length > 0 && uiActiveCases.length > 0
   const liveIdle = !running && progress.total === 0
+  const matrixOpen = pane === 'report' && !!matrixReports && matrixReports.length > 1
+
+  const viewHistoryReport = (rep: CacheReport) => {
+    setMatrixReports(null)
+    setReport(rep)
+    setPane('report')
+  }
+  const viewPicked = () => {
+    const rows = history.filter(item => picked.has(item.id))
+    if (rows.length === 1) viewHistoryReport(rows[0])
+    else if (rows.length > 1) {
+      setReport(null)
+      setMatrixReports(rows)
+      setPane('report')
+    }
+  }
+  const syncOpenReports = (removed: ReadonlySet<string>) => {
+    const next = probeViewAfterDelete(openReportRef.current, matrixRef.current, removed)
+    setReport(next.report)
+    setMatrixReports(next.matrix && next.matrix.length > 0 ? next.matrix : null)
+  }
+  const togglePicked = (id: string) => {
+    setPicked(prev => {
+      const next = new Set(prev)
+      if (next.has(id)) next.delete(id)
+      else next.add(id)
+      return next
+    })
+  }
+  const deletePicked = () => {
+    if (running) return
+    const ids = history.filter(item => picked.has(item.id)).map(item => item.id)
+    if (!ids.length) return
+    const removed = new Set(ids)
+    historyDbDeleteMany('cachehit', ids).then(() => loadCacheHistory()).then(list => {
+      setHistory(list)
+      setPicked(new Set())
+      syncOpenReports(removed)
+    }).catch(() => {})
+  }
+  const deleteOneHistory = (id: string) => {
+    if (running) return
+    const removed = new Set([id])
+    deleteCacheHistory(id).then(list => {
+      setHistory(list)
+      setPicked(prev => {
+        const next = new Set(prev)
+        next.delete(id)
+        return next
+      })
+      syncOpenReports(removed)
+    }).catch(() => {})
+  }
+  const clearHistory = () => {
+    if (running) return
+    setHistory([])
+    setPicked(new Set())
+    setMatrixReports(null)
+    setReport(null)
+    setHistoryNote('')
+    historyDbClear('cachehit').catch(() => {})
+  }
 
   const renderLogRow = (log: CacheLog) => {
     const open = !!openLogs[log.id]
@@ -1564,7 +1767,7 @@ function CacheHitTool() {
         </div>
       </div>
 
-      <div className="flex-1 flex overflow-hidden">
+      <div className="flex-1 flex min-h-0 overflow-hidden">
         <CacheConfigPane
           channels={channels} activeChId={activeChId} onActiveChId={setActiveChId}
           model={model} onModel={setModel}
@@ -1574,7 +1777,7 @@ function CacheHitTool() {
           running={running} startErr={startErr}
         />
 
-        <div className="flex-1 flex flex-col overflow-hidden">
+        <div className="flex-1 flex min-h-0 min-w-0 flex-col overflow-hidden">
           <div className="glass flex items-center px-6 py-3 flex-shrink-0" style={{ borderBottom: '1px solid var(--border)' }}>
             <SegmentedControl value={pane} onChange={v => setPane(v as typeof pane)} options={[
               { value: 'live', label: '实时进度' },
@@ -1585,7 +1788,7 @@ function CacheHitTool() {
             ]} />
           </div>
 
-          <div className="flex-1 overflow-y-auto">
+          <div className={matrixOpen ? 'flex min-h-0 flex-1 flex-col overflow-hidden' : 'flex-1 overflow-y-auto'}>
             {pane === 'live' && (
               <div className="p-6">
                 {progress.total > 0 && (
@@ -1694,7 +1897,9 @@ function CacheHitTool() {
             )}
 
             {pane === 'report' && (
-              !report ? (
+              matrixReports && matrixReports.length > 1 ? (
+                <CacheMatrixView reports={matrixReports} />
+              ) : !report ? (
                 <div className="py-20 text-center text-sm" style={{ color: 'var(--t3)' }}>完成一轮测试后，报告将显示在这里</div>
               ) : (
                 <CacheReportView report={report} reportRef={reportRef} />
@@ -1703,16 +1908,41 @@ function CacheHitTool() {
 
             {pane === 'history' && (
               <div className="p-6">
-                <div className="flex items-center justify-between mb-4">
-                  <p className="text-sm" style={{ color: 'var(--t2)' }}>已存 {history.length} / {CACHE_HISTORY_MAX} 条历史报告</p>
-                  {history.length > 0 && <Btn small variant="danger" onClick={() => { setHistory([]); historyDbClear('cachehit').catch(() => {}) }}>清空历史</Btn>}
+                <div className="flex flex-col gap-3 mb-4 sm:flex-row sm:items-center sm:justify-between">
+                  <div>
+                    <p className="text-sm" style={{ color: 'var(--t2)' }}>已存 {history.length} / {CACHE_HISTORY_MAX} 条历史报告</p>
+                    {historyNote && <p className="text-sm mt-1" style={{ color: 'var(--warn)' }} data-testid="cache-history-note">{historyNote}</p>}
+                  </div>
+                  {history.length > 0 && (
+                    <div className="flex flex-wrap items-center gap-2">
+                      <button
+                        type="button"
+                        onClick={() => {
+                          const allOn = history.every(item => picked.has(item.id))
+                          setPicked(allOn ? new Set() : new Set(history.map(item => item.id)))
+                        }}
+                        className="cursor-pointer border-0 outline-none text-xs font-semibold"
+                        style={{ background: 'transparent', color: 'var(--accent)', fontFamily: 'inherit' }}
+                      >{history.every(item => picked.has(item.id)) ? '取消全选' : '全选'}</button>
+                      <Btn small variant="soft" disabled={picked.size === 0} onClick={viewPicked}>查看所选</Btn>
+                      <Btn small variant="danger" disabled={running || picked.size === 0} title={running ? '测试进行中，不能删除历史' : undefined} onClick={deletePicked}>删除所选 ({picked.size})</Btn>
+                      <Btn small variant="danger" disabled={running} title={running ? '测试进行中，不能删除历史' : undefined} onClick={clearHistory}>清空历史</Btn>
+                    </div>
+                  )}
                 </div>
                 {history.length === 0 ? (
                   <div className="py-16 text-center text-sm" style={{ color: 'var(--t3)' }}>暂无历史报告，完成一轮测试后自动入库</div>
                 ) : (
                   <div className="space-y-3">
                     {history.map(h => (
-                      <div key={h.id} className="surface-card rounded-2xl p-4 flex items-center gap-4" style={{ background: 'var(--bg)', border: '1px solid var(--border)', boxShadow: 'var(--shadow)' }}>
+                      <div key={h.id} data-testid="cache-history-row" className="surface-card rounded-2xl p-4 flex flex-col gap-3 sm:flex-row sm:items-center sm:gap-4" style={{ background: 'var(--bg)', border: '1px solid var(--border)', boxShadow: 'var(--shadow)' }}>
+                        <input
+                          type="checkbox"
+                          checked={picked.has(h.id)}
+                          onChange={() => togglePicked(h.id)}
+                          aria-label={`选择 ${h.name}`}
+                          className="h-4 w-4 flex-shrink-0 cursor-pointer accent-[var(--accent)]"
+                        />
                         <div className="min-w-0 flex-1">
                           <div className="text-sm font-bold truncate" style={{ color: 'var(--text)' }}>{h.name}</div>
                           <div className="text-xs mt-1 flex flex-wrap gap-x-4 gap-y-0.5" style={{ color: 'var(--t3)' }}>
@@ -1723,9 +1953,9 @@ function CacheHitTool() {
                             </span>
                           </div>
                         </div>
-                        <div className="flex gap-2 flex-shrink-0">
-                          <Btn small variant="soft" onClick={() => { setReport(h); setPane('report') }}>查看</Btn>
-                          <Btn small variant="ghost" onClick={() => { deleteCacheHistory(h.id).then(setHistory) }}>删除</Btn>
+                        <div className="flex flex-wrap gap-2 flex-shrink-0">
+                          <Btn small variant="soft" onClick={() => viewHistoryReport(h)}>查看</Btn>
+                          <Btn small variant="ghost" disabled={running} title={running ? '测试进行中，不能删除历史' : undefined} onClick={() => deleteOneHistory(h.id)}>删除</Btn>
                         </div>
                       </div>
                     ))}
@@ -1753,7 +1983,7 @@ function CacheHitTool() {
           <div role="dialog" aria-modal="true" className="floating-material rounded-2xl p-6 w-full max-w-md" style={{ background: 'var(--bg)', border: '1px solid var(--border)', boxShadow: 'var(--shadowMd)' }}
             onClick={e => e.stopPropagation()}>
             <h2 className="text-lg font-bold" style={{ color: 'var(--text)' }}>命名本次测试</h2>
-            <p className="text-sm mt-1" style={{ color: 'var(--t2)' }}>名称会写入报告与导出文件，便于后续定位。</p>
+            <p className="text-sm mt-1 leading-6" style={{ color: 'var(--t2)' }}>名称会写入报告与导出文件。写入 {'{model}'} 会换成这一份的模型名。多个模型且名称里没有这个占位符时，会自动补成「名称 · 模型名」。</p>
             <CustomInput value={testName} onChange={setTestName} className="mt-4" placeholder="例如：2026-08-12 13:30:00" />
             <div className="mt-5 flex justify-end gap-2">
               <Btn variant="ghost" onClick={() => setNameModal(false)}>取消</Btn>

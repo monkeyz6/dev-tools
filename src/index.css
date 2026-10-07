@@ -932,6 +932,9 @@ textarea:focus-visible { outline: none; }
 .probe-matrix-status.is-unsupported { --c: var(--warn); color: var(--warn); }
 .probe-matrix-status.is-untested,
 .probe-matrix-status.is-skipped { --c: var(--t3); color: var(--t3); }
+.probe-matrix-status.is-ok { --c: var(--ok); color: var(--ok); }
+.probe-matrix-status.is-warn { --c: var(--warn); color: var(--warn); }
+.probe-matrix-status.is-err { --c: var(--err); color: var(--err); }
 .probe-matrix-status.is-skipped::before {
   background: transparent;
   box-shadow: inset 0 0 0 1.5px var(--t3);
