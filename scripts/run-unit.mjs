@@ -47,6 +47,11 @@ const files = [
   'src/shared/video-meta.test.ts',
   'src/tools/img-report/carrier.ts',
   'src/tools/img-report/carrier.test.ts',
+  'src/tools/img-report/types.ts',
+  'src/tools/img-report/interactions.ts',
+  'src/tools/img-report/interactions.test.ts',
+  'src/tools/img-report/summary.ts',
+  'src/tools/img-report/summary.test.ts',
 ]
 const outDir = join(root, '.tmp-unit')
 rmSync(outDir, { recursive: true, force: true })
@@ -89,6 +94,8 @@ const r = spawnSync(
     join(outDir, 'src/tools/video-report/google-omni.test.js'),
     join(outDir, 'src/shared/video-meta.test.js'),
     join(outDir, 'src/tools/img-report/carrier.test.js'),
+    join(outDir, 'src/tools/img-report/summary.test.js'),
+    join(outDir, 'src/tools/img-report/interactions.test.js'),
   ],
   { stdio: 'inherit' },
 )

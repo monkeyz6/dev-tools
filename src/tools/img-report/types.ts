@@ -25,7 +25,23 @@ export interface ImgRecImage {
   w: number
   h: number
   format: string
+  /** 响应里自带的格式标签（mime_type / URL 后缀），与文件头字节不一致时才记 */
+  formatLabel?: string
   carrier?: ImgCarrier
+}
+
+/** Interactions 响应里与「是否与官方一致」有关的字段 */
+export interface ImgInteractionMeta {
+  id: string | null
+  status: string | null
+  model: string | null
+  /** usage.output_tokens_by_modality 里 image 模态的 tokens；缺失为 null */
+  imageTokens: number | null
+  /** thought 步骤数 + 带 thought 标记的图片块数 */
+  thoughtSteps: number
+  searchSteps: number
+  /** 多轮编辑：第一轮返回的 interaction id */
+  prevId?: string | null
 }
 
 export interface ImgCheck { name: string; target: string | number; actual: string | number; pass: boolean; info?: boolean }
@@ -47,7 +63,7 @@ export interface ImgRecord {
   targets: Record<string, any>
   useRef: boolean
   refThumbs: (string | null)[]
-  price: { usd: number; cny: number; tier: string; note: string; count: number } | null
+  price: { usd: number; cny: number; tier: string; note: string; count: number; inputUsd?: number; inputCny?: number; inputCount?: number } | null
   status: number
   respHeaders: Record<string, string>
   reqId: string
@@ -61,6 +77,9 @@ export interface ImgRecord {
   durationMs: number
   checks: ImgCheck[]
   validationVersion?: number
+  /** 用例预期：unsupported = 官方未承诺支持，被 4xx 拒绝也算通过 */
+  expect?: 'unsupported'
+  interaction?: ImgInteractionMeta
 }
 
 export function imgFmtTime(ts: number) {

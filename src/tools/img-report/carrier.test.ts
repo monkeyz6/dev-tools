@@ -6,6 +6,7 @@ import {
   imgClassifyOpenAiImage,
   imgExpectedCarrier,
   imgIsGptImageModel,
+  sniffImageMime,
 } from './carrier.ts'
 
 describe('imgIsGptImageModel', () => {
@@ -199,5 +200,17 @@ describe('imgCarrierCheck', () => {
     assert.equal(imgCarrierCheck({ apiType: 'openai', model: 'dall-e-3', images: [image('http-url')] }), null)
     assert.equal(imgCarrierCheck({ apiType: 'grok', model: 'grok-imagine-image', responseFormat: 'weird', images: [image('http-url')] }), null)
     assert.equal(imgCarrierCheck({ apiType: 'openai', model: 'gpt-image-2', images: [] }), null)
+  })
+})
+
+describe('sniffImageMime 文件头字节', () => {
+  const PNG = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg=='
+  it('认 PNG / JPEG / WebP / GIF，带 data: 前缀也行，其余返回 null', () => {
+    assert.equal(sniffImageMime(PNG), 'image/png')
+    assert.equal(sniffImageMime(`data:image/jpeg;base64,${PNG}`), 'image/png')
+    assert.equal(sniffImageMime('/9j/4AAQSkZJRgABAQ'), 'image/jpeg')
+    assert.equal(sniffImageMime('UklGRiQAAABXRUJQVlA4IBgAAAAw'), 'image/webp')
+    assert.equal(sniffImageMime('R0lGODlhAQABAAAAACw='), 'image/gif')
+    assert.equal(sniffImageMime('aGVsbG8gd29ybGQ='), null)
   })
 })

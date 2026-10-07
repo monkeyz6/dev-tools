@@ -15,12 +15,18 @@ export function imgVerdict(checks: ImgCheck[]): { level: 'ok' | 'fail' | 'warn';
   return { level: 'fail', text: `${real.length - fail}/${real.length} 通过` }
 }
 
+/** 预期不支持的用例被上游 4xx 明确拒绝：算通过。401/403/408/429 是鉴权/限流/超时，不代表参数被拒，仍按请求异常 */
+export function imgExpectedRejected(r: Pick<ImgRecord, 'expect' | 'ok' | 'status'>): boolean {
+  return r.expect === 'unsupported' && !r.ok && r.status >= 400 && r.status < 500 && ![401, 403, 408, 429].includes(r.status)
+}
+
 export function imgClassify(r: ImgRecord): 'pass' | 'fail' | 'error' {
+  if (imgExpectedRejected(r)) return 'pass'
   return !r.ok ? 'error' : (imgVerdict(r.checks || []).level === 'ok' ? 'pass' : 'fail')
 }
 
 /** 校验项 → 能力。多图记录里校验项名带「图N 」前缀，先剥掉再归类 */
-const IMG_CAPABILITY_ORDER = ['request', 'size', 'tier', 'ratio', 'n', 'outputFormat', 'responseFormat'] as const
+const IMG_CAPABILITY_ORDER = ['request', 'size', 'tier', 'ratio', 'n', 'outputFormat', 'responseFormat', 'structure', 'tokens', 'search', 'multiTurn'] as const
 const IMG_CAPABILITY_LABEL: Record<string, string> = {
   request: '接口连通',
   size: '精确像素尺寸',
@@ -29,6 +35,10 @@ const IMG_CAPABILITY_LABEL: Record<string, string> = {
   n: '多图 n 参数',
   outputFormat: 'output_format 输出格式',
   responseFormat: '返回载体',
+  structure: '响应结构与模型回显',
+  tokens: '用量 token 对账',
+  search: '联网搜索 google_search',
+  multiTurn: '多轮编辑 previous_interaction_id',
 }
 
 function imgCapabilityKey(rawName: string): string | null {
@@ -40,6 +50,10 @@ function imgCapabilityKey(rawName: string): string | null {
   if (name === '返回张数 (n)') return 'n'
   if (name === '输出格式') return 'outputFormat'
   if (name === 'response_format' || name === '返回载体') return 'responseFormat'
+  if (name === '响应结构' || name === '模型回显') return 'structure'
+  if (name === '图片输出 token') return 'tokens'
+  if (name === '联网搜索') return 'search'
+  if (name === '多轮编辑') return 'multiTurn'
   return null
 }
 

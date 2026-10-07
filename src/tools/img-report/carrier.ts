@@ -71,7 +71,7 @@ function imageMime(mime: string | null): boolean {
 }
 
 // mime 声明不可信时看 base64 文件头：PNG / JPEG / GIF / WebP。
-function sniffImageMime(raw: string): string | null {
+export function sniffImageMime(raw: string): string | null {
   const b64 = raw.replace(/^data:[^,]*,/i, '').slice(0, 24).replace(/[^A-Za-z0-9+/]/g, '')
   let head = ''
   try { head = atob(b64.slice(0, b64.length - (b64.length % 4))) } catch { return null }
