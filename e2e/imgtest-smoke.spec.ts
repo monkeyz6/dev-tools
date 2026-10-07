@@ -386,3 +386,43 @@ test('渠道管理：复制渠道不切换当前使用', async ({ page }) => {
     return raw ? JSON.parse(raw).map((c: { name: string }) => c.name) : []
   }).toEqual(['测试渠道', '测试渠道_copy'])
 })
+
+test('历史批次较多时不会被压扁', async ({ page }) => {
+  // 批次块带 overflow-hidden，放进限高的 flex 容器会被按比例压扁（标题行只剩一条缝、按钮被裁成半截）
+  await page.addInitScript(() => {
+    const now = Date.now()
+    localStorage.setItem('imgtest-history', JSON.stringify(Array.from({ length: 20 }, (_, i) => ({
+      id: `many-${i}`, runId: `run-many-${i}`, time: now - i * 3600_000, caseName: '文生图 1024×1024', caseDesc: '',
+      channelName: '压测渠道', apiType: 'openai', model: 'gpt-image-many', prompt: 'test',
+      targets: { wReq: 1024, hReq: 1024 }, useRef: false, refThumbs: [], price: null,
+      status: 200, respHeaders: {}, reqId: '', sentPreview: '{}', ok: true, error: null, rawSnippet: '{}',
+      images: [{ dataUri: null, thumb: null, url: 'https://cdn.example/many.png', w: 1024, h: 1024, format: 'png' }],
+      returnedN: 1, durationMs: 100, checks: [],
+    }))))
+  })
+  await page.goto('/')
+  await page.getByText('图片接口测试').click()
+  await page.getByRole('button', { name: /^历史记录/ }).click()
+
+  const batches = page.getByTestId('imgtest-batch')
+  await expect(batches).toHaveCount(20)
+  for (let i = 0; i < 20; i++) {
+    const batch = batches.nth(i)
+    const restore = batch.getByRole('button', { name: '↺ 还原到工作台' })
+    const [boxB, boxR] = await Promise.all([batch.boundingBox(), restore.boundingBox()])
+    expect(boxB && boxR, `第 ${i + 1} 批应可测量`).toBeTruthy()
+    // 按钮必须完整落在批次块里，批次块高度至少容得下按钮
+    expect(boxB!.height).toBeGreaterThanOrEqual(boxR!.height)
+    expect(boxR!.y).toBeGreaterThanOrEqual(boxB!.y)
+    expect(boxR!.y + boxR!.height).toBeLessThanOrEqual(boxB!.y + boxB!.height + 0.5)
+  }
+
+  // 最后一批能滚到并完整可见
+  const last = batches.nth(19)
+  await last.scrollIntoViewIfNeeded()
+  await expect(last.getByRole('button', { name: '↺ 还原到工作台' })).toBeVisible()
+
+  // 默认展开的最新一批，记录表完整显示
+  await expect(batches.first().locator('tbody tr')).toHaveCount(1)
+  await expect(batches.first().locator('tbody tr').first()).toBeVisible()
+})

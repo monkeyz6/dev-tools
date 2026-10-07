@@ -1077,14 +1077,16 @@ const ImgHistoryPane = React.memo(function ImgHistoryPane({
         <div className="w-48"><CustomSelect value={fModel} onChange={onFModel} options={[{ value: '', label: '全部模型' }, ...histModels.map(m => ({ value: m, label: m }))]} /></div>
         <div className="w-36"><CustomSelect value={fResult} onChange={onFResult} options={[{ value: '', label: '全部结果' }, { value: 'pass', label: '✓ 通过' }, { value: 'fail', label: '✕ 未通过' }, { value: 'error', label: '! 请求失败' }]} /></div>
       </div>
-      <div className="overflow-auto flex flex-col gap-2" style={{ maxHeight: 'calc(100vh - 260px)' }}>
+      {/* 不设内层滚动：由外层工作区统一滚动，避免两层滚动条 */}
+      <div className="flex flex-col gap-2">
         {batches.length === 0 && (
           <p className="px-3 py-8 text-center text-xs" style={{ color: 'var(--t3)' }}>暂无记录</p>
         )}
         {batches.map(b => {
           const open = isOpen(b.id)
           return (
-            <div key={b.id} data-testid="imgtest-batch" className="rounded-xl overflow-hidden" style={{ border: '1px solid var(--border)' }}>
+            // shrink-0：overflow-hidden 会让 flex 子项最小高度变成 0，容器一旦限高就会被压扁
+            <div key={b.id} data-testid="imgtest-batch" className="shrink-0 rounded-xl overflow-hidden" style={{ border: '1px solid var(--border)' }}>
               <div className="flex items-center gap-3 flex-wrap px-3 py-2.5 cursor-pointer transition-colors duration-100 row-hover"
                 style={{ background: 'var(--s1)' }} onClick={() => toggleBatch(b.id)}>
                 <span className="text-xs w-3 inline-block" style={{ color: 'var(--t3)' }}>{open ? '▾' : '▸'}</span>
