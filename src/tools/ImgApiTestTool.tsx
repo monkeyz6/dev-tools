@@ -1,4 +1,5 @@
 import { kvGet, kvSet, kvRemove } from '../shared/app-kv'
+import { useAmbientPause } from '../shared/use-ambient-pause'
 import React, { useState, useCallback, useRef, useEffect, useLayoutEffect, useMemo, useDeferredValue } from 'react'
 import { Btn, Label, Card, Badge, CustomInput, CustomSelect, SearchableSelect, CustomTextarea, Toggle, SegmentedControl, SectionTitle, CopyBtn } from '../shared/ui'
 import { historyDbGetAll, historyDbPutOne, historyDbDeleteOne, historyDbDeleteMany, historyDbClear, historyDbMigrateFromLocalStorage } from '../shared/history-db'
@@ -265,14 +266,17 @@ function imgFormatResponseBody(body: string): string {
   try { return JSON.stringify(JSON.parse(body), null, 2) }
   catch { return body }
 }
-function imgResponseForHistory(body: string): { body: string; complete: boolean } {
+// 响应体里的图片 base64 只留首尾一段：工作台与历史共用。原文动辄几 MB～几十 MB，
+// 整段留在 state 里每次渲染都要 parse/stringify 一遍；图片本身另存在 images[].dataUri，预览与下载不受影响。
+const IMG_B64_KEEP = 64
+function imgResponseForDisplay(body: string): { body: string; complete: boolean } {
   if (!body) return { body: '', complete: true }
   try {
     let complete = true
     const scrub = (value: unknown, key = '', inlineImageData = false): unknown => {
       if (typeof value === 'string' && value.length > 1000 && (key === 'b64_json' || (key === 'data' && inlineImageData))) {
         complete = false
-        return `[base64 已从本地历史记录省略 · ${value.length} chars]`
+        return `${value.slice(0, IMG_B64_KEEP)}…[base64 已省略 · ${value.length} chars]…${value.slice(-IMG_B64_KEEP)}`
       }
       if (Array.isArray(value)) return value.map(item => scrub(item))
       if (value && typeof value === 'object') {
@@ -286,7 +290,7 @@ function imgResponseForHistory(body: string): { body: string; complete: boolean 
     return { body: JSON.stringify(scrub(JSON.parse(body)), null, 2), complete }
   } catch {
     if (body.length <= 500_000) return { body, complete: true }
-    return { body: `[超大非 JSON 响应未写入本地历史记录 · ${body.length} chars]`, complete: false }
+    return { body: `${body.slice(0, 2000)}\n…[超大非 JSON 响应已截断 · ${body.length} chars]`, complete: false }
   }
 }
 function imgB64ToDataURI(b: string, fmt: string) {
@@ -323,29 +327,36 @@ function imgCheckResolutionTier(base: number, w: number, h: number) {
   const devPct = base ? +(((equivalent - base) / base) * 100).toFixed(1) : 0
   return { equivalent: +equivalent.toFixed(1), min: +min.toFixed(1), devPct, pass: equivalent >= min }
 }
-function imgMakeThumb(dataUri: string | null, maxSide = 160): Promise<string | null> {
-  if (!dataUri) return Promise.resolve(null)
+// 一次解码同时拿尺寸与缩略图：生成图动辄 2K/4K，原先先量尺寸再压缩缩略图要整图解码两遍
+function imgDecodeWithThumb(dataUri: string | null, maxSide = 160): Promise<{ w: number; h: number; thumb: string | null }> {
+  if (!dataUri) return Promise.resolve({ w: 0, h: 0, thumb: null })
   return new Promise(res => {
     const img = new Image()
     img.onload = () => {
+      const w0 = img.naturalWidth || img.width, h0 = img.naturalHeight || img.height
+      img.onload = null
+      img.onerror = null
       try {
-        const scale = Math.min(1, maxSide / Math.max(img.naturalWidth, img.naturalHeight))
-        const w = Math.max(1, Math.round(img.naturalWidth * scale))
-        const h = Math.max(1, Math.round(img.naturalHeight * scale))
+        const scale = Math.min(1, maxSide / Math.max(w0, h0))
+        const w = Math.max(1, Math.round(w0 * scale))
+        const h = Math.max(1, Math.round(h0 * scale))
         const c = document.createElement('canvas')
         c.width = w
         c.height = h
         const ctx = c.getContext('2d')
-        if (!ctx) { res(null); return }
+        if (!ctx) { res({ w: w0, h: h0, thumb: null }); return }
         ctx.fillStyle = '#fff'
         ctx.fillRect(0, 0, w, h)
         ctx.drawImage(img, 0, 0, w, h)
-        res(c.toDataURL('image/jpeg', 0.72))
-      } catch { res(null) }
+        res({ w: w0, h: h0, thumb: c.toDataURL('image/jpeg', 0.72) })
+      } catch { res({ w: w0, h: h0, thumb: null }) }
     }
-    img.onerror = () => res(null)
+    img.onerror = () => res({ w: 0, h: 0, thumb: null })
     img.src = dataUri
   })
+}
+async function imgMakeThumb(dataUri: string | null, maxSide = 160): Promise<string | null> {
+  return (await imgDecodeWithThumb(dataUri, maxSide)).thumb
 }
 
 function imgLoadChannels(): ImgChannel[] {
@@ -1141,6 +1152,8 @@ function ImgApiTestTool() {
   const [cases, setCases] = useState<ImgCase[]>(() => imgBuildCases(ui0.apiType ?? 'openai'))
   const [selAll, setSelAll] = useState(true)
   const [running, setRunning] = useState(false)
+  // 单条「运行此用例 / 逐个」不经 runList、不设 running，用例自身的 running 状态也算
+  useAmbientPause(running || cases.some(c => c.status === 'running'))
   const [toast, setToast] = useState('')
   const [detailRec, setDetailRec] = useState<ImgRecord | null>(null)
   const [fChannel, setFChannel] = useState('')
@@ -1156,6 +1169,8 @@ function ImgApiTestTool() {
   const stopRef = useRef(false)
   const fileRef = useRef<HTMLInputElement>(null)
   const refImagesRef = useRef(refImages)
+  const refThumbCacheRef = useRef(new WeakMap<object, string | null>())
+  const pendingHistWritesRef = useRef<Promise<unknown>[]>([])
   const channelsRef = useRef(channels)
   const casesRef = useRef(cases)
   const historyRef = useRef(history)
@@ -1358,7 +1373,8 @@ function ImgApiTestTool() {
     ok: false, error: err, rawSnippet: '', images: [], returnedN: 0, durationMs: 0, checks: [], validationVersion: IMG_VALIDATION_VERSION,
   })
 
-  const runCase = async (c: ImgCase) => {
+  // deferTrim：批量运行里每条只写入，整批结束后统一裁剪一次（裁剪要整库读出再分组）
+  const runCase = async (c: ImgCase, opts: { deferTrim?: boolean } = {}) => {
     if (running && c.status !== 'running') { toastShow('正在批量运行中'); return }
     const ch = channelsRef.current.find(x => x.id === activeChId)
     if (!ch) { toastShow('请先在「渠道管理」添加并选择渠道'); return }
@@ -1415,16 +1431,21 @@ function ImgApiTestTool() {
       const parsed = imgParseResponse(apiType, exec.text, exec.headers, exec.httpStatus, exec.resp.ok, fmtHint)
       rec.ok = parsed.ok
       rec.error = parsed.error
-      rec.rawSnippet = parsed.rawSnippet
-      rec.responseBodyComplete = true
+      const shownResponse = imgResponseForDisplay(parsed.rawSnippet)
+      rec.rawSnippet = shownResponse.body
+      rec.responseBodyComplete = shownResponse.complete
       if (parsed.ok) {
         const imgs: ImgRecImage[] = []
         for (const im of parsed.images) {
           let dataUri = im.dataUri
           let dim = !dataUri && im.url ? await imgProbeImage(im.url) : { w: 0, h: 0 }
           if ((!dim.w || !dim.h) && !dataUri && im.url) dataUri = await imgUrlToDataURI(im.url)
-          if ((!dim.w || !dim.h) && dataUri) dim = await imgProbeImage(dataUri)
-          const thumb = await imgMakeThumb(dataUri)
+          let thumb: string | null = null
+          if (dataUri) {
+            const decoded = await imgDecodeWithThumb(dataUri)
+            thumb = decoded.thumb
+            if (!dim.w || !dim.h) dim = { w: decoded.w, h: decoded.h }
+          }
           const uriFormat = imgDetectUriFormat(dataUri)
           imgs.push({
             dataUri, thumb, url: im.url || null, w: dim.w, h: dim.h,
@@ -1455,14 +1476,14 @@ function ImgApiTestTool() {
     try {
       if (c.needRef) {
         for (const r of refImagesRef.current) {
-          rec.refThumbs.push(r.dataUri ? await imgMakeThumb(r.dataUri) : (r.url || null))
+          if (!r.dataUri) { rec.refThumbs.push(r.url || null); continue }
+          // 一批里每条参考图用例都用同一组参考图，缩略图只压一次
+          if (!refThumbCacheRef.current.has(r)) refThumbCacheRef.current.set(r, await imgMakeThumb(r.dataUri))
+          rec.refThumbs.push(refThumbCacheRef.current.get(r) ?? null)
         }
       }
-      const storedResponse = imgResponseForHistory(rec.rawSnippet)
       const histRec: ImgRecord = {
         ...rec,
-        rawSnippet: storedResponse.body,
-        responseBodyComplete: storedResponse.complete,
         images: rec.images.map(im => ({ ...im, dataUri: null })),
       }
       // 同批同用例重复运行只留最新：内存与 IndexedDB 里的旧记录一起剔掉
@@ -1471,9 +1492,10 @@ function ImgApiTestTool() {
       const next = imgTrimByBatch([histRec, ...historyRef.current.filter(r => !staleIds.has(r.id))])
       historyRef.current = next
       setHistory(next)
-      historyDbPutOne('imgtest', histRec)
+      const write = historyDbPutOne('imgtest', histRec)
         .then(() => staleIds.size ? historyDbDeleteMany('imgtest', [...staleIds]) : undefined)
-        .then(() => imgHistTrim())
+      if (opts.deferTrim) pendingHistWritesRef.current.push(write)
+      write.then(() => opts.deferTrim ? undefined : imgHistTrim())
         .catch(() => toastShow('历史记录写入失败'))
     } catch { /* 收尾失败不阻塞状态更新 */ }
     setCases([...casesRef.current])
@@ -1501,13 +1523,16 @@ function ImgApiTestTool() {
           continue
         }
         try {
-          await runCase(c)
+          await runCase(c, { deferTrim: true })
         } catch { /* 单个用例异常不中断批量 */ }
         await new Promise(r => setTimeout(r, 150))
       }
     } finally {
       setRunning(false)
       stopRef.current = false
+      const writes = pendingHistWritesRef.current
+      pendingHistWritesRef.current = []
+      Promise.allSettled(writes).then(() => imgHistTrim()).catch(() => { /* 下次写入时再裁 */ })
     }
     toastShow('批量测试结束')
   }
@@ -1635,7 +1660,7 @@ function ImgApiTestTool() {
       <div className="flex flex-col gap-2">
         {[
           ['响应头', JSON.stringify(r.respHeaders || {}, null, 2), false],
-          [r.responseBodyComplete === false ? '响应体（历史记录已省略 base64）' : '响应体', imgFormatResponseBody(r.rawSnippet || ''), false],
+          [r.responseBodyComplete === false ? '响应体（图片 base64 已省略）' : '响应体', imgFormatResponseBody(r.rawSnippet || ''), false],
           ['已发送的请求体（占位符已替换 · base64 已省略）', r.sentPreview || '', true],
         ].map(([label, body, isReq]) => (
           <details key={label as string} open={isReq ? opts.defaultOpenReq : undefined} className="rounded-xl overflow-hidden" style={{ border: '1px solid var(--border)' }}>

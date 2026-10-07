@@ -73,6 +73,8 @@ button, input, textarea { font: inherit; }
   background: radial-gradient(circle at 50% 50%, var(--sceneC), transparent 70%);
   animation: ambient-drift-c 32s ease-in-out infinite alternate;
 }
+/* 测试运行中暂停漂移（useAmbientPause）：背景不动，上层毛玻璃就不必逐帧重新模糊；paused 恢复时不跳位 */
+:root[data-tool-busy] .ambient-orb { animation-play-state: paused; }
 
 .ambient-ring {
   position: absolute;

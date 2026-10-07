@@ -1,6 +1,7 @@
-import React, { useState, useCallback, useRef, useEffect, Suspense } from 'react'
+import React, { useState, useCallback, useRef, useEffect, useMemo, Suspense } from 'react'
 import { createPortal } from 'react-dom'
 import { kvGet, kvSet, kvRemove } from '../shared/app-kv'
+import { useAmbientPause } from '../shared/use-ambient-pause'
 import { Btn, Label, Card, CustomInput, CustomSelect, CustomTextarea, SegmentedControl, SectionTitle } from '../shared/ui'
 import { highlightJson } from '../shared/json'
 import { decryptLlmApiKey, encryptLlmApiKey } from '../shared/api-key-crypto'
@@ -693,12 +694,60 @@ body{
 // ── 展示用小组件 ──
 
 function CacheCodeBlock({ title, children, maxH = 320 }: { title: string; children: string; maxH?: number }) {
+  const html = useMemo(() => highlightJson(children ?? '') || ' ', [children])
   return (
     <div className="min-w-0">
       <div className="mb-1.5 text-xs font-bold" style={{ color: 'var(--t3)' }}>{title}</div>
       <pre data-export-scroll className="overflow-auto rounded-xl p-3 font-mono text-[11px] leading-5" style={{ background: 'var(--code)', border: '1px solid var(--border)', color: 'var(--text)', maxHeight: maxH, fontFamily: CACHE_MONO }}>
-        <code dangerouslySetInnerHTML={{ __html: highlightJson(children ?? '') || ' ' }} />
+        <code dangerouslySetInnerHTML={{ __html: html }} />
       </pre>
+    </div>
+  )
+}
+
+// 日志行：log 入列后不再修改，memo 按引用比较；展开的内容 stringify 一次后缓存
+const CacheLogRow = React.memo(function CacheLogRow({ log, open, onToggle }: { log: CacheLog; open: boolean; onToggle: (id: string) => void }) {
+  const ok = log.status != null && log.status >= 200 && log.status < 300
+  const chip = (v: number | null) => (v == null ? '—' : String(v))
+  return (
+    <div style={{ borderBottom: '1px solid var(--border)' }}>
+      <div className="flex items-center gap-3 px-4 py-3 cursor-pointer select-none" onClick={() => onToggle(log.id)}
+        onPointerEnter={e => { (e.currentTarget as HTMLDivElement).style.background = 'var(--s1)' }}
+        onPointerLeave={e => { (e.currentTarget as HTMLDivElement).style.background = 'transparent' }}>
+        <span className="text-xs flex-shrink-0" style={{ color: 'var(--t3)' }}>{open ? '▾' : '▸'}</span>
+        <div className="min-w-0 flex-1">
+          <div className="flex items-center gap-2">
+            <span className="truncate text-sm font-semibold" style={{ color: 'var(--text)' }}>{log.label}</span>
+            <span className="rounded px-1.5 py-0.5 font-mono text-[10px] flex-shrink-0" style={{ background: ok ? 'var(--okBg)' : 'var(--errBg)', color: ok ? 'var(--ok)' : 'var(--err)', fontFamily: CACHE_MONO }}>{log.status ?? 'ERR'}</span>
+          </div>
+          <div className="mt-0.5 truncate font-mono text-[11px]" style={{ color: 'var(--t3)', fontFamily: CACHE_MONO }}>POST {log.url}</div>
+        </div>
+        <div className="flex items-center gap-2 flex-shrink-0">
+          <span className="font-mono text-[10px] px-1.5 py-0.5 rounded whitespace-nowrap" style={{ background: 'var(--s2)', color: 'var(--t2)', fontFamily: CACHE_MONO }}>
+            ↑{chip(log.usage.totalPrompt)} ↓{chip(log.usage.output)} 缓存读{chip(log.usage.cacheRead)} 写{chip(log.usage.cacheWrite)}
+          </span>
+          <span className="font-mono text-xs tabular-nums" style={{ color: 'var(--t2)', fontFamily: CACHE_MONO }}>{log.duration} ms</span>
+          <span className="text-[10px]" style={{ color: 'var(--t3)' }}>{new Date(log.time).toLocaleTimeString()}</span>
+        </div>
+      </div>
+      {open && <CacheLogDetail log={log} />}
+    </div>
+  )
+})
+
+function CacheLogDetail({ log }: { log: CacheLog }) {
+  const blocks = useMemo(() => ({
+    reqHeaders: cacheJsonPretty(log.requestHeaders),
+    reqBody: cacheJsonPretty(log.requestBody),
+    respBody: typeof log.responseBody === 'string' ? log.responseBody : cacheJsonPretty(log.responseBody),
+  }), [log])
+  return (
+    <div className="px-4 pb-5 lg:px-8" style={{ background: 'var(--s1)' }}>
+      <div className="grid gap-4 pt-4 xl:grid-cols-2">
+        <CacheCodeBlock title="请求头（密钥已脱敏）" children={blocks.reqHeaders} />
+        <CacheCodeBlock title="请求体（长前缀已截断）" children={blocks.reqBody} />
+        <CacheCodeBlock title="响应体" children={blocks.respBody} />
+      </div>
     </div>
   )
 }
@@ -1328,6 +1377,7 @@ function CacheHitTool() {
   // ── 运行状态 ──
   const [pane, setPane] = useState<'live' | 'logs' | 'report' | 'history' | 'channels'>('live')
   const [running, setRunning] = useState(false)
+  useAmbientPause(running)
   const [nameModal, setNameModal] = useState(false)
   const [testName, setTestName] = useState('')
   const [report, setReport] = useState<CacheReport | null>(null)
@@ -1337,6 +1387,7 @@ function CacheHitTool() {
   const [history, setHistory] = useState<CacheReport[]>([])
   const [logs, setLogs] = useState<CacheLog[]>([])
   const [openLogs, setOpenLogs] = useState<Record<string, boolean>>({})
+  const toggleLog = useCallback((id: string) => setOpenLogs(prev => ({ ...prev, [id]: !prev[id] })), [])
   const [liveResults, setLiveResults] = useState<Partial<Record<CacheCaseId, Partial<Record<CacheFormat, CacheProtocolResult>>>>>({})
   const [progress, setProgress] = useState<{ done: number; total: number; label: string }>({ done: 0, total: 0, label: '' })
   const [startErr, setStartErr] = useState('')
@@ -1715,44 +1766,6 @@ function CacheHitTool() {
     historyDbClear('cachehit').catch(() => {})
   }
 
-  const renderLogRow = (log: CacheLog) => {
-    const open = !!openLogs[log.id]
-    const ok = log.status != null && log.status >= 200 && log.status < 300
-    const chip = (v: number | null) => (v == null ? '—' : String(v))
-    return (
-      <div key={log.id} style={{ borderBottom: '1px solid var(--border)' }}>
-        <div className="flex items-center gap-3 px-4 py-3 cursor-pointer select-none" onClick={() => setOpenLogs(prev => ({ ...prev, [log.id]: !prev[log.id] }))}
-          onPointerEnter={e => { (e.currentTarget as HTMLDivElement).style.background = 'var(--s1)' }}
-          onPointerLeave={e => { (e.currentTarget as HTMLDivElement).style.background = 'transparent' }}>
-          <span className="text-xs flex-shrink-0" style={{ color: 'var(--t3)' }}>{open ? '▾' : '▸'}</span>
-          <div className="min-w-0 flex-1">
-            <div className="flex items-center gap-2">
-              <span className="truncate text-sm font-semibold" style={{ color: 'var(--text)' }}>{log.label}</span>
-              <span className="rounded px-1.5 py-0.5 font-mono text-[10px] flex-shrink-0" style={{ background: ok ? 'var(--okBg)' : 'var(--errBg)', color: ok ? 'var(--ok)' : 'var(--err)', fontFamily: CACHE_MONO }}>{log.status ?? 'ERR'}</span>
-            </div>
-            <div className="mt-0.5 truncate font-mono text-[11px]" style={{ color: 'var(--t3)', fontFamily: CACHE_MONO }}>POST {log.url}</div>
-          </div>
-          <div className="flex items-center gap-2 flex-shrink-0">
-            <span className="font-mono text-[10px] px-1.5 py-0.5 rounded whitespace-nowrap" style={{ background: 'var(--s2)', color: 'var(--t2)', fontFamily: CACHE_MONO }}>
-              ↑{chip(log.usage.totalPrompt)} ↓{chip(log.usage.output)} 缓存读{chip(log.usage.cacheRead)} 写{chip(log.usage.cacheWrite)}
-            </span>
-            <span className="font-mono text-xs tabular-nums" style={{ color: 'var(--t2)', fontFamily: CACHE_MONO }}>{log.duration} ms</span>
-            <span className="text-[10px]" style={{ color: 'var(--t3)' }}>{new Date(log.time).toLocaleTimeString()}</span>
-          </div>
-        </div>
-        {open && (
-          <div className="px-4 pb-5 lg:px-8" style={{ background: 'var(--s1)' }}>
-            <div className="grid gap-4 pt-4 xl:grid-cols-2">
-              <CacheCodeBlock title="请求头（密钥已脱敏）" children={cacheJsonPretty(log.requestHeaders)} />
-              <CacheCodeBlock title="请求体（长前缀已截断）" children={cacheJsonPretty(log.requestBody)} />
-              <CacheCodeBlock title="响应体" children={typeof log.responseBody === 'string' ? log.responseBody : cacheJsonPretty(log.responseBody)} />
-            </div>
-          </div>
-        )}
-      </div>
-    )
-  }
-
   return (
     <div className="flex flex-col h-full">
       {/* 顶部栏 */}
@@ -1891,7 +1904,7 @@ function CacheHitTool() {
                 {logs.length === 0 ? (
                   <div className="py-20 text-center text-sm" style={{ color: 'var(--t3)' }}>没有请求记录</div>
                 ) : (
-                  [...logs].reverse().map(renderLogRow)
+                  [...logs].reverse().map(log => <CacheLogRow key={log.id} log={log} open={!!openLogs[log.id]} onToggle={toggleLog} />)
                 )}
               </div>
             )}

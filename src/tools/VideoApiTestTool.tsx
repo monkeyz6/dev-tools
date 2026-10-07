@@ -1,4 +1,5 @@
 import { kvGet, kvSet, kvRemove } from '../shared/app-kv'
+import { useAmbientPause } from '../shared/use-ambient-pause'
 import React, { useState, useCallback, useRef, useEffect, useMemo } from 'react'
 import { Btn, Label, Card, Badge, CustomInput, CustomSelect, EditableSelect, CustomTextarea, Toggle, SegmentedControl } from '../shared/ui'
 import { historyDbGetAll, historyDbPutOne, historyDbDeleteOne, historyDbDeleteMany, historyDbClear } from '../shared/history-db'
@@ -928,6 +929,8 @@ function VideoApiTestTool() {
   const requeryCancelRef = useRef<Set<string>>(new Set())
   const reprobeTriedRef = useRef<Set<string>>(new Set())
   const [requeryingIds, setRequeryingIds] = useState<Set<string>>(new Set())
+  // 单条「运行此用例 / 逐个」不经 runList、不设 running，用例自身的 running 状态也算
+  useAmbientPause(running || requeryingIds.size > 0 || cases.some(c => c.status === 'running'))
   const cancelRequery = (id: string) => { requeryCancelRef.current.add(id); toastShow('将在本次查询返回后停止') }
 
   useEffect(() => { channelsRef.current = channels }, [channels])

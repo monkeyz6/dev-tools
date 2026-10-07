@@ -1,4 +1,5 @@
 import { kvGet, kvSet, kvRemove } from '../shared/app-kv'
+import { useAmbientPause } from '../shared/use-ambient-pause'
 import React, { useState, useCallback, useRef, useEffect, useLayoutEffect, useMemo, useDeferredValue } from 'react'
 import { createPortal } from 'react-dom'
 import { Btn, Label, Card, Badge, CustomInput, CustomSelect, SearchableSelect, CustomTextarea, Toggle, SegmentedControl, SectionTitle, CopyBtn } from '../shared/ui'
@@ -80,7 +81,8 @@ interface ProbeLog {
   responseHeaders: Record<string, string>
   responseBody: any
   sse: ProbeSseEvent[]
-  chunks: string[]
+  // 只记网络块数：拼接后的原始流就是流式请求的 responseBody（字符串），不再另存一份 chunks
+  chunkCount: number
   usage: ProbeUsage
   requestId: string | null
 }
@@ -233,7 +235,6 @@ const probeNowName = (): string => {
   return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}`
 }
 const probeSafeName = (v: string): string => v.replace(/[\\/:*?"<>|\s]+/g, '_')
-const probeEscapeHtml = (v: string): string => String(v).replace(/[&<>'"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', "'": '&#39;', '"': '&quot;' }[c] as string))
 const probeJoinUrl = (base: string, path: string): string => {
   const clean = base.trim().replace(/\/+$/, '')
   return /\/v1$/i.test(clean) && path.startsWith('/v1/') ? clean + path.slice(3) : clean + path
@@ -317,7 +318,7 @@ const probeResetLogResponse = (log: ProbeLog) => {
   log.responseHeaders = {}
   log.responseBody = null
   log.sse = []
-  log.chunks = []
+  log.chunkCount = 0
   log.usage = probeEmptyUsage()
   log.requestId = null
 }
@@ -451,9 +452,12 @@ async function loadProbeHistory(): Promise<ProbeReport[]> {
   const list = await historyDbGetAll<ProbeReport>('modelprobe')
   return probeHistoryNewestFirst(list)
 }
-async function saveProbeHistory(rep: ProbeReport): Promise<ProbeReport[]> {
+// 写一条后不再整库 getAll：批量期间未裁剪的 store 会越读越大，这里直接在内存列表里合并
+async function saveProbeHistory(rep: ProbeReport): Promise<void> {
   await historyDbPutOne('modelprobe', rep)
-  return loadProbeHistory()
+}
+function mergeProbeHistory(list: ProbeReport[], rep: ProbeReport): ProbeReport[] {
+  return probeHistoryNewestFirst([rep, ...list.filter(item => item.id !== rep.id)])
 }
 // 一批多模型会连续写入。写一条就裁会把本批更早的模型删掉，所以裁剪留到整批结束。
 async function trimProbeHistory(): Promise<ProbeReport[]> {
@@ -516,16 +520,106 @@ function ProbeCopyIconBtn({ text }: { text: string }) {
 
 function ProbeCodeBlock({ title, children, maxH = 320 }: { title: string; children: string; maxH?: number }) {
   const text = children ?? ''
+  const html = useMemo(() => highlightJson(text) || ' ', [text])
   return (
     <div className="min-w-0">
       <div className="mb-1.5 text-xs font-bold" style={{ color: 'var(--t3)' }}>{title}</div>
       <div className="relative min-w-0">
         <ProbeCopyIconBtn text={text} />
         <pre className="overflow-auto rounded-xl p-3 pr-10 font-mono text-[11px] leading-5" style={{ background: 'var(--code)', border: '1px solid var(--border)', color: 'var(--text)', maxHeight: maxH, fontFamily: PROBE_MONO }}>
-          <code dangerouslySetInnerHTML={{ __html: highlightJson(text) || ' ' }} />
+          <code dangerouslySetInnerHTML={{ __html: html }} />
         </pre>
       </div>
     </div>
+  )
+}
+
+// 日志行：log 入列后不再修改，memo 按引用比较；运行中每返回一个请求整页重渲染时，已有行直接跳过
+const ProbeLogRow = React.memo(function ProbeLogRow({ log, open, onToggle }: { log: ProbeLog; open: boolean; onToggle: (id: string) => void }) {
+  const ok = log.status != null && log.status >= 200 && log.status < 300
+  return (
+    <div style={{ borderBottom: '1px solid var(--border)' }}>
+      <div className="flex items-center gap-3 px-4 py-3 cursor-pointer select-none" onClick={() => onToggle(log.id)}
+        onPointerEnter={e => { (e.currentTarget as HTMLDivElement).style.background = 'var(--s1)' }}
+        onPointerLeave={e => { (e.currentTarget as HTMLDivElement).style.background = 'transparent' }}>
+        <span className="text-xs flex-shrink-0" style={{ color: 'var(--t3)' }}>{open ? '▾' : '▸'}</span>
+        <div className="min-w-0 flex-1">
+          <div className="flex items-center gap-2">
+            <span className="truncate text-sm font-semibold" style={{ color: 'var(--text)' }}>{log.label}</span>
+            <span className="rounded px-1.5 py-0.5 font-mono text-[10px] flex-shrink-0" style={{ background: ok ? 'var(--okBg)' : 'var(--errBg)', color: ok ? 'var(--ok)' : 'var(--err)', fontFamily: PROBE_MONO }}>{log.status ?? 'ERR'}</span>
+          </div>
+          <div className="mt-0.5 truncate font-mono text-[11px]" style={{ color: 'var(--t3)', fontFamily: PROBE_MONO }}>{log.method} {log.url}</div>
+        </div>
+        <div className="flex items-center gap-2 flex-shrink-0">
+          <ProbeUsageChip usage={log.usage} />
+          {log.requestId && <ProbeCopyId value={log.requestId} />}
+          <span className="font-mono text-xs tabular-nums" style={{ color: 'var(--t2)', fontFamily: PROBE_MONO }}>{log.duration} ms</span>
+          <span className="text-[10px]" style={{ color: 'var(--t3)' }}>{new Date(log.time).toLocaleTimeString()}</span>
+        </div>
+      </div>
+      {open && <ProbeLogDetail log={log} />}
+    </div>
+  )
+})
+
+function ProbeLogDetail({ log }: { log: ProbeLog }) {
+  const blocks = useMemo(() => ({
+    reqHeaders: probeJsonPretty(log.requestHeaders),
+    reqBody: probeJsonPretty(log.requestBody),
+    respHeaders: probeJsonPretty(log.responseHeaders),
+    respBody: typeof log.responseBody === 'string' ? log.responseBody : probeJsonPretty(log.responseBody),
+  }), [log])
+  return (
+    <div className="px-4 pb-5 lg:px-8" style={{ background: 'var(--s1)' }}>
+      <div className="grid gap-4 pt-4 xl:grid-cols-2">
+        <ProbeCodeBlock title="请求头（密钥已脱敏）" children={blocks.reqHeaders} />
+        <ProbeCodeBlock title="请求体" children={blocks.reqBody} />
+        <ProbeCodeBlock title="响应头" children={blocks.respHeaders} />
+        <ProbeCodeBlock title="响应体" children={blocks.respBody} />
+      </div>
+      {log.sse.length > 0 && (
+        <div className="mt-4 pt-4" style={{ borderTop: '1px solid var(--border)' }}>
+          <div className="text-sm font-bold mb-2" style={{ color: 'var(--text)' }}>
+            SSE 事件 <span className="font-normal" style={{ color: 'var(--t3)' }}>{log.sse.length} 条事件 · {log.chunkCount} 个网络数据块</span>
+          </div>
+          <div className="space-y-1.5">
+            {log.sse.map(ev => <ProbeSseEventRow key={ev.index} ev={ev} />)}
+          </div>
+          <ProbeLazyDetails className="mt-3" summaryClassName="cursor-pointer text-xs font-semibold" summaryStyle={{ color: 'var(--accent)' }} summary="查看拼接后的原始流">
+            {() => (
+              <pre className="mt-2 overflow-auto max-h-80 rounded-xl p-3 font-mono text-[11px] leading-5" style={{ background: 'var(--code)', border: '1px solid var(--border)', color: 'var(--text)', fontFamily: PROBE_MONO }}>{typeof log.responseBody === 'string' ? log.responseBody : ''}</pre>
+            )}
+          </ProbeLazyDetails>
+        </div>
+      )}
+    </div>
+  )
+}
+
+// <details> 收起时 React 仍会生成子树：一个流式请求几百个事件，每个都高亮一遍 JSON。改成打开后才挂载内容
+function ProbeLazyDetails({ summary, children, className, style, summaryClassName, summaryStyle }: {
+  summary: React.ReactNode; children: () => React.ReactNode; className?: string; style?: React.CSSProperties; summaryClassName?: string; summaryStyle?: React.CSSProperties
+}) {
+  const [open, setOpen] = useState(false)
+  return (
+    <details className={className} style={style} onToggle={e => setOpen((e.currentTarget as HTMLDetailsElement).open)}>
+      <summary className={summaryClassName} style={summaryStyle}>{summary}</summary>
+      {open && children()}
+    </details>
+  )
+}
+
+function ProbeSseEventRow({ ev }: { ev: ProbeSseEvent }) {
+  return (
+    <ProbeLazyDetails className="rounded-lg overflow-hidden" style={{ border: '1px solid var(--border)', background: 'var(--bg)' }}
+      summaryClassName="cursor-pointer px-3 py-2 font-mono text-xs list-none" summaryStyle={{ color: 'var(--text)', fontFamily: PROBE_MONO }}
+      summary={<><span style={{ color: 'var(--t3)' }}>#{ev.index}</span> {ev.event}</>}>
+      {() => (
+        <pre className="overflow-auto max-h-48 p-3 font-mono text-[11px] leading-5" style={{ borderTop: '1px solid var(--border)', color: 'var(--text)', fontFamily: PROBE_MONO }}>
+          {ev.json ? <code dangerouslySetInnerHTML={{ __html: highlightJson(probeJsonPretty(ev.json)) }} /> : ev.data}
+        </pre>
+      )}
+    </ProbeLazyDetails>
   )
 }
 
@@ -1349,7 +1443,7 @@ const ProbeChannelsPane = React.memo(function ProbeChannelsPane({
 })
 
 function ModelProbeTool() {
-  const cfg0 = loadProbeCfg()
+  const [cfg0] = useState(loadProbeCfg)
   const [model, setModel] = useState(cfg0.model ?? '')
   const [randomString, setRandomString] = useState(cfg0.randomString ?? probeMakeRandom())
   const [tokenRuns, setTokenRuns] = useState(cfg0.tokenRuns ?? '3')
@@ -1478,6 +1572,7 @@ function ModelProbeTool() {
   const [pane, setPane] = useState<'live' | 'logs' | 'report' | 'history' | 'channels'>('live')
   const [running, setRunning] = useState(false)
   const [retryingKey, setRetryingKey] = useState<string | null>(null)
+  useAmbientPause(running || retryingKey !== null)
   const retryingKeyRef = useRef<string | null>(null)
   const [retryNotice, setRetryNotice] = useState('')
   const [nameModal, setNameModal] = useState(false)
@@ -1494,6 +1589,7 @@ function ModelProbeTool() {
   const [logs, setLogs] = useState<ProbeLog[]>([])
   const [logFilter, setLogFilter] = useState('all')
   const [openLogs, setOpenLogs] = useState<Record<string, boolean>>({})
+  const toggleLog = useCallback((id: string) => setOpenLogs(prev => ({ ...prev, [id]: !prev[id] })), [])
   const [statuses, setStatuses] = useState<Record<string, { status: ProbeStatus | 'pending' | 'running'; detail: string }>>({})
   const [progress, setProgress] = useState<{ done: number; total: number; label: string }>({ done: 0, total: 0, label: '' })
   const [startErr, setStartErr] = useState('')
@@ -1535,7 +1631,7 @@ function ModelProbeTool() {
     url: url ?? (cfgRef.current?.urlOf[format] ?? ''),
     method: 'POST', status: null, statusText: '', duration: 0, time: new Date().toISOString(),
     requestHeaders: {}, requestBody: null, responseHeaders: {}, responseBody: null,
-    sse: [], chunks: [], usage: probeEmptyUsage(), requestId: null,
+    sse: [], chunkCount: 0, usage: probeEmptyUsage(), requestId: null,
   })
   const cfgRef = useRef<ProbeCfg | null>(null)
 
@@ -1646,7 +1742,7 @@ function ModelProbeTool() {
       const { done, value } = await reader.read()
       if (done) break
       const chunk = decoder.decode(value, { stream: true })
-      log.chunks.push(chunk)
+      log.chunkCount++
       raw += chunk
       buffer += chunk
       const blocks = buffer.split(/\r?\n\r?\n/)
@@ -2598,7 +2694,9 @@ function ModelProbeTool() {
       })
       setMatrixReports(null)
       setReport(rep)
-      setHistory(await saveProbeHistory({ ...rep, logs: [] }))
+      const saved = { ...rep, logs: [] }
+      await saveProbeHistory(saved)
+      setHistory(prev => mergeProbeHistory(prev, saved))
       setProgress({ done: total, total, label: `${probeProgressTagRef.current} · ${stopRef.current ? '已停止' : '完成'}` })
       return rep.id
     }
@@ -2714,7 +2812,9 @@ function ModelProbeTool() {
         verdict,
       })
       if (reportRef.current?.id === source.id) setReport(next)
-      setHistory(await saveProbeHistory({ ...next, logs: [] }))
+      const saved = { ...next, logs: [] }
+      await saveProbeHistory(saved)
+      setHistory(prev => mergeProbeHistory(prev, saved))
     } catch (err: any) {
       const message = err?.message || '重试没有完成。'
       setRetryNotice(message)
@@ -2910,69 +3010,9 @@ function ModelProbeTool() {
     return statuses[t.id] ?? { status: 'pending', detail: '' }
   }
 
-  const renderLogRow = (log: ProbeLog) => {
-    const open = !!openLogs[log.id]
-    const ok = log.status != null && log.status >= 200 && log.status < 300
-    const fmt = (v: number | null) => (v == null ? '—' : String(v))
-    return (
-      <div key={log.id} style={{ borderBottom: '1px solid var(--border)' }}>
-        <div className="flex items-center gap-3 px-4 py-3 cursor-pointer select-none" onClick={() => setOpenLogs(prev => ({ ...prev, [log.id]: !prev[log.id] }))}
-          onPointerEnter={e => { (e.currentTarget as HTMLDivElement).style.background = 'var(--s1)' }}
-          onPointerLeave={e => { (e.currentTarget as HTMLDivElement).style.background = 'transparent' }}>
-          <span className="text-xs flex-shrink-0" style={{ color: 'var(--t3)' }}>{open ? '▾' : '▸'}</span>
-          <div className="min-w-0 flex-1">
-            <div className="flex items-center gap-2">
-              <span className="truncate text-sm font-semibold" style={{ color: 'var(--text)' }}>{log.label}</span>
-              <span className="rounded px-1.5 py-0.5 font-mono text-[10px] flex-shrink-0" style={{ background: ok ? 'var(--okBg)' : 'var(--errBg)', color: ok ? 'var(--ok)' : 'var(--err)', fontFamily: PROBE_MONO }}>{log.status ?? 'ERR'}</span>
-            </div>
-            <div className="mt-0.5 truncate font-mono text-[11px]" style={{ color: 'var(--t3)', fontFamily: PROBE_MONO }}>{log.method} {log.url}</div>
-          </div>
-          <div className="flex items-center gap-2 flex-shrink-0">
-            <ProbeUsageChip usage={log.usage} />
-            {log.requestId && <ProbeCopyId value={log.requestId} />}
-            <span className="font-mono text-xs tabular-nums" style={{ color: 'var(--t2)', fontFamily: PROBE_MONO }}>{log.duration} ms</span>
-            <span className="text-[10px]" style={{ color: 'var(--t3)' }}>{new Date(log.time).toLocaleTimeString()}</span>
-          </div>
-        </div>
-        {open && (
-          <div className="px-4 pb-5 lg:px-8" style={{ background: 'var(--s1)' }}>
-            <div className="grid gap-4 pt-4 xl:grid-cols-2">
-              <ProbeCodeBlock title="请求头（密钥已脱敏）" children={probeJsonPretty(log.requestHeaders)} />
-              <ProbeCodeBlock title="请求体" children={probeJsonPretty(log.requestBody)} />
-              <ProbeCodeBlock title="响应头" children={probeJsonPretty(log.responseHeaders)} />
-              <ProbeCodeBlock title="响应体" children={typeof log.responseBody === 'string' ? log.responseBody : probeJsonPretty(log.responseBody)} />
-            </div>
-            {log.sse.length > 0 && (
-              <div className="mt-4 pt-4" style={{ borderTop: '1px solid var(--border)' }}>
-                <div className="text-sm font-bold mb-2" style={{ color: 'var(--text)' }}>
-                  SSE 事件 <span className="font-normal" style={{ color: 'var(--t3)' }}>{log.sse.length} 条事件 · {log.chunks.length} 个网络数据块</span>
-                </div>
-                <div className="space-y-1.5">
-                  {log.sse.map(ev => (
-                    <details key={ev.index} className="rounded-lg overflow-hidden" style={{ border: '1px solid var(--border)', background: 'var(--bg)' }}>
-                      <summary className="cursor-pointer px-3 py-2 font-mono text-xs list-none" style={{ color: 'var(--text)', fontFamily: PROBE_MONO }}>
-                        <span style={{ color: 'var(--t3)' }}>#{ev.index}</span> {ev.event}
-                      </summary>
-                      <pre className="overflow-auto max-h-48 p-3 font-mono text-[11px] leading-5" style={{ borderTop: '1px solid var(--border)', color: 'var(--text)', fontFamily: PROBE_MONO }}>
-                        {ev.json ? <code dangerouslySetInnerHTML={{ __html: highlightJson(probeJsonPretty(ev.json)) }} /> : ev.data}
-                      </pre>
-                    </details>
-                  ))}
-                </div>
-                <details className="mt-3">
-                  <summary className="cursor-pointer text-xs font-semibold" style={{ color: 'var(--accent)' }}>查看拼接后的原始流</summary>
-                  <pre className="mt-2 overflow-auto max-h-80 rounded-xl p-3 font-mono text-[11px] leading-5" style={{ background: 'var(--code)', border: '1px solid var(--border)', color: 'var(--text)', fontFamily: PROBE_MONO }}>{probeEscapeHtml(log.chunks.join(''))}</pre>
-                </details>
-              </div>
-            )}
-          </div>
-        )}
-      </div>
-    )
-  }
-
   const filteredLogs = logFilter === 'all' ? logs : logs.filter(l => l.resultKey === logFilter || l.resultKey.startsWith(logFilter + '@'))
   const busy = running || retryingKey !== null
+  const historySummaries = useMemo(() => new Map(history.map(h => [h.id, probeSanitizeReport(h).summary])), [history])
   const matrixOpen = pane === 'report' && !!matrixReports && matrixReports.length > 1
 
   const groups = [...new Set(visibleTests.map(t => t.group))]
@@ -3107,7 +3147,7 @@ function ModelProbeTool() {
                 {filteredLogs.length === 0 ? (
                   <div className="py-20 text-center text-sm" style={{ color: 'var(--t3)' }}>没有匹配的请求记录</div>
                 ) : (
-                  [...filteredLogs].reverse().map(renderLogRow)
+                  [...filteredLogs].reverse().map(log => <ProbeLogRow key={log.id} log={log} open={!!openLogs[log.id]} onToggle={toggleLog} />)
                 )}
               </div>
             )}
@@ -3183,7 +3223,7 @@ function ModelProbeTool() {
                 ) : (
                   <div className="space-y-3">
                     {history.map(h => {
-                      const histSummary = probeSanitizeReport(h).summary
+                      const histSummary = historySummaries.get(h.id) ?? probeSanitizeReport(h).summary
                       return (
                         <div key={h.id} data-testid="probe-history-row" className="surface-card rounded-2xl p-4 flex flex-col gap-3 sm:flex-row sm:items-center sm:gap-4" style={{ background: 'var(--bg)', border: '1px solid var(--border)', boxShadow: 'var(--shadow)' }}>
                           <input

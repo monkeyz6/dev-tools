@@ -1,4 +1,5 @@
 import { kvGet, kvSet, kvRemove } from '../shared/app-kv'
+import { useAmbientPause } from '../shared/use-ambient-pause'
 import React, { Suspense, useState, useCallback, useRef, useEffect, useLayoutEffect, useMemo, useDeferredValue  } from 'react'
 import { DndContext, PointerSensor, useSensor, useSensors, closestCenter, type DragEndEvent } from '@dnd-kit/core'
 import { SortableContext, useSortable, verticalListSortingStrategy, arrayMove } from '@dnd-kit/sortable'
@@ -660,6 +661,12 @@ async function doLlmRequest(cfg: LlmBatchCfg, task: BatchTask): Promise<BatchRes
       const decoder = new TextDecoder()
       let buf = ''
       let hadParseError = false
+      const feedLine = (line: string) => {
+        if (!line.startsWith('data:')) return
+        const payload = line.slice(5).trim()
+        if (!payload || payload === '[DONE]') return
+        try { ex.onData(JSON.parse(payload)) } catch { hadParseError = true }
+      }
       for (;;) {
         const { done, value } = await reader.read()
         if (tFirst === null) tFirst = Date.now() - start
@@ -667,13 +674,11 @@ async function doLlmRequest(cfg: LlmBatchCfg, task: BatchTask): Promise<BatchRes
         buf += decoder.decode(value, { stream: true })
         const lines = buf.split(/\r?\n/)
         buf = lines.pop() ?? ''
-        for (const line of lines) {
-          if (!line.startsWith('data:')) continue
-          const payload = line.slice(5).trim()
-          if (!payload || payload === '[DONE]') continue
-          try { ex.onData(JSON.parse(payload)) } catch { hadParseError = true }
-        }
+        for (const line of lines) feedLine(line)
       }
+      // 冲刷解码器残余字节，并处理没有换行结尾的最后一行（末尾的 usage 常在这里）
+      buf += decoder.decode()
+      for (const line of buf.split(/\r?\n/)) feedLine(line)
       const r = ex.result()
       rec.status = 'ok'
       rec.httpStatus = res.status
@@ -1953,6 +1958,32 @@ const LlmConfigPane = React.memo(function LlmConfigPane({
   )
 })
 
+// 实时列表行：不用 surface-card（backdrop-filter + translateZ 独立成层），上千行就是上千个模糊合成层；
+// 结果对象完成后不再修改，memo 让新插入一行时旧行不必重渲染
+const LlmLiveRow = React.memo(function LlmLiveRow({ r }: { r: BatchResult }) {
+  return (
+    <div className="flex flex-wrap items-center gap-x-2.5 gap-y-1 rounded-xl px-3.5 py-2.5 text-xs"
+      style={{ background: 'var(--surface)', border: `1px solid ${r.status === 'error' ? 'var(--err)' : 'var(--border)'}`, boxShadow: 'var(--shadow)' }}>
+      <span className="font-bold" style={{ color: 'var(--t2)' }}>#{r.seq}</span>
+      <span className="font-mono min-w-0 max-w-[200px] truncate" style={{ color: 'var(--accent)' }} title={r.model}>{r.model}</span>
+      <Badge color={r.status === 'ok' ? 'ok' : 'err'}>{r.status === 'ok' ? '✓ 成功' : '✗ 失败'}</Badge>
+      {r.httpStatus != null && <Badge>{r.httpStatus}</Badge>}
+      {r.returnedModel != null && (
+        <span className="inline-flex items-center gap-1 min-w-0">
+          <span style={{ color: 'var(--t3)' }}>返回</span>
+          <TruncatedCell text={r.returnedModel} maxWidth={160} color={r.returnedModel === r.model ? 'var(--ok)' : 'var(--err)'} />
+          {r.returnedModel !== r.model && <span className="flex-shrink-0">≠</span>}
+        </span>
+      )}
+      {r.tFirst != null && <span style={{ color: 'var(--t2)' }}>首字 {r.tFirst}ms</span>}
+      {r.elapsed != null && <span style={{ color: 'var(--t3)' }}>总 {(r.elapsed / 1000).toFixed(2)}s</span>}
+      {r.inputTokens != null && <span style={{ color: 'var(--t3)' }}>in: {r.inputTokens}</span>}
+      {r.outputTokens != null && <span style={{ color: 'var(--t3)' }}>out: {r.outputTokens}</span>}
+      {r.error && <span style={{ color: 'var(--err)' }}>{r.error.slice(0, 160)}</span>}
+    </div>
+  )
+})
+
 const LlmLivePane = React.memo(function LlmLivePane({ reuseNotice, results, liveLog, liveModels, liveN }: {
   reuseNotice: string; results: BatchResult[]; liveLog: BatchResult[]; liveModels: string[]; liveN: number
 }) {
@@ -1963,6 +1994,17 @@ const LlmLivePane = React.memo(function LlmLivePane({ reuseNotice, results, live
     errCount: results.filter(r => r.status === 'error').length,
     statusCodes: Array.from(new Set(results.map(r => r.httpStatus).filter((v): v is number => v != null))).sort((a, b) => a - b),
   }), [results])
+  const perModel = useMemo(() => {
+    const map = new Map<string, { ok: number; fail: number }>()
+    for (const r of results) {
+      if (r.status !== 'ok' && r.status !== 'error') continue
+      const stat = map.get(r.model) ?? { ok: 0, fail: 0 }
+      if (r.status === 'ok') stat.ok++
+      else stat.fail++
+      map.set(r.model, stat)
+    }
+    return map
+  }, [results])
   const pct = total ? Math.round(completed / total * 100) : 0
 
   return (
@@ -1986,10 +2028,8 @@ const LlmLivePane = React.memo(function LlmLivePane({ reuseNotice, results, live
           </div>
           <div className="flex flex-col gap-2.5 pt-1">
             {liveModels.map(m => {
-              const rs = results.filter(r => r.model === m)
-              const doneM = rs.filter(r => r.status === 'ok' || r.status === 'error').length
-              const okM = rs.filter(r => r.status === 'ok').length
-              const failM = rs.filter(r => r.status === 'error').length
+              const { ok: okM, fail: failM } = perModel.get(m) ?? { ok: 0, fail: 0 }
+              const doneM = okM + failM
               const pctM = liveN ? Math.round(doneM / liveN * 100) : 0
               return (
                 <div key={m}>
@@ -2014,27 +2054,7 @@ const LlmLivePane = React.memo(function LlmLivePane({ reuseNotice, results, live
             <div className="text-4xl mb-3 opacity-60">⊞</div>
             <p className="text-sm">配置参数后点击「开始批量请求」</p>
           </div>
-        ) : liveLog.map(r => (
-          <div key={r.seq} className="surface-card flex flex-wrap items-center gap-x-2.5 gap-y-1 rounded-xl px-3.5 py-2.5 text-xs"
-            style={{ background: 'var(--bg)', border: `1px solid ${r.status === 'error' ? 'var(--err)' : 'var(--border)'}`, boxShadow: 'var(--shadow)' }}>
-            <span className="font-bold" style={{ color: 'var(--t2)' }}>#{r.seq}</span>
-            <span className="font-mono min-w-0 max-w-[200px] truncate" style={{ color: 'var(--accent)' }} title={r.model}>{r.model}</span>
-            <Badge color={r.status === 'ok' ? 'ok' : 'err'}>{r.status === 'ok' ? '✓ 成功' : '✗ 失败'}</Badge>
-            {r.httpStatus != null && <Badge>{r.httpStatus}</Badge>}
-            {r.returnedModel != null && (
-              <span className="inline-flex items-center gap-1 min-w-0">
-                <span style={{ color: 'var(--t3)' }}>返回</span>
-                <TruncatedCell text={r.returnedModel} maxWidth={160} color={r.returnedModel === r.model ? 'var(--ok)' : 'var(--err)'} />
-                {r.returnedModel !== r.model && <span className="flex-shrink-0">≠</span>}
-              </span>
-            )}
-            {r.tFirst != null && <span style={{ color: 'var(--t2)' }}>首字 {r.tFirst}ms</span>}
-            {r.elapsed != null && <span style={{ color: 'var(--t3)' }}>总 {(r.elapsed / 1000).toFixed(2)}s</span>}
-            {r.inputTokens != null && <span style={{ color: 'var(--t3)' }}>in: {r.inputTokens}</span>}
-            {r.outputTokens != null && <span style={{ color: 'var(--t3)' }}>out: {r.outputTokens}</span>}
-            {r.error && <span style={{ color: 'var(--err)' }}>{r.error.slice(0, 160)}</span>}
-          </div>
-        ))}
+        ) : liveLog.map(r => <LlmLiveRow key={r.seq} r={r} />)}
       </div>
     </div>
   )
@@ -2301,7 +2321,9 @@ function LlmBatchTool() {
   }, [prompts, selectedPromptId])
 
   const selectedPrompt = prompts.find(p => p.id === selectedPromptId) ?? null
-  const promptBodyErr = selectedPrompt ? validateLlmBodyJson(selectedPrompt.body) : ''
+  // 提示词可能带长上下文：每次渲染都完整 JSON.parse 一遍不划算，只在请求体变化时校验
+  const selectedPromptBody = selectedPrompt?.body
+  const promptBodyErr = useMemo(() => selectedPromptBody != null ? validateLlmBodyJson(selectedPromptBody) : '', [selectedPromptBody])
   const activeChannel = channels.find(c => c.id === activeChId) ?? null
 
   // 根据当前 API 类型自动识别提示词请求体协议并按需转换：级联在 promptBodyErr 之后
@@ -2404,6 +2426,7 @@ function LlmBatchTool() {
   // ── 运行状态 ──
   const [pane, setPane] = useState<'live' | 'report' | 'history' | 'prompts' | 'compare' | 'channels'>('live')
   const [running, setRunning] = useState(false)
+  useAmbientPause(running)
   const [stopping, setStopping] = useState(false)
   const [startErr, setStartErr] = useState('')
   const [results, setResults] = useState<BatchResult[]>([])
