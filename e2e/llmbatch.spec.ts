@@ -1,6 +1,6 @@
 import { readFileSync } from 'node:fs'
 import { test, expect } from '@playwright/test'
-import { goto, inputByLabel, fieldOf, readHistoryStore, readKv, channelCard } from './helpers'
+import { goto, inputByLabel, fieldOf, readHistoryStore, readKv, channelCard, selectOption, selectByLabel } from './helpers'
 
 test.beforeEach(async ({ page }) => {
   // 仅在标签页首次加载时清空 localStorage；reload 不再清，便于测试历史报告持久化
@@ -614,5 +614,23 @@ test.describe('LLM 批量测试', () => {
     expect(result.inputTokens).toBeNull()
     expect(result.outputTokens).toBeNull()
     expect(result.tokenNote).toContain('流式响应未包含 usage 数据')
+  })
+
+  test('Responses 提示词用字符串 content 时切到 Anthropic 不崩溃', async ({ page }) => {
+    // input 条目写成 { role, content: '字符串' } 是 Responses 官方允许的简写，早期转换假定 content 是数组，
+    // 在渲染期抛 TypeError，整个工具落到「载入失败」错误边界
+    await goto(page, /LLM 批量测试/)
+    await page.evaluate(async () => {
+      const { kvSet } = await import('/src/shared/app-kv.ts')
+      kvSet('llmbatch-prompts', JSON.stringify([{ id: 'p1', title: '字符串 content', body: JSON.stringify({
+        model: '{{model}}', input: [{ role: 'developer', content: 'be brief' }, { role: 'user', content: 'hi' }], max_output_tokens: 50,
+      }) }]))
+    })
+    await page.waitForTimeout(500)
+    await page.reload()
+    await selectOption(page, 'API 类型', 'OpenAI Responses API')
+    await selectOption(page, 'API 类型', 'Anthropic Messages API')
+    await expect(page.getByText('载入失败')).toHaveCount(0)
+    await expect(selectByLabel(page, 'API 类型')).toHaveText(/Anthropic Messages API/)
   })
 })

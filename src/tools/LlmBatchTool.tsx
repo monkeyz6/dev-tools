@@ -494,7 +494,13 @@ function convertPromptBodyForApiType(bodyText: string, targetApiType: ApiType): 
   }
 
   const flatText = JSON.stringify(flattenForConversion(srcApiType, obj))
-  const convertedSentinelText = convertFormat(flatText, API_TYPE_TO_AI_FMT[srcApiType], API_TYPE_TO_AI_FMT[targetApiType], false)
+  // 本函数在渲染期（useMemo）调用：转换抛错若不拦住会冒到错误边界，整个工具变成「载入失败」
+  let convertedSentinelText: string
+  try {
+    convertedSentinelText = convertFormat(flatText, API_TYPE_TO_AI_FMT[srcApiType], API_TYPE_TO_AI_FMT[targetApiType], false)
+  } catch (e) {
+    return { ok: false, error: `把「${LLM_API_LABELS[srcApiType]}」请求体转换为「${LLM_API_LABELS[targetApiType]}」时出错：${(e as Error)?.message || String(e)}。请手动调整请求体，或切换回「${LLM_API_LABELS[srcApiType]}」。` }
+  }
   if (convertedSentinelText.startsWith('// JSON 解析失败')) {
     return { ok: false, error: '内部转换异常，请检查请求体格式。' } // 防御性分支，正常不会触发
   }

@@ -20,8 +20,18 @@ export function convertFormat(raw: string, from: AiFmt, to: AiFmt, addCache = fa
     const input = obj.input
     let messages: { role: string; content: string }[] = []
     if (typeof input === 'string') { messages = [{ role: 'user', content: input }] }
-    else if (Array.isArray(input)) { messages = (input as { role: string; content: { text: string }[] }[]).map(m => ({ role: m.role, content: m.content?.map((c: { text: string }) => c.text).join('') || '' })) }
-    normalized = { system: obj.instructions as string, messages, model: obj.model as string, maxTokens: (obj.max_output_tokens as number) || 1024 }
+    const systemParts: string[] = typeof obj.instructions === 'string' && obj.instructions ? [obj.instructions] : []
+    if (Array.isArray(input)) {
+      // content 既可以是 input_text 块数组，也可以是字符串简写 { role, content: "..." }
+      const textOf = (c: unknown) => typeof c === 'string' ? c
+        : Array.isArray(c) ? c.map(b => typeof b?.text === 'string' ? b.text : '').join('') : ''
+      for (const m of input as { role?: string; content?: unknown }[]) {
+        const text = textOf(m?.content)
+        if (m?.role === 'system' || m?.role === 'developer') { if (text) systemParts.push(text) }
+        else messages.push({ role: m?.role ?? 'user', content: text })
+      }
+    }
+    normalized = { system: systemParts.join('\n') || undefined, messages, model: obj.model as string, maxTokens: (obj.max_output_tokens as number) || 1024 }
   }
 
   const wrapContent = (text: string) => addCache ? [{ type: 'text', text, cache_control: { type: 'ephemeral' } }] : text
