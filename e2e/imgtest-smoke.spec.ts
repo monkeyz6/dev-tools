@@ -353,7 +353,7 @@ test('隐藏价格开关生效，且导出的 HTML 报告不含任何价格信�
   await expect(page.getByText(/参考价格/)).toBeVisible()
 
   // 打开「隐藏价格」开关：以上全部消失
-  await page.getByRole('switch').click()
+  await page.getByRole('switch', { name: '隐藏价格' }).click()
   await expect(page.getByText(/^\$0\.\d{3} \/ ¥/)).toHaveCount(0)
   await expect(page.getByText(/预估/)).toHaveCount(0)
   await expect(page.getByText(/参考价格/)).toHaveCount(0)
@@ -375,7 +375,7 @@ test('隐藏价格开关生效，且导出的 HTML 报告不含任何价格信�
   await page.getByRole('button', { name: /^历史记录/ }).click()
   const row = page.getByRole('row').filter({ hasText: '隐藏价格渠道' })
   await expect(row.getByRole('cell').nth(10)).toHaveText('—')
-  await page.getByRole('switch').click()
+  await page.getByRole('switch', { name: '隐藏价格' }).click()
   await expect(row.getByRole('cell').nth(10)).toContainText('$')
 })
 

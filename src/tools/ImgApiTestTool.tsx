@@ -6,7 +6,9 @@ import { historyDbGetAll, historyDbPutOne, historyDbDeleteOne, historyDbDeleteMa
 import { useDebouncedPersist } from '../shared/use-debounced-persist'
 import { uniqueCopyName } from '../shared/channel-copy'
 import { IMG_API_LABEL, imgFmtTime } from './img-report/types'
-import type { ImgApiType, ImgCarrier, ImgCheck, ImgInteractionMeta, ImgRecImage, ImgRecord } from './img-report/types'
+import type { ImgApiType, ImgC2paResult, ImgCarrier, ImgCheck, ImgInteractionMeta, ImgRecImage, ImgRecord } from './img-report/types'
+import { imgC2paIncomplete, imgC2paPending, imgC2paUnreadable } from './img-report/c2pa'
+import ImgC2paLine from './img-report/C2paLine'
 import { imgClassify, imgExpectedRejected, imgVerdict } from './img-report/summary'
 import { imgCarrierCheck, imgClassifyGeminiPart, imgClassifyOpenAiImage, sniffImageMime } from './img-report/carrier'
 import { IMG_NANO_TIER_TOKENS, imgInteractionChecks, imgParseInteraction } from './img-report/interactions'
@@ -23,6 +25,7 @@ const IMG_RATE_KEY = 'imgtest-rate'
 const IMG_HIST_KEY = 'imgtest-history'
 const IMG_UI_KEY = 'imgtest-ui'
 const IMG_HIDEPRICES_KEY = 'imgtest-hideprices'
+const IMG_C2PA_KEY = 'imgtest-c2pa'
 const IMG_DEFAULT_RATE = 7
 const IMG_VALIDATION_VERSION = 3
 const IMG_RESOLUTION_TIER_MIN_SCALE = 0.88
@@ -159,6 +162,38 @@ function imgLoadHidePrices(): boolean {
   if (typeof window === 'undefined') return false
   try { return kvGet(IMG_HIDEPRICES_KEY) === '1' } catch { /* ignore */ }
   return false
+}
+function imgLoadC2pa(): boolean {
+  if (typeof window === 'undefined') return false
+  try { return kvGet(IMG_C2PA_KEY) === '1' } catch { /* ignore */ }
+  return false
+}
+
+// 验真期间按记录持有一把 Web Lock。同源的其它标签页、或切走再切回来重新挂载的本工具，
+// 加载历史时据此区分「仍在验」与「页面已关、验真没做完」。非安全上下文没有 navigator.locks。
+const IMG_C2PA_LOCK_PREFIX = 'imgtest-c2pa:'
+
+/** 拿到锁才返回；调用返回的函数释放。 */
+async function imgHoldC2paLock(recordId: string): Promise<() => void> {
+  let release!: () => void
+  const done = new Promise<void>(ok => { release = ok })
+  if (!navigator.locks) return release
+  await new Promise<void>(ok => {
+    navigator.locks.request(IMG_C2PA_LOCK_PREFIX + recordId, () => { ok(); return done }).catch(() => ok())
+  })
+  return release
+}
+
+/** 当前被持有的验真锁对应的记录 id；拿不到锁信息时返回 null。 */
+async function imgHeldC2paIds(): Promise<Set<string> | null> {
+  if (!navigator.locks) return null
+  try {
+    const { held = [] } = await navigator.locks.query()
+    const ids = held.map(l => l.name || '').filter(n => n.startsWith(IMG_C2PA_LOCK_PREFIX)).map(n => n.slice(IMG_C2PA_LOCK_PREFIX.length))
+    return new Set(ids)
+  } catch {
+    return null
+  }
 }
 
 const IMG_PLACEHOLDER_MODEL: Record<ImgApiType, string> = {
@@ -1385,6 +1420,7 @@ function ImgApiTestTool() {
   const [prices, setPrices] = useState<ImgPrice[]>(() => imgLoadPrices())
   const [rateStr, setRateStr] = useState(() => imgLoadRate())
   const [hidePrices, setHidePrices] = useState(() => imgLoadHidePrices())
+  const [c2paOn, setC2paOn] = useState(() => imgLoadC2pa())
   const [history, setHistory] = useState<ImgRecord[]>([])
 
   const [chForm, setChForm] = useState({ name: '', baseUrl: '', apiKey: '' })
@@ -1420,12 +1456,15 @@ function ImgApiTestTool() {
   // 当前批次：一次「全部运行 / 运行选中」开一批，之后单条补跑沿用它
   const currentRunIdRef = useRef<string | null>(null)
   const setCurrentRunId = (v: string | null) => { currentRunIdRef.current = v }
+  const c2paOnRef = useRef(c2paOn)
+  const c2paWriteRef = useRef(new Map<string, Promise<unknown>>())
 
   useEffect(() => { refImagesRef.current = refImages }, [refImages])
   useEffect(() => { channelsRef.current = channels }, [channels])
   useEffect(() => { casesRef.current = cases }, [cases])
   useEffect(() => { historyRef.current = history }, [history])
   useEffect(() => { rateRef.current = parseFloat(rateStr) || IMG_DEFAULT_RATE }, [rateStr])
+  useEffect(() => { c2paOnRef.current = c2paOn }, [c2paOn])
 
   useEffect(() => { try { kvSet(IMG_CH_KEY, JSON.stringify(channels)) } catch { /* ignore */ } }, [channels])
   useEffect(() => {
@@ -1437,11 +1476,28 @@ function ImgApiTestTool() {
   useEffect(() => { imgSavePrices(prices) }, [prices])
   useEffect(() => { imgSaveRate(rateStr) }, [rateStr])
   useEffect(() => { try { kvSet(IMG_HIDEPRICES_KEY, hidePrices ? '1' : '0') } catch { /* ignore */ } }, [hidePrices])
+  useEffect(() => { try { kvSet(IMG_C2PA_KEY, c2paOn ? '1' : '0') } catch { /* ignore */ } }, [c2paOn])
   useEffect(() => {
     let cancelled = false
     ;(async () => {
       await imgHistMigrateOnce()
-      const list = await imgLoadHistory()
+      // 读库前后各查一次锁：读库与查锁之间别的标签页可能刚开始或刚结束验真，两次取并集才不会误标。
+      const heldBefore = await imgHeldC2paIds()
+      const loaded = await imgLoadHistory()
+      const heldAfter = await imgHeldC2paIds()
+      const verifying = (id: string) => heldBefore && heldAfter
+        ? heldBefore.has(id) || heldAfter.has(id)
+        : c2paWriteRef.current.has(id)
+      // 上次页面在验真出结论前被关掉，库里会残留「验真中」。原图已经不在，只能标成未完成。
+      // 仍有标签页持有该记录验真锁的不动。
+      const stale: ImgRecord[] = []
+      const list = loaded.map(r => {
+        if (verifying(r.id) || !r.images.some(im => im.c2pa?.status === 'pending')) return r
+        const fixed = { ...r, images: r.images.map(im => im.c2pa?.status === 'pending' ? { ...im, c2pa: imgC2paIncomplete() } : im) }
+        stale.push(fixed)
+        return fixed
+      })
+      for (const r of stale) historyDbPutOne('imgtest', r).catch(() => {})
       if (!cancelled) setHistory(list)
     })()
     return () => { cancelled = true }
@@ -1789,6 +1845,7 @@ function ImgApiTestTool() {
       c.status = 'error'
     }
     c.result = rec
+    let releaseC2pa: (() => void) | null = null
     try {
       if (c.needRef) {
         for (const r of refs) {
@@ -1798,6 +1855,11 @@ function ImgApiTestTool() {
           rec.refThumbs.push(refThumbCacheRef.current.get(r) ?? null)
         }
       }
+      if (c2paOnRef.current) {
+        rec.images = rec.images.map(im => (im.dataUri || (im.url && /^https?:/i.test(im.url))) ? { ...im, c2pa: imgC2paPending() } : im)
+      }
+      // 「验真中」落库之前先拿锁，别的标签页此刻加载历史也不会把它标成未完成
+      if (rec.images.some(im => im.c2pa?.status === 'pending')) releaseC2pa = await imgHoldC2paLock(rec.id)
       const histRec: ImgRecord = {
         ...rec,
         images: rec.images.map(im => ({ ...im, dataUri: null })),
@@ -1813,8 +1875,79 @@ function ImgApiTestTool() {
       if (opts.deferTrim) pendingHistWritesRef.current.push(write)
       write.then(() => opts.deferTrim ? undefined : imgHistTrim())
         .catch(() => toastShow('历史记录写入失败'))
-    } catch { /* 收尾失败不阻塞状态更新 */ }
+      const release = releaseC2pa
+      if (release) {
+        c2paWriteRef.current.set(rec.id, write)
+        releaseC2pa = null
+        void write.catch(() => {}).then(() => verifyRecordC2pa(rec, release))
+      }
+    } catch {
+      // 收尾失败不阻塞状态更新；验真没能启动就把锁放掉
+      releaseC2pa?.()
+    }
     setCases([...casesRef.current])
+  }
+
+  const patchImageC2pa = (recordId: string, index: number, result: ImgC2paResult) => {
+    let liveChanged = false
+    for (const item of casesRef.current) {
+      if (item.result?.id !== recordId) continue
+      item.result = {
+        ...item.result,
+        images: item.result.images.map((im, i) => i === index ? { ...im, c2pa: result } : im),
+      }
+      liveChanged = true
+    }
+    if (liveChanged) setCases(casesRef.current.slice())
+
+    const hist = historyRef.current.find(r => r.id === recordId)
+    if (hist) {
+      const nextRec: ImgRecord = {
+        ...hist,
+        images: hist.images.map((im, i) => i === index ? { ...im, c2pa: result } : im),
+      }
+      const next = historyRef.current.map(r => r.id === recordId ? nextRec : r)
+      historyRef.current = next
+      setHistory(next)
+      const prev = c2paWriteRef.current.get(recordId) ?? Promise.resolve()
+      const put = () => historyDbPutOne('imgtest', nextRec)
+      const job = prev.then(put, put).catch(() => {})
+      c2paWriteRef.current.set(recordId, job)
+    }
+    setDetailRec(current => {
+      if (!current || current.id !== recordId) return current
+      return { ...current, images: current.images.map((im, i) => i === index ? { ...im, c2pa: result } : im) }
+    })
+  }
+
+  const verifyRecordC2pa = async (rec: ImgRecord, release: () => void) => {
+    const jobs = rec.images.map((im, index) => ({
+      index,
+      dataUri: im.dataUri,
+      url: im.url,
+      pending: im.c2pa?.status === 'pending',
+    }))
+    try {
+      let readSource: typeof import('./img-report/c2pa-read').imgReadC2paSource
+      try {
+        readSource = (await import('./img-report/c2pa-read')).imgReadC2paSource
+      } catch (e) {
+        for (const job of jobs) {
+          if (job.pending) patchImageC2pa(rec.id, job.index, imgC2paUnreadable(e instanceof Error ? e.message : '验真模块加载失败'))
+        }
+        return
+      }
+      for (const job of jobs) {
+        if (!job.pending) continue
+        const result = await readSource({ dataUri: job.dataUri, url: job.url })
+        patchImageC2pa(rec.id, job.index, result)
+      }
+    } finally {
+      // 结论全部落库后再放锁，否则别的标签页可能在锁已释放、库里仍是「验真中」时把它标成未完成
+      await c2paWriteRef.current.get(rec.id)?.catch(() => {})
+      c2paWriteRef.current.delete(rec.id)
+      release()
+    }
   }
 
   const resetRun = () => {
@@ -1898,6 +2031,7 @@ function ImgApiTestTool() {
         <div className="px-2 py-1.5 text-[11px]">
           <div className="font-mono font-semibold" style={{ color: 'var(--text)' }}>{im.w}×{im.h}</div>
           <div style={{ color: 'var(--t3)' }}>{imgEsc(im.format || '?')}{im.url ? ' · URL' : ''}</div>
+          {im.c2pa && <ImgC2paLine result={im.c2pa} />}
         </div>
       </div>
     )
@@ -2247,7 +2381,10 @@ function ImgApiTestTool() {
             { value: 'prices', label: '价格配置' },
             { value: 'history', label: `历史记录 (${history.length})` },
           ]} />
-          <div className="ml-auto">
+          <div className="ml-auto flex items-center gap-4">
+            <span title="生成完成后读取原图里的 C2PA 内容凭证，并写进这条记录。不改变用例通过结果。">
+              <Toggle value={c2paOn} onChange={setC2paOn} label="生成后验真" />
+            </span>
             <Toggle value={hidePrices} onChange={setHidePrices} label="隐藏价格" />
           </div>
         </div>

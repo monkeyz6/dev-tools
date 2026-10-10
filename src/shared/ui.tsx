@@ -451,6 +451,7 @@ export function Toggle({ value, onChange, label }: { value: boolean; onChange: (
       <button
         role="switch"
         aria-checked={value}
+        aria-label={label}
         onClick={() => onChange(!value)}
         className="ui-switch relative flex-shrink-0 border-0 outline-none cursor-pointer"
         style={{

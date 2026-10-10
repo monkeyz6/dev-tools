@@ -52,6 +52,9 @@ const files = [
   'src/tools/img-report/interactions.test.ts',
   'src/tools/img-report/summary.ts',
   'src/tools/img-report/summary.test.ts',
+  'src/tools/img-report/c2pa.ts',
+  'src/tools/img-report/c2pa.test.ts',
+  'src/tools/img-report/c2pa-wasm.test.ts',
 ]
 const outDir = join(root, '.tmp-unit')
 rmSync(outDir, { recursive: true, force: true })
@@ -96,6 +99,8 @@ const r = spawnSync(
     join(outDir, 'src/tools/img-report/carrier.test.js'),
     join(outDir, 'src/tools/img-report/summary.test.js'),
     join(outDir, 'src/tools/img-report/interactions.test.js'),
+    join(outDir, 'src/tools/img-report/c2pa.test.js'),
+    join(outDir, 'src/tools/img-report/c2pa-wasm.test.js'),
   ],
   { stdio: 'inherit' },
 )

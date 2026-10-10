@@ -18,6 +18,39 @@ export type ImgCarrier =
   | 'data-url'
   | 'other-url'
 
+/** 生成当时读到的 C2PA 结论。历史不留原图，所以只存这份摘要，旧记录没有该字段。 */
+export type ImgC2paStatus = 'pending' | 'incomplete' | 'none' | 'valid' | 'invalid' | 'unreadable' | 'unavailable'
+export type ImgC2paTrust = 'trusted' | 'untrusted' | 'unchecked' | 'na'
+export type ImgC2paSource = 'openai' | 'azure' | 'google' | 'other' | 'unknown'
+
+export interface ImgC2paResult {
+  status: ImgC2paStatus
+  trust: ImgC2paTrust
+  source: ImgC2paSource
+  /** 证书主体对应的名称（OpenAI / Microsoft / Google / 组织名）。标题在渲染时由 source + trust 算出，不直接用它。 */
+  sourceLabel: string
+  /** 签名证书主体组织（O）。c2pa-rs 把它放在 signature_info.issuer，不是签发 CA。 */
+  issuer: string | null
+  /** 签名证书主体 CN */
+  signerName?: string | null
+  /** 签发 CA 的 CN */
+  issuerCa?: string | null
+  certValidTo?: string | null
+  /** 时间戳证书 CN 与是否链到信任列表 */
+  tsaName?: string | null
+  tsaTrusted?: boolean | null
+  /** 资产哈希与签名时是否一致 */
+  integrity?: 'match' | 'mismatch' | null
+  softwareAgent: string | null
+  claimGenerator: string | null
+  /** 从动作里的 digitalSourceType 归纳，例如「AI 生成」 */
+  actionLabel: string | null
+  generatedAt: string | null
+  /** 失败或未入列表时的状态码，便于对照原因 */
+  codes: string[]
+  note: string | null
+}
+
 export interface ImgRecImage {
   dataUri: string | null
   thumb: string | null
@@ -28,6 +61,7 @@ export interface ImgRecImage {
   /** 响应里自带的格式标签（mime_type / URL 后缀），与文件头字节不一致时才记 */
   formatLabel?: string
   carrier?: ImgCarrier
+  c2pa?: ImgC2paResult
 }
 
 /** Interactions 响应里与「是否与官方一致」有关的字段 */
