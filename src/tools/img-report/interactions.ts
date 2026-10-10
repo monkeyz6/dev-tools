@@ -6,6 +6,13 @@ import type { ImgCarrier, ImgCheck, ImgInteractionMeta } from './types'
 /** 官方按档位折算的图片输出 token：1K=1120、2K=1680、4K=3780（ai.google.dev 定价页） */
 export const IMG_NANO_TIER_TOKENS: Record<string, number> = { '1K': 1120, '2K': 1680, '4K': 3780 }
 
+/**
+ * 上一代 Gemini 3.1 Flash Image（Nano Banana 2）的 4K 图片输出 token（ai.google.dev 定价页）。
+ * 与 2.1 的 1K / 2K 计费相同（1120 / 1680），只有 4K 不同（2.1=3780）。0.5K 不能拿来区分：
+ * 指南写 2.1 不支持 512，但直连官方实测 2xx 出图，2.1 的 512 计费又没公布，可能同样是 747。
+ */
+export const IMG_FLASH31_4K_TOKENS = 2520
+
 export function imgNanoTierTokens(label: string | null | undefined): number | null {
   return IMG_NANO_TIER_TOKENS[String(label || '').trim().toUpperCase()] ?? null
 }
@@ -114,6 +121,32 @@ export function imgInteractionTokenCheck(
   return { pass: actual === expected, target: String(expected), actual: String(actual) }
 }
 
+/** 请求档位是否为 4K：优先 targets 里记下的 image_size，没写时按实际出图尺寸推 */
+function imgNanoIs4K(t: Record<string, any>, firstSize?: { w: number; h: number } | null): boolean {
+  if (t.resolutionTierBaseReq) return t.resolutionTierBaseReq === 4096
+  return !!firstSize && imgNanoTierFromSize(firstSize.w, firstSize.h)?.label === '4K'
+}
+
+/**
+ * 模型指纹：用 4K 的图片输出 token 区分 2.1（3780）与上一代 3.1 Flash Image（2520），其余档位两代分不出，返回 null 不出这一项。
+ * 带思考图时也不判：放宽区间会盖住别的组合，比如「2K 成图 + 1K 思考图」2800 落在 3.1 区间低端 [2520, 3780)，
+ * 渠道忽略档位时会被误判成 3.1。只认没有思考图、且与其中恰好一代严格相等。
+ * 这是行为证据，不是证明：渠道可以改写 usage。
+ */
+export function imgNanoFingerprint(input: ImgInteractionCheckInput): ImgCheck | null {
+  const { targets: t, meta, imageCount, firstSize } = input
+  if (!meta || meta.imageTokens == null || imageCount < 1 || meta.thoughtSteps > 0) return null
+  if (!imgNanoIs4K(t, firstSize)) return null
+  const per21 = IMG_NANO_TIER_TOKENS['4K']
+  const actual = meta.imageTokens
+  const target = `2.1：4K 每张 ${per21} token`
+  if (actual === per21 * imageCount) return { name: '模型指纹', target, actual: `${actual} token，符合 2.1`, pass: true }
+  if (actual === IMG_FLASH31_4K_TOKENS * imageCount) {
+    return { name: '模型指纹', target, actual: `${actual} token，符合 3.1 Flash Image 的 4K 计费（每张 ${IMG_FLASH31_4K_TOKENS}）`, pass: false }
+  }
+  return null
+}
+
 export interface ImgInteractionCheckInput {
   targets: Record<string, any>
   meta: ImgInteractionMeta | null | undefined
@@ -143,9 +176,14 @@ export function imgInteractionChecks(input: ImgInteractionCheckInput): ImgCheck[
       pass: !!meta.model && imgNormalizeModelId(meta.model) === imgNormalizeModelId(t.modelReq),
     })
   }
-  const tokensPer: number | null = t.imageTokensPer ?? (firstSize ? imgNanoTierFromSize(firstSize.w, firstSize.h)?.tokens ?? null : null)
+  // 请求写了档位就只认该档的官方 token；没有官方数字（如 512）记 info，不拿出图尺寸去套别的档位
+  const tokensPer: number | null = t.resolutionTierBaseReq
+    ? t.imageTokensPer ?? null
+    : t.imageTokensPer ?? (firstSize ? imgNanoTierFromSize(firstSize.w, firstSize.h)?.tokens ?? null : null)
   const tok = imgInteractionTokenCheck(tokensPer, imageCount, meta.imageTokens, meta.thoughtSteps)
   c.push({ name: '图片输出 token', target: tok.target, actual: tok.actual, pass: tok.pass, ...(tok.info ? { info: true } : {}) })
+  const fp = imgNanoFingerprint(input)
+  if (fp) c.push(fp)
   if (t.searchReq) {
     c.push({ name: '联网搜索', target: '至少 1 个 google_search_call 步骤', actual: `${meta.searchSteps} 个`, pass: meta.searchSteps > 0 })
   }

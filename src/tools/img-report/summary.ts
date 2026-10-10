@@ -26,7 +26,7 @@ export function imgClassify(r: ImgRecord): 'pass' | 'fail' | 'error' {
 }
 
 /** 校验项 → 能力。多图记录里校验项名带「图N 」前缀，先剥掉再归类 */
-const IMG_CAPABILITY_ORDER = ['request', 'size', 'tier', 'ratio', 'n', 'outputFormat', 'responseFormat', 'structure', 'tokens', 'search', 'multiTurn'] as const
+const IMG_CAPABILITY_ORDER = ['request', 'size', 'tier', 'ratio', 'n', 'outputFormat', 'responseFormat', 'structure', 'tokens', 'fingerprint', 'search', 'multiTurn'] as const
 const IMG_CAPABILITY_LABEL: Record<string, string> = {
   request: '接口连通',
   size: '精确像素尺寸',
@@ -37,6 +37,7 @@ const IMG_CAPABILITY_LABEL: Record<string, string> = {
   responseFormat: '返回载体',
   structure: '响应结构与模型回显',
   tokens: '用量 token 对账',
+  fingerprint: '模型指纹（2.1 / 3.1 Flash Image）',
   search: '联网搜索 google_search',
   multiTurn: '多轮编辑 previous_interaction_id',
 }
@@ -52,6 +53,7 @@ function imgCapabilityKey(rawName: string): string | null {
   if (name === 'response_format' || name === '返回载体') return 'responseFormat'
   if (name === '响应结构' || name === '模型回显') return 'structure'
   if (name === '图片输出 token') return 'tokens'
+  if (name === '模型指纹') return 'fingerprint'
   if (name === '联网搜索') return 'search'
   if (name === '多轮编辑') return 'multiTurn'
   return null

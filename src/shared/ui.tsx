@@ -510,16 +510,33 @@ export function SectionTitle({ children }: { children: React.ReactNode }) {
   return <h2 className="section-title text-xl font-bold tracking-tight mb-1" style={{ color: 'var(--text)', letterSpacing: '-0.025em' }}>{children}</h2>
 }
 
+/** 非安全上下文（局域网 IP 访问）没有 navigator.clipboard，退回 textarea + execCommand */
+function copyByTextarea(text: string): boolean {
+  const ta = document.createElement('textarea')
+  ta.value = text
+  ta.setAttribute('readonly', '')
+  ta.style.cssText = 'position:fixed;top:0;left:0;opacity:0'
+  document.body.appendChild(ta)
+  ta.select()
+  let ok = false
+  try { ok = document.execCommand('copy') } catch { ok = false }
+  ta.remove()
+  return ok
+}
+
 export function CopyBtn({ text }: { text: string }) {
-  const [copied, setCopied] = useState(false)
+  const [state, setState] = useState<'idle' | 'copied' | 'failed'>('idle')
+  const flash = (s: 'copied' | 'failed') => { setState(s); setTimeout(() => setState('idle'), 1800) }
   const copy = () => {
-    navigator.clipboard.writeText(text).then(() => {
-      setCopied(true); setTimeout(() => setCopied(false), 1800)
-    })
+    if (navigator.clipboard?.writeText) {
+      navigator.clipboard.writeText(text).then(() => flash('copied'), () => flash(copyByTextarea(text) ? 'copied' : 'failed'))
+    } else {
+      flash(copyByTextarea(text) ? 'copied' : 'failed')
+    }
   }
   return (
-    <Btn onClick={copy} small variant="ghost" style={{ color: copied ? 'var(--ok)' : 'var(--t2)' }}>
-      {copied ? '✓ 已复制' : '复制'}
+    <Btn onClick={copy} small variant="ghost" style={{ color: state === 'copied' ? 'var(--ok)' : state === 'failed' ? 'var(--err)' : 'var(--t2)' }}>
+      {state === 'copied' ? '✓ 已复制' : state === 'failed' ? '复制失败' : '复制'}
     </Btn>
   )
 }

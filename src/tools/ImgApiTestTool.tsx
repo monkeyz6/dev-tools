@@ -269,20 +269,26 @@ const IMG_TEST_SETS: Record<ImgApiType, ImgCaseDef[]> = {
 // gemini-nano-banana-2.1 专属：走官方 Interactions，目标是核对「渠道是否与官方一致」，不追求全覆盖。
 // 判定靠三层证据：参数透传（档位 / 比例 / 文件头字节格式）、响应结构与模型回显、usage 里的图片输出 token（防偷换成更便宜的模型）。
 // 参考图只有 2 条（画布合成，不依赖左侧上传），其余全是文生图。
-// 512px 官方明确不支持 2.1、webp 官方只写了 png / jpeg：这两条标「预期不支持」，被 4xx 拒绝才算通过。
+// 官方 response_format.mime_type 枚举只有 image/jpeg，image_size 枚举是 512 / 1K / 2K / 4K。
+// 指南写 2.1 不支持 512，但直连 generativelanguage.googleapis.com 实测 2xx 出图，所以 512 是正向用例。
+// 正向用例里格式只是顺带，不带 mime_type，格式只由「2K · 16:9 · JPEG」核对；
+// png / webp 标「预期不支持」且一律严格：只认 4xx 拒绝，出了图就是渠道接受了官方不支持的参数。
+/** 官方 ImageResponseFormat.mime_type 的枚举值：https://ai.google.dev/api/interactions-api-v1 */
+const IMG_NANO_OUTPUT_MIMES = ['image/jpeg']
+
 const IMG_NANO_BANANA_CASES: ImgCaseDef[] = [
   { name: '默认参数 · 纯文本', desc: 'input 为纯字符串、不带 response_format：只判响应结构、模型回显与用量，尺寸 / 比例 / 格式只记 info', params: { inputString: true } },
-  { name: '1K · 1:1 · PNG', desc: 'response_format: image_size=1K · aspect_ratio=1:1 · mime_type=image/png', params: { imageSize: '1K', aspectRatio: '1:1', outputMime: 'image/png' } },
-  { name: '2K · 16:9 · JPEG', desc: 'response_format: image_size=2K · aspect_ratio=16:9 · mime_type=image/jpeg', params: { imageSize: '2K', aspectRatio: '16:9', outputMime: 'image/jpeg' } },
-  { name: '2K · 9:16 · PNG', desc: 'response_format: image_size=2K · aspect_ratio=9:16（竖屏比例）', params: { imageSize: '2K', aspectRatio: '9:16', outputMime: 'image/png' } },
-  { name: '4K · 21:9 · PNG', desc: 'response_format: image_size=4K · aspect_ratio=21:9（最高档 + 超宽，单张约 $0.113）', params: { imageSize: '4K', aspectRatio: '21:9', outputMime: 'image/png' } },
-  { name: '输出 WebP（预期不支持）', desc: 'mime_type=image/webp · 官方只写了 png / jpeg：被 4xx 拒绝或真出 webp 才算通过，静默回成别的格式算未通过', params: { imageSize: '1K', aspectRatio: '1:1', outputMime: 'image/webp' }, expect: 'unsupported' },
-  { name: '512px（预期不支持）', desc: 'image_size=512px · 官方说明 512px 仅 Gemini 3.1 Flash Image 支持、2.1 不支持：只认 4xx 拒绝，出了图就是渠道接受了官方不支持的参数', params: { imageSize: '512px', aspectRatio: '1:1' }, expect: 'unsupported' },
+  { name: '2K · 16:9 · JPEG', desc: 'response_format: image_size=2K · aspect_ratio=16:9 · mime_type=image/jpeg（官方唯一的输出格式，按文件头字节核对）', params: { imageSize: '2K', aspectRatio: '16:9', outputMime: 'image/jpeg' } },
+  { name: '2K · 9:16', desc: 'response_format: image_size=2K · aspect_ratio=9:16（竖屏比例，不带 mime_type，格式只记 info）', params: { imageSize: '2K', aspectRatio: '9:16' } },
+  { name: '4K · 21:9', desc: 'response_format: image_size=4K · aspect_ratio=21:9（最高档 + 超宽，单张约 $0.113，不带 mime_type）', params: { imageSize: '4K', aspectRatio: '21:9' } },
+  { name: '输出 PNG（预期不支持）', desc: 'mime_type=image/png · 官方枚举只有 image/jpeg：只认 4xx 拒绝，出了图就是渠道接受了官方不支持的参数', params: { imageSize: '1K', aspectRatio: '1:1', outputMime: 'image/png' }, expect: 'unsupported' },
+  { name: '输出 WebP（预期不支持）', desc: 'mime_type=image/webp · 官方枚举只有 image/jpeg：只认 4xx 拒绝，出了图就是渠道接受了官方不支持的参数', params: { imageSize: '1K', aspectRatio: '1:1', outputMime: 'image/webp' }, expect: 'unsupported' },
+  { name: '512 · 1:1', desc: 'image_size=512 · 指南写 2.1 不支持，直连官方实测 2xx 出图：核对档位下限与比例；2.1 的 512 计费官方未公布，图片输出 token 只记 info', params: { imageSize: '512', aspectRatio: '1:1' } },
   { name: '参考图 · 单图 JPEG · 1K 1:1', desc: 'input[] 里 1 张 image/jpeg（画布合成）· 1K · 1:1', params: { imageSize: '1K', aspectRatio: '1:1' }, needRef: true, synthRefs: { count: 1, mime: 'image/jpeg' }, prompt: '基于这张参考图，保持构图，改成水彩插画风格' },
   { name: '参考图 · 三图 PNG · 2K 5:4', desc: 'input[] 里 3 张 image/png（画布合成）· 2K · 5:4', params: { imageSize: '2K', aspectRatio: '5:4' }, needRef: true, synthRefs: { count: 3, mime: 'image/png' }, prompt: '把这三张参考图里的色块与形状融合成一张构图' },
-  { name: '多轮编辑 · 1K 1:1', desc: '用例内发两次：第一轮文生图 store=true；第二轮只发编辑指令并带 previous_interaction_id（需渠道支持有状态的 Interactions，会出 2 张图）', params: { imageSize: '1K', aspectRatio: '1:1', outputMime: 'image/png', multiTurnEdit: '把这只猫改成黑白配色，其余元素保持不变' }, prompt: '画一只橙色的猫坐在窗台上' },
-  { name: 'thinking_level=minimal · 1K 1:1', desc: 'generation_config.thinking_level=minimal：只判参数被接受并出图', params: { imageSize: '1K', aspectRatio: '1:1', outputMime: 'image/png', thinkingLevel: 'minimal' } },
-  { name: 'google_search · 1K 16:9 · JPEG', desc: 'tools: [{type:google_search}]：响应里要有 google_search_call 步骤（搜索可能单独计费）', params: { imageSize: '1K', aspectRatio: '16:9', outputMime: 'image/jpeg', googleSearch: true }, prompt: '用 Google 搜索查今天旧金山的天气，并把结果画成一张简洁的天气信息图' },
+  { name: '多轮编辑 · 1K 1:1', desc: '用例内发两次：第一轮文生图 store=true；第二轮只发编辑指令并带 previous_interaction_id（需渠道支持有状态的 Interactions，会出 2 张图）', params: { imageSize: '1K', aspectRatio: '1:1', multiTurnEdit: '把这只猫改成黑白配色，其余元素保持不变' }, prompt: '画一只橙色的猫坐在窗台上' },
+  { name: 'thinking_level=minimal · 1K 1:1', desc: 'generation_config.thinking_level=minimal：只判参数被接受并出图', params: { imageSize: '1K', aspectRatio: '1:1', thinkingLevel: 'minimal' } },
+  { name: 'google_search · 1K 16:9 · JPEG', desc: 'tools: [{type:google_search}]：响应里要有 google_search_call 步骤（搜索可能单独计费）', params: { imageSize: '1K', aspectRatio: '16:9', outputMime: 'image/jpeg', googleSearch: true }, prompt: '用 Google 搜索查今天旧金山的天气，并把结果画成一张简洁的天气信息图，必须使用 google_search 工具' },
 ]
 
 interface ImgPlan {
@@ -710,8 +716,8 @@ function imgDeriveTargets(type: ImgApiType, plan: ImgPlan): Record<string, any> 
       if (typeof rfo.mime_type === 'string') t._of = rfo.mime_type.split('/')[1]
       t.imageTokensPer = IMG_NANO_TIER_TOKENS[String(rfo.image_size || '').toUpperCase()] ?? null
       if (!rfo.image_size && !rfo.aspect_ratio && !rfo.mime_type) t.defaultParams = true
-      // 官方明确不支持 512px：只认 4xx 拒绝，2xx 出图算渠道接受了不支持的参数
-      if (t.resolutionTierBaseReq === 512) { t.strictReject = true; t.rejectCheck = '分辨率档位' }
+      // 枚举外的输出格式：只认 4xx 拒绝，2xx 出图算渠道接受了不支持的参数
+      if (typeof rfo.mime_type === 'string' && !IMG_NANO_OUTPUT_MIMES.includes(rfo.mime_type)) { t.strictReject = true; t.rejectCheck = '输出格式' }
       if (Array.isArray(body.tools) && body.tools.some((x: any) => x?.type === 'google_search')) t.searchReq = true
       if (body.previous_interaction_id) t.multiTurn = true
     } else if (rf && typeof rf === 'object' && (rf.image_size || rf.aspect_ratio || rf.mime_type)) {
@@ -729,6 +735,16 @@ function imgDeriveTargets(type: ImgApiType, plan: ImgPlan): Record<string, any> 
   t._rf = typeof body.response_format === 'string' ? body.response_format : undefined
   t._wm = body.watermark
   return t
+}
+
+/** 响应头优先；网关没在 Access-Control-Expose-Headers 里暴露时浏览器读不到，
+ * 再从 new-api 错误正文的 "(request id: xxx)" 兜底。只在 HTTP 非 2xx 时扫正文：成功响应里没有这段，
+ * 正文却可能是整段 base64 或 google_search 的检索片段，碰巧拼出这个模式就会把网页文本当成网关 ID */
+function imgRequestId(headers: Record<string, string>, text: string, httpOk: boolean): string {
+  const fromHeader = (headers['x-oneapi-request-id'] || '').trim()
+  if (fromHeader || httpOk) return fromHeader
+  const m = /request id:\s*([A-Za-z0-9_-]+)/i.exec(text || '')
+  return m ? m[1] : ''
 }
 
 async function imgExecutePlan(plan: ImgPlan, channel: { baseUrl: string; apiKey: string }, refs: ImgRef[]) {
@@ -961,7 +977,8 @@ function imgBuildChecks(rec: ImgRecord): ImgCheck[] {
       // 格式以文件头字节为准；响应标签与字节不一致时一并写出
       const shown = im.formatLabel && norm(im.formatLabel) !== norm(im.format) ? `${im.format}（标签 ${im.formatLabel}）` : im.format
       c.push({ name: tag + '输出格式', target: t._of, actual: shown, pass: norm(im.format) === norm(t._of) })
-    } else if (t.defaultParams) {
+    } else if (t.defaultParams || t.interactions) {
+      // 没指定格式：只记实际出图格式，不计通过率
       c.push({ name: tag + '输出格式', target: '—', actual: im.format, pass: true, info: true })
     }
   })
@@ -1783,7 +1800,7 @@ function ImgApiTestTool() {
         if (firstFail) {
           rec.status = preExec.httpStatus
           rec.respHeaders = preExec.headers
-          rec.reqId = preExec.headers['x-oneapi-request-id'] || ''
+          rec.reqId = imgRequestId(preExec.headers, preExec.text, preExec.resp.ok)
         }
       }
       // 第一轮没成功：沿用下面的 catch 收尾（记失败、清空图片、重算校验）
@@ -1791,7 +1808,7 @@ function ImgApiTestTool() {
       const exec = await imgExecutePlan({ ...resolved, pre: undefined }, { baseUrl: ch.baseUrl, apiKey }, refs)
       rec.status = exec.httpStatus
       rec.respHeaders = exec.headers
-      rec.reqId = exec.headers['x-oneapi-request-id'] || ''
+      rec.reqId = imgRequestId(exec.headers, exec.text, exec.resp.ok)
       const fmtHint = plan.kind === 'json' ? plan.body?.output_format : plan.multipart?.fields?.output_format
       const parsed = imgParseResponse(apiType, exec.text, exec.headers, exec.httpStatus, exec.resp.ok, fmtHint)
       if (parsed.interaction && prevId) parsed.interaction.prevId = prevId
@@ -2079,11 +2096,14 @@ function ImgApiTestTool() {
             {(r.price.count || 1) > 1 ? `（${r.price.count} 张 × $${r.price.usd.toFixed(3)}）` : ''}{r.price.inputCount ? `（含 ${r.price.inputCount} 张输入图）` : ''}{r.price.note ? ' · ' + r.price.note : ''}</span>
         )}
       </div>
-      <div className="inline-flex items-center gap-2 flex-wrap rounded-xl px-3 py-2 text-xs"
-        style={{ background: 'var(--warnBg)', border: '1px solid color-mix(in srgb, var(--warn) 40%, transparent)', color: 'var(--warn)' }}>
-        x-oneapi-request-id: <span className="font-mono font-bold">{r.reqId ? imgEsc(r.reqId) : '（未在响应头中读取到，可能是 CORS 未暴露该字段）'}</span>
-        {r.respHeaders['x-upstream-request-id'] && <span className="font-mono" style={{ color: 'var(--t2)' }}>· upstream: {r.respHeaders['x-upstream-request-id']}</span>}
-      </div>
+      {r.reqId && (
+        <div className="inline-flex items-center gap-2 flex-wrap rounded-xl px-3 py-2 text-xs"
+          style={{ background: 'var(--warnBg)', border: '1px solid color-mix(in srgb, var(--warn) 40%, transparent)', color: 'var(--warn)' }}>
+          x-oneapi-request-id: <span className="font-mono font-bold">{imgEsc(r.reqId)}</span>
+          <span data-html2canvas-ignore><CopyBtn text={r.reqId} /></span>
+          {r.respHeaders['x-upstream-request-id'] && <span className="font-mono" style={{ color: 'var(--t2)' }}>· upstream: {r.respHeaders['x-upstream-request-id']}</span>}
+        </div>
+      )}
       {r.error && (
         <div className="rounded-xl px-3 py-2.5 text-xs" style={{ background: 'var(--errBg)', border: '1px solid color-mix(in srgb, var(--err) 35%, transparent)', color: 'var(--err)' }}>
           <b>错误：</b>{imgEsc(r.error)}
@@ -2115,8 +2135,16 @@ function ImgApiTestTool() {
           [r.responseBodyComplete === false ? '响应体（图片 base64 已省略）' : '响应体', imgFormatResponseBody(r.rawSnippet || ''), false],
           ['已发送的请求体（占位符已替换 · base64 已省略）', r.sentPreview || '', true],
         ].map(([label, body, isReq]) => (
-          <details key={label as string} open={isReq ? opts.defaultOpenReq : undefined} className="rounded-xl overflow-hidden" style={{ border: '1px solid var(--border)' }}>
-            <summary className="px-3 py-2 text-xs font-semibold cursor-pointer select-none" style={{ background: 'var(--s1)', color: 'var(--t2)' }}>{label as string}</summary>
+          <details key={label as string} open={isReq ? opts.defaultOpenReq : undefined} className="relative rounded-xl overflow-hidden" style={{ border: '1px solid var(--border)' }}>
+            <summary className="pl-3 pr-24 py-2 text-xs font-semibold cursor-pointer select-none" style={{ background: 'var(--s1)', color: 'var(--t2)' }}>
+              <span>{label as string}</span>
+              {/* 放在 summary 里才能折叠时也可见；preventDefault 拦住冒泡到 summary 的展开/收起，按钮自己的点击照常 */}
+              {body && (
+                <span data-html2canvas-ignore className="absolute right-1.5 top-0.5" onClick={e => { e.preventDefault(); e.stopPropagation() }}>
+                  <CopyBtn text={body as string} />
+                </span>
+              )}
+            </summary>
             {/* data-export-scroll：默认展开的请求体在导出截图时，配合 imgWithExpandedScrollAreas
                 临时去掉 max-height/overflow 限制，避免长 JSON 被裁掉只截到前 32rem */}
             <pre data-response-body={(label as string).startsWith('响应体') ? 'true' : undefined} data-export-scroll

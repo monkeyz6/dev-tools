@@ -1,14 +1,15 @@
 import { test, expect } from '@playwright/test'
-import type { Page } from '@playwright/test'
+import type { Locator, Page } from '@playwright/test'
 
 const CORS = { 'Access-Control-Allow-Origin': '*', 'Access-Control-Expose-Headers': '*' }
 const MODEL = 'gemini-nano-banana-2.1'
-const TIER_TOKENS: Record<string, number> = { '1K': 1120, '2K': 1680, '4K': 3780 }
-const TIER_BASE: Record<string, number> = { '1K': 1024, '2K': 2048, '4K': 4096 }
+// 512 的 747 只是 mock 的假设：2.1 的 512 计费官方没公布，工具对这档只记 info
+const TIER_TOKENS: Record<string, number> = { '512': 747, '1K': 1120, '2K': 1680, '4K': 3780 }
+const TIER_BASE: Record<string, number> = { '512': 512, '1K': 1024, '2K': 2048, '4K': 4096 }
 
 const CASE_NAMES = [
-  '默认参数 · 纯文本', '1K · 1:1 · PNG', '2K · 16:9 · JPEG', '2K · 9:16 · PNG', '4K · 21:9 · PNG',
-  '输出 WebP（预期不支持）', '512px（预期不支持）', '参考图 · 单图 JPEG · 1K 1:1', '参考图 · 三图 PNG · 2K 5:4',
+  '默认参数 · 纯文本', '2K · 16:9 · JPEG', '2K · 9:16', '4K · 21:9',
+  '输出 PNG（预期不支持）', '输出 WebP（预期不支持）', '512 · 1:1', '参考图 · 单图 JPEG · 1K 1:1', '参考图 · 三图 PNG · 2K 5:4',
   '多轮编辑 · 1K 1:1', 'thinking_level=minimal · 1K 1:1', 'google_search · 1K 16:9 · JPEG',
 ]
 
@@ -51,10 +52,14 @@ interface Behavior {
   tokens?: number | null
   /** 不返回 google_search_call 步骤 */
   noSearchStep?: boolean
-  /** 官方不支持的 webp / 512px 也照样出图（渠道不一致） */
+  /** 官方不支持的 png / webp 也照样出图（渠道不一致） */
   acceptUnsupported?: boolean
   /** 返回的字节固定是 png，标签仍写请求的 mime_type */
   lieAboutMime?: boolean
+  /** 成功响应里 model_output 的文字（默认 ok），用来模拟检索片段 */
+  outputText?: string
+  /** 非空时所有请求都返回 400，正文的 error.message 用这段 */
+  failWith?: string
 }
 
 async function mockInteractions(page: Page, behavior: Behavior = {}) {
@@ -64,10 +69,11 @@ async function mockInteractions(page: Page, behavior: Behavior = {}) {
     const body = route.request().postDataJSON()
     const rf = body.response_format || {}
     const wantMime: string = rf.mime_type || 'image/png'
-    const unsupported = rf.image_size === '512px' || wantMime === 'image/webp'
-    if (unsupported && !behavior.acceptUnsupported) {
+    // 官方 mime_type 枚举只有 image/jpeg；512 直连官方实测可以出图
+    const unsupported = !!rf.mime_type && rf.mime_type !== 'image/jpeg'
+    if (behavior.failWith || (unsupported && !behavior.acceptUnsupported)) {
       seen.push({ body, issuedId: '' })
-      await route.fulfill({ status: 400, contentType: 'application/json', headers: CORS, body: JSON.stringify({ error: { message: 'unsupported parameter' } }) })
+      await route.fulfill({ status: 400, contentType: 'application/json', headers: CORS, body: JSON.stringify({ error: { message: behavior.failWith || 'unsupported parameter' } }) })
       return
     }
     // 等效边长取档位的 0.9：满足档位下限，又不用真画 4K 大图
@@ -82,7 +88,7 @@ async function mockInteractions(page: Page, behavior: Behavior = {}) {
     seen.push({ body, issuedId: id })
     const steps: any[] = [{ type: 'user_input', content: [{ type: 'image', mime_type: 'image/png', data: 'cmVm' }] }]
     if (body.tools && !behavior.noSearchStep) steps.push({ type: 'google_search_call' }, { type: 'google_search_result' })
-    steps.push({ type: 'model_output', content: [{ type: 'text', text: 'ok' }, { type: 'image', mime_type: wantMime, data }] })
+    steps.push({ type: 'model_output', content: [{ type: 'text', text: behavior.outputText ?? 'ok' }, { type: 'image', mime_type: wantMime, data }] })
     const res: any = { id, status: 'completed', model: behavior.model ?? body.model, steps }
     if (behavior.tokens !== null) {
       res.usage = { output_tokens_by_modality: [{ modality: 'image', tokens: behavior.tokens ?? TIER_TOKENS[tier] }] }
@@ -135,7 +141,7 @@ test('Nano Banana 2.1：价格含输入图，换模型名按失焦切换专属�
 
   // 已有结果时跨 nano 边界：失焦才弹窗，取消后模型名恢复、用例不动
   const mock = await mockInteractions(page)
-  const first = await runOne(page, '1K · 1:1 · PNG')
+  const first = await runOne(page, '2K · 16:9 · JPEG')
   await expect(first.getByText(/✓ 通过/).first()).toBeVisible()
   expect(mock.seen).toHaveLength(1)
   await input.fill('gemini-3-pro-image-preview')
@@ -166,12 +172,15 @@ test('Nano Banana 2.1：官方形态下 12 条用例全部按预期通过，参�
   expect(def).toHaveLength(1)
   expect(def[0].model).toBe(MODEL)
 
-  expect(find(b => rfOf(b)?.image_size === '1K' && rfOf(b)?.aspect_ratio === '1:1' && rfOf(b)?.mime_type === 'image/png' && Array.isArray(b.input) && !b.generation_config && !b.store)).toHaveLength(1)
   expect(find(b => rfOf(b)?.image_size === '2K' && rfOf(b)?.aspect_ratio === '16:9' && rfOf(b)?.mime_type === 'image/jpeg')).toHaveLength(1)
-  expect(find(b => rfOf(b)?.image_size === '2K' && rfOf(b)?.aspect_ratio === '9:16')).toHaveLength(1)
-  expect(find(b => rfOf(b)?.image_size === '4K' && rfOf(b)?.aspect_ratio === '21:9')).toHaveLength(1)
+  expect(find(b => rfOf(b)?.image_size === '2K' && rfOf(b)?.aspect_ratio === '9:16' && !rfOf(b).mime_type)).toHaveLength(1)
+  expect(find(b => rfOf(b)?.image_size === '4K' && rfOf(b)?.aspect_ratio === '21:9' && !rfOf(b).mime_type)).toHaveLength(1)
+  // 正向只有 2K 16:9 与 google_search 带 jpeg；png / webp 各一条且被拒；512 是正向用例、用枚举写法
+  expect(find(b => rfOf(b)?.mime_type === 'image/jpeg')).toHaveLength(2)
+  expect(find(b => rfOf(b)?.mime_type === 'image/png' && rfOf(b)?.image_size === '1K' && rfOf(b)?.aspect_ratio === '1:1')).toHaveLength(1)
   expect(find(b => rfOf(b)?.mime_type === 'image/webp')).toHaveLength(1)
-  expect(find(b => rfOf(b)?.image_size === '512px')).toHaveLength(1)
+  expect(find(b => rfOf(b)?.image_size === '512')).toHaveLength(1)
+  expect(find(b => rfOf(b)?.image_size === '512px')).toHaveLength(0)
 
   // 参考图：单图 jpeg、三图 png，字节非空；只有这 2 条带参考图
   const single = find(b => Array.isArray(b.input) && b.input.some((p: any) => p.type === 'image' && p.mime_type === 'image/jpeg'))
@@ -190,8 +199,11 @@ test('Nano Banana 2.1：官方形态下 12 条用例全部按预期通过，参�
   expect(typeof turn2.body.input).toBe('string')
   expect(turn2.body.previous_interaction_id).toBe(turn1.issuedId)
   expect(turn2.body.response_format).toEqual(turn1.body.response_format)
+  expect(turn1.body.response_format.mime_type).toBeUndefined()
 
-  expect(find(b => b.generation_config?.thinking_level === 'minimal')).toHaveLength(1)
+  const thinking = find(b => b.generation_config?.thinking_level === 'minimal')
+  expect(thinking).toHaveLength(1)
+  expect(thinking[0].response_format.mime_type).toBeUndefined()
   const search = find(b => Array.isArray(b.tools))
   expect(search).toHaveLength(1)
   expect(search[0].tools).toEqual([{ type: 'google_search' }])
@@ -228,6 +240,13 @@ test('Nano Banana 2.1：偷换模型、token 对不上、缺 usage、没有搜�
   await row.getByRole('button', { name: '▶ 运行此用例' }).click()
   await expect(row.getByText(/✓ 通过/).first()).toBeVisible()
 
+  // 4K 按 3.1 Flash Image 的 2520 token 计量：模型指纹指向 3.1
+  Object.assign(behavior, { tokens: 2520 })
+  const fourK = await runOne(page, '4K · 21:9')
+  await expect(fourK.getByText('模型指纹', { exact: true })).toBeVisible()
+  await expect(fourK.getByText(/符合 3\.1 Flash Image 的 4K 计费/)).toBeVisible()
+  Object.assign(behavior, { tokens: undefined })
+
   // google_search 没有搜索步骤
   Object.assign(behavior, { noSearchStep: true })
   const search = await runOne(page, 'google_search · 1K 16:9 · JPEG')
@@ -242,22 +261,22 @@ test('Nano Banana 2.1：预期不支持的参数，渠道接受并出图判未�
   await addChannel(page)
   await useNanoCases(page)
 
-  // 512px：官方不支持，渠道却出了图
-  const p512 = await runOne(page, '512px（预期不支持）')
-  await expect(p512.getByText(/✕/).first()).toBeVisible()
-  await expect(p512.getByRole('cell', { name: /HTTP 200 已出图（渠道接受了官方不支持的参数）/ })).toBeVisible()
-
-  // webp：渠道静默回成 png → 未通过
-  const webp = await runOne(page, '输出 WebP（预期不支持）')
-  await expect(webp.getByText(/✕/).first()).toBeVisible()
-  await expect(webp.getByText('png（标签 webp）')).toBeVisible()
+  // png / webp：官方都不支持，渠道却出了图 → 一律未通过（不看出的是什么格式）
+  const accepted = /HTTP 200 已出图（渠道接受了官方不支持的参数）/
+  const rows: Locator[] = []
+  for (const name of ['输出 PNG（预期不支持）', '输出 WebP（预期不支持）']) {
+    const row = await runOne(page, name)
+    await expect(row.getByText(/✕/).first(), name).toBeVisible()
+    await expect(row.getByRole('cell', { name: accepted }), name).toBeVisible()
+    rows.push(row)
+  }
 
   // 被 4xx 拒绝才算通过
   Object.assign(behavior, { acceptUnsupported: false })
-  await webp.getByRole('button', { name: '▶ 运行此用例' }).click()
-  await expect(webp.getByText('✓ 通过 1/1')).toBeVisible()
-  await p512.getByRole('button', { name: '▶ 运行此用例' }).click()
-  await expect(p512.getByText('✓ 通过 1/1')).toBeVisible()
+  for (const row of rows) {
+    await row.getByRole('button', { name: '▶ 运行此用例' }).click()
+    await expect(row.getByText('✓ 通过 1/1')).toBeVisible()
+  }
 
   // JPEG 标签 + png 字节
   Object.assign(behavior, { lieAboutMime: true })
@@ -278,4 +297,48 @@ test('Nano Banana 2.1：多轮编辑第一轮失败时记失败并说明原因',
   const row = await runOne(page, '多轮编辑 · 1K 1:1')
   await expect(row.getByText(/第一轮失败（HTTP 400）：store not supported/)).toBeVisible()
   expect(calls).toBe(1)
+})
+
+test('结果区的响应头、响应体、请求体都能一键复制，点按钮不会展开或收起折叠块', async ({ page }) => {
+  await page.context().grantPermissions(['clipboard-read', 'clipboard-write'])
+  await mockInteractions(page)
+  await page.goto('/')
+  await addChannel(page)
+  await useNanoCases(page)
+  const row = await runOne(page, '2K · 16:9 · JPEG')
+  await expect(row.getByText(/✓ 通过/).first()).toBeVisible()
+
+  const block = (label: RegExp) => row.locator('details').filter({ has: page.locator('summary', { hasText: label }) })
+  const copyFrom = async (label: RegExp) => {
+    const d = block(label)
+    const wasOpen = await d.evaluate(el => (el as HTMLDetailsElement).open)
+    await d.locator('summary').getByRole('button', { name: '复制' }).click()
+    await expect(d.locator('summary').getByRole('button', { name: '✓ 已复制' })).toBeVisible()
+    expect(await d.evaluate(el => (el as HTMLDetailsElement).open)).toBe(wasOpen)
+    return page.evaluate(() => navigator.clipboard.readText())
+  }
+
+  expect(JSON.parse(await copyFrom(/^响应体/)).id).toMatch(/^int-/)
+  expect(JSON.parse(await copyFrom(/^响应头/))).toEqual(expect.any(Object))
+  expect(await copyFrom(/^已发送的请求体/)).toContain('"model": "gemini-nano-banana-2.1"')
+})
+
+test('Request ID：成功响应正文里碰巧出现 request id 不当成网关 ID，只有错误正文才兜底', async ({ page }) => {
+  // mock 不暴露 x-oneapi-request-id 头，等同网关没配 Access-Control-Expose-Headers
+  const behavior: Behavior = { outputText: '检索到的网页片段：… (request id: FROM-SEARCH-SNIPPET) …' }
+  await mockInteractions(page, behavior)
+  await page.goto('/')
+  await addChannel(page)
+  await useNanoCases(page)
+
+  const row = await runOne(page, 'google_search · 1K 16:9 · JPEG')
+  await expect(row.getByText(/✓ 通过/).first()).toBeVisible()
+  await expect(row.getByText('x-oneapi-request-id:')).toHaveCount(0)
+  // 片段原文仍在响应体里，只是没被认成网关 ID
+  await expect(row.locator('pre[data-response-body="true"]')).toContainText('FROM-SEARCH-SNIPPET')
+
+  Object.assign(behavior, { failWith: 'upstream error: do request failed (request id: GW-ERR-42)' })
+  await row.getByRole('button', { name: '▶ 运行此用例' }).click()
+  await expect(row.getByText('x-oneapi-request-id:')).toBeVisible()
+  await expect(row.getByText('GW-ERR-42', { exact: true })).toBeVisible()
 })
