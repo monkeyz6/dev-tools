@@ -38,7 +38,7 @@ test('完整流程：渠道+用例运行+校验+历史', async ({ page }) => {
       ctx.fillRect(0, 0, 1024, 1024)
       return c.toDataURL('image/png').split(',')[1]
     })
-    await route.fulfill({ status: 200, contentType: 'application/json', headers: { ...CORS, 'x-oneapi-request-id': 'req-test-123' }, body: JSON.stringify({ data: [{ b64_json: b64 }] }) })
+    await route.fulfill({ status: 200, contentType: 'application/json', headers: { ...CORS, 'x-oneapi-request-id': 'req-test-123' }, body: JSON.stringify({ data: [{ b64_json: b64 }], usage: { input_tokens: 20, output_tokens: 4160 } }) })
   })
   await page.goto('/')
   await page.getByText('图片接口测试').click()
@@ -51,7 +51,7 @@ test('完整流程：渠道+用例运行+校验+历史', async ({ page }) => {
   await page.getByText('方形 1024×1024').click()
   await page.getByRole('button', { name: '▶ 运行此用例' }).click()
   await expect(page.getByText('req-test-123').first()).toBeVisible()
-  await expect(page.getByText('✓ 通过 4/4')).toBeVisible()
+  await expect(page.getByText('✓ 通过 5/5')).toBeVisible()
   await expect(page.getByRole('row').filter({ hasText: '返回载体' })).toContainText('b64_json')
   await expect.poll(() => readHistoryStore(page, 'imgtest').then(list => list[0]?.images?.[0]?.carrier)).toBe('b64_json')
   expect(sentBodies[0]).toMatchObject({ model: 'gpt-image-2', size: '1024x1024', n: 1, prompt: expect.any(String) })
@@ -82,7 +82,7 @@ test('GPT Image 返回 https 地址时载体不通过', async ({ page }) => {
     status: 200,
     contentType: 'application/json',
     headers: CORS,
-    body: JSON.stringify({ data: [{ url: imageUrl }] }),
+    body: JSON.stringify({ data: [{ url: imageUrl }], usage: { input_tokens: 20, output_tokens: 4160 } }),
   }))
 
   await page.getByText('图片接口测试').click()
@@ -95,7 +95,7 @@ test('GPT Image 返回 https 地址时载体不通过', async ({ page }) => {
   await page.getByText('方形 1024×1024').click()
   await page.getByRole('button', { name: '▶ 运行此用例' }).click()
 
-  await expect(page.getByText('✕ 3/4 通过')).toBeVisible()
+  await expect(page.getByText('✕ 4/5 通过')).toBeVisible()
   await expect(page.getByText('! 请求失败')).toHaveCount(0)
   const carrier = page.getByRole('row').filter({ hasText: '返回载体' })
   await expect(carrier).toContainText('b64_json')
@@ -334,7 +334,7 @@ test('隐藏价格开关生效，且导出的 HTML 报告不含任何价格信�
   })
   await page.route('**/v1/images/generations', route => route.fulfill({
     status: 200, contentType: 'application/json', headers: { ...CORS, 'x-oneapi-request-id': 'req-hideprice' },
-    body: JSON.stringify({ data: [{ b64_json: b64 }] }),
+    body: JSON.stringify({ data: [{ b64_json: b64 }], usage: { input_tokens: 20, output_tokens: 4160 } }),
   }))
   await page.getByText('图片接口测试').click()
   await page.getByRole('button', { name: '渠道管理', exact: true }).click()
@@ -389,7 +389,7 @@ test('历史批次：两轮两批、补跑只留最新、一键还原到工作�
       ctx.fillRect(0, 0, 1024, 1024)
       return c.toDataURL('image/png').split(',')[1]
     })
-    await route.fulfill({ status: 200, contentType: 'application/json', headers: CORS, body: JSON.stringify({ data: [{ b64_json: b64 }] }) })
+    await route.fulfill({ status: 200, contentType: 'application/json', headers: CORS, body: JSON.stringify({ data: [{ b64_json: b64 }], usage: { input_tokens: 20, output_tokens: 4160 } }) })
   })
   page.on('dialog', d => d.accept())
 
@@ -403,6 +403,8 @@ test('历史批次：两轮两批、补跑只留最新、一键还原到工作�
   await page.getByRole('button', { name: '批量测试', exact: true }).click()
   const modelInput = page.getByPlaceholder('gpt-image-2')
   await modelInput.fill('gpt-image-batch')
+  // 失焦才按模型重建用例：从占位的 gpt-image-2（多两条 quality 负向用例）换成认不出家族的型号
+  await modelInput.blur()
 
   // 只留一个用例，跑两轮「运行选中」——每轮各开一批
   await page.getByLabel('全选').uncheck()
@@ -419,6 +421,8 @@ test('历史批次：两轮两批、补跑只留最新、一键还原到工作�
   await expect.poll(() => snapshot().then(s => s.runIds)).toBe(2)
 
   // 补跑单条：归入当前这一批，并顶掉同名用例的旧记录（总数仍是 2，其中 1 条是新写的）
+  // 记录落库时批量运行可能还没收尾，这时点单条会被「正在批量运行中」挡掉
+  await expect(page.getByRole('button', { name: '■ 停止' })).toBeDisabled()
   const before = new Set((await snapshot()).ids)
   await page.getByRole('button', { name: '▶ 运行此用例' }).click()
   await expect.poll(async () => {
@@ -437,14 +441,14 @@ test('历史批次：两轮两批、补跑只留最新、一键还原到工作�
   await older.getByRole('button', { name: '↺ 还原到工作台' }).click()
   await expect(page.getByTestId('imgtest-restored-note')).toBeVisible()
   await expect(page.getByTestId('imgtest-restored-note')).toContainText('缩略图')
-  await expect(page.getByText('✓ 通过 4/4')).toBeVisible()
+  await expect(page.getByText('✓ 通过 5/5')).toBeVisible()
   await expect(modelInput).toHaveValue('gpt-image-batch')
   await expect(page.getByRole('button', { name: '导出 HTML' })).toBeEnabled()
 
   // 「清除」把结果与批次一起清掉
   await page.getByTestId('imgtest-restored-note').getByRole('button', { name: '清除' }).click()
   await expect(page.getByTestId('imgtest-restored-note')).toHaveCount(0)
-  await expect(page.getByText('✓ 通过 4/4')).toHaveCount(0)
+  await expect(page.getByText('✓ 通过 5/5')).toHaveCount(0)
 })
 
 test('渠道管理：复制渠道不切换当前使用', async ({ page }) => {

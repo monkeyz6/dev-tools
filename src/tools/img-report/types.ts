@@ -62,6 +62,8 @@ export interface ImgRecImage {
   formatLabel?: string
   carrier?: ImgCarrier
   c2pa?: ImgC2paResult
+  /** 请求了 background=transparent 时才采样：64×64 下 alpha<250 的像素占比 */
+  alphaRatio?: number
 }
 
 /** nano 模型在 Interactions 与 generateContent 之间的选择。旧记录没有该字段。 */
@@ -85,6 +87,15 @@ export interface ImgInteractionMeta {
   searchSteps: number
   /** 多轮编辑：第一轮返回的 interaction id */
   prevId?: string | null
+}
+
+/** OpenAI images 响应顶层的参数回显与用量。字段缺失为 null。 */
+export interface ImgOpenAiEcho {
+  quality: string | null
+  size: string | null
+  output_format: string | null
+  background: string | null
+  usage: { input_tokens: number | null; output_tokens: number | null } | null
 }
 
 export interface ImgCheck { name: string; target: string | number; actual: string | number; pass: boolean; info?: boolean }
@@ -127,6 +138,8 @@ export interface ImgRecord {
   geminiEndpoint?: ImgGeminiEndpoint
   /** candidates 解析读到的用量与搜索证据。Interactions 记录不写。 */
   generateContent?: ImgGenerateContentMeta
+  /** OpenAI images 响应的回显与 usage。旧记录没有，回显 / usage 校验整段跳过。 */
+  openaiEcho?: ImgOpenAiEcho
 }
 
 export function imgFmtTime(ts: number) {

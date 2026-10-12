@@ -6,13 +6,15 @@ import { historyDbGetAll, historyDbPutOne, historyDbDeleteOne, historyDbDeleteMa
 import { useDebouncedPersist } from '../shared/use-debounced-persist'
 import { uniqueCopyName } from '../shared/channel-copy'
 import { IMG_API_LABEL, imgFmtTime } from './img-report/types'
-import type { ImgApiType, ImgC2paResult, ImgCarrier, ImgCheck, ImgGeminiEndpoint, ImgGenerateContentMeta, ImgInteractionMeta, ImgRecImage, ImgRecord } from './img-report/types'
+import type { ImgApiType, ImgC2paResult, ImgCarrier, ImgCheck, ImgGeminiEndpoint, ImgGenerateContentMeta, ImgInteractionMeta, ImgOpenAiEcho, ImgRecImage, ImgRecord } from './img-report/types'
 import { imgC2paIncomplete, imgC2paPending, imgC2paUnreadable } from './img-report/c2pa'
 import ImgC2paLine from './img-report/C2paLine'
 import { imgClassify, imgExpectedRejected, imgVerdict } from './img-report/summary'
 import { imgCarrierCheck, imgClassifyGeminiPart, imgClassifyOpenAiImage, sniffImageMime } from './img-report/carrier'
 import { IMG_NANO_TIER_TOKENS, imgInteractionChecks, imgParseInteraction } from './img-report/interactions'
 import { imgGenerateContentExtraChecks, imgGenerateContentGrounded, imgGenerateContentImageTokens, imgIsThoughtPart } from './img-report/generate-content'
+import { imgGptImageChecks, imgGptImageFamily, imgGptQualityRejected, imgParseOpenAiEcho } from './img-report/gpt-image'
+import type { ImgGptImageFamily } from './img-report/gpt-image'
 import { imgGroupBatches, imgTrimByBatch } from './img-report/batches'
 import type { ImgBatch } from './img-report/batches'
 import ImgReportView from './img-report/ImgReportView'
@@ -234,6 +236,7 @@ const IMG_TEST_SETS: Record<ImgApiType, ImgCaseDef[]> = {
     { name: 'output_format=webp', desc: 'webp 输出格式校验', params: { size: '1024x1024', n: 1, output_format: 'webp' } },
     { name: 'quality=low', desc: 'quality 参数是否透传（速度更快）', params: { size: '1024x1024', n: 1, quality: 'low' } },
     { name: '参考图编辑 1024×1024', desc: 'edits + 尺寸校验', params: { size: '1024x1024', n: 1 }, needRef: true, prompt: '把这张图改成水彩画风格' },
+    { name: 'quality=ultra（非法值）', desc: 'quality 枚举外的值：只认 4xx 拒绝，出了图说明渠道不校验参数', params: { size: '1024x1024', n: 1, quality: 'ultra' }, expect: 'unsupported' },
   ],
   grok: [
     { name: '1k + 1:1', desc: 'resolution=1k, aspect_ratio=1:1', params: { resolution: '1k', aspect_ratio: '1:1', n: 1, response_format: 'url' } },
@@ -318,6 +321,21 @@ const IMG_NANO_GENERATE_CONTENT_CASES: ImgCaseDef[] = [
   { name: 'thinkingLevel=minimal · 1K 1:1', desc: 'imageConfig 1K · 1:1，另加 thinkingConfig.thinkingLevel=minimal：只判参数被接受并出图', params: { imageSize: '1K', aspectRatio: '1:1', thinkingLevel: 'minimal' } },
   { name: 'google_search · 1K 16:9', desc: 'tools: [{google_search:{}}] · imageConfig 1K · 16:9：响应 groundingMetadata 里要有搜索证据（搜索可能单独计费）', params: { imageSize: '1K', aspectRatio: '16:9', googleSearch: true }, prompt: '用 Google 搜索查今天旧金山的天气，并把结果画成一张简洁的天气信息图' },
 ]
+
+// gpt-image 家族追加在通用 openai 用例之后，只补两代之间有差别的档位（snapshot 按前缀归族，见 img-report/gpt-image.ts）。
+// gpt-image-2 不支持 xhigh / max：只认 4xx 拒绝。2.5 支持：出图且 quality 回显一致才算通过。
+// gpt-image-2 不测透明背景：只有社区证据（2026-09-16 开放 preview，2026-10-01 起回 400 invalid_value），官方状态不明。
+const IMG_GPT_IMAGE_CASES: Record<ImgGptImageFamily, ImgCaseDef[]> = {
+  v2: [
+    { name: 'quality=xhigh（预期不支持）', desc: 'gpt-image-2 只支持 low / medium / high / auto：只认 4xx 拒绝，出了图就是渠道接受了官方不支持的档位', params: { size: '1024x1024', n: 1, quality: 'xhigh' }, expect: 'unsupported' },
+    { name: 'quality=max（预期不支持）', desc: 'gpt-image-2 只支持 low / medium / high / auto：只认 4xx 拒绝，出了图就是渠道接受了官方不支持的档位', params: { size: '1024x1024', n: 1, quality: 'max' }, expect: 'unsupported' },
+  ],
+  'v2.5': [
+    { name: 'quality=xhigh', desc: '2.5 新增档位：出图且响应 quality 回显为 xhigh（被悄悄降档会在回显上露出来）', params: { size: '1024x1024', n: 1, quality: 'xhigh' } },
+    { name: 'quality=max', desc: '2.5 最高档位：出图且响应 quality 回显为 max', params: { size: '1024x1024', n: 1, quality: 'max' } },
+    { name: 'background=transparent · png', desc: '透明背景 + png：采样像素，透明像素占比 ≥ 1% 才算真透明', params: { size: '1024x1024', n: 1, background: 'transparent', output_format: 'png' }, prompt: '单个红苹果贴纸素材，居中，背景完全透明' },
+  ],
+}
 
 interface ImgPlan {
   kind: 'json' | 'multipart'
@@ -453,8 +471,24 @@ function imgCheckResolutionTier(base: number, w: number, h: number) {
   const devPct = base ? +(((equivalent - base) / base) * 100).toFixed(1) : 0
   return { equivalent: +equivalent.toFixed(1), min: +min.toFixed(1), devPct, pass: equivalent >= min }
 }
+// 透明背景采样：缩到 64×64 不铺底色，数 alpha<250 的像素。缩略图铺了白底且是 JPEG，看不出透明
+const IMG_ALPHA_SAMPLE = 64
+function imgAlphaRatio(img: HTMLImageElement): number | undefined {
+  try {
+    const c = document.createElement('canvas')
+    c.width = IMG_ALPHA_SAMPLE
+    c.height = IMG_ALPHA_SAMPLE
+    const ctx = c.getContext('2d')
+    if (!ctx) return undefined
+    ctx.drawImage(img, 0, 0, IMG_ALPHA_SAMPLE, IMG_ALPHA_SAMPLE)
+    const px = ctx.getImageData(0, 0, IMG_ALPHA_SAMPLE, IMG_ALPHA_SAMPLE).data
+    let clear = 0
+    for (let i = 3; i < px.length; i += 4) if (px[i] < 250) clear++
+    return clear / (IMG_ALPHA_SAMPLE * IMG_ALPHA_SAMPLE)
+  } catch { return undefined }
+}
 // 一次解码同时拿尺寸与缩略图：生成图动辄 2K/4K，原先先量尺寸再压缩缩略图要整图解码两遍
-function imgDecodeWithThumb(dataUri: string | null, maxSide = 160): Promise<{ w: number; h: number; thumb: string | null }> {
+function imgDecodeWithThumb(dataUri: string | null, maxSide = 160, opts: { alpha?: boolean } = {}): Promise<{ w: number; h: number; thumb: string | null; alphaRatio?: number }> {
   if (!dataUri) return Promise.resolve({ w: 0, h: 0, thumb: null })
   return new Promise(res => {
     const img = new Image()
@@ -462,6 +496,7 @@ function imgDecodeWithThumb(dataUri: string | null, maxSide = 160): Promise<{ w:
       const w0 = img.naturalWidth || img.width, h0 = img.naturalHeight || img.height
       img.onload = null
       img.onerror = null
+      const alphaRatio = opts.alpha ? imgAlphaRatio(img) : undefined
       try {
         const scale = Math.min(1, maxSide / Math.max(w0, h0))
         const w = Math.max(1, Math.round(w0 * scale))
@@ -470,12 +505,12 @@ function imgDecodeWithThumb(dataUri: string | null, maxSide = 160): Promise<{ w:
         c.width = w
         c.height = h
         const ctx = c.getContext('2d')
-        if (!ctx) { res({ w: w0, h: h0, thumb: null }); return }
+        if (!ctx) { res({ w: w0, h: h0, thumb: null, alphaRatio }); return }
         ctx.fillStyle = '#fff'
         ctx.fillRect(0, 0, w, h)
         ctx.drawImage(img, 0, 0, w, h)
-        res({ w: w0, h: h0, thumb: c.toDataURL('image/jpeg', 0.72) })
-      } catch { res({ w: w0, h: h0, thumb: null }) }
+        res({ w: w0, h: h0, thumb: c.toDataURL('image/jpeg', 0.72), alphaRatio })
+      } catch { res({ w: w0, h: h0, thumb: null, alphaRatio }) }
     }
     img.onerror = () => res({ w: 0, h: 0, thumb: null })
     img.src = dataUri
@@ -521,8 +556,9 @@ function imgLoadUi(): { apiType?: ImgApiType; model?: string; prompt?: string; g
 function imgResolveTierKey(type: ImgApiType, body: any): string {
   body = body || {}
   if (type === 'openai') {
-    const q = String(body.quality || '').toLowerCase()
-    return (q === 'low' || q === 'high') ? q : 'medium'
+    // 只有没写 / auto 按 medium；其余原样作为档位键。xhigh / max 没有内置价格、ultra 这类非法值也查不到，都不估价
+    const q = String(body.quality || '').trim().toLowerCase()
+    return !q || q === 'auto' ? 'medium' : q
   }
   if (type === 'grok') return String(body.resolution || '1k').toLowerCase()
   if (type === 'gemini') {
@@ -567,6 +603,7 @@ function imgBuildPlan(type: ImgApiType, model: string, prompt: string, params: I
       if (params.n) fields.n = String(params.n)
       if (params.quality && params.quality !== 'auto') fields.quality = params.quality
       if (params.output_format) fields.output_format = params.output_format
+      if (params.background) fields.background = params.background
       const images: string[] = []
       for (let i = 1; i <= refCount; i++) images.push(`__REF_${i}_BLOB__`)
       return { kind: 'multipart', endpoint: '/v1/images/edits', method: 'POST', headers: { Authorization: '{{APIKEY}}' }, multipart: { fields, imagesField: 'image[]', images } }
@@ -575,6 +612,7 @@ function imgBuildPlan(type: ImgApiType, model: string, prompt: string, params: I
     if (params.size && params.size !== 'auto') body.size = params.size
     if (params.quality && params.quality !== 'auto') body.quality = params.quality
     if (params.output_format) body.output_format = params.output_format
+    if (params.background) body.background = params.background
     return { kind: 'json', endpoint: '/v1/images/generations', method: 'POST', headers: { Authorization: '{{APIKEY}}', 'Content-Type': 'application/json' }, body }
   }
   if (type === 'grok') {
@@ -761,6 +799,12 @@ function imgDeriveTargets(type: ImgApiType, plan: ImgPlan): Record<string, any> 
     if (typeof s === 'string' && /^\d+x\d+$/i.test(s)) { const [w, h] = s.toLowerCase().split('x').map(Number); t.wReq = w; t.hReq = h; t.sizeReq = s }
     else if (s) { t.sizeReq = s; imgSetResolutionTierTarget(t, s) }
   }
+  if (type === 'openai') {
+    if (typeof body.quality === 'string' && body.quality) t.qualityReq = body.quality
+    if (typeof body.background === 'string' && body.background) t.bgReq = body.background
+    // 枚举外的 quality，或 gpt-image-2 带 xhigh / max：只认 4xx 拒绝
+    if (imgGptQualityRejected(String(body.model || ''), body.quality)) { t.strictReject = true; t.rejectCheck = 'quality' }
+  }
   if (type === 'grok') { imgSetResolutionTierTarget(t, body.resolution); t.ratioReq = (body.aspect_ratio && body.aspect_ratio !== 'auto') ? body.aspect_ratio : null }
   if (type === 'gemini') {
     const rf = body?.response_format
@@ -868,6 +912,8 @@ interface ImgParsedResponse {
   interaction?: ImgInteractionMeta
   /** candidates 响应上的用量与搜索证据 */
   generateContent?: ImgGenerateContentMeta
+  /** OpenAI images 响应顶层的参数回显与 usage */
+  openaiEcho?: ImgOpenAiEcho
 }
 function imgParseResponse(type: ImgApiType, text: string, headers: Record<string, string>, httpStatus: number, ok: boolean, fmtHint: string | undefined): ImgParsedResponse {
   const out: ImgParsedResponse = { ok, httpStatus, headers, images: [], rawSnippet: text, error: null }
@@ -911,6 +957,7 @@ function imgParseResponse(type: ImgApiType, text: string, headers: Record<string
       }
     }
   } else {
+    if (type === 'openai') out.openaiEcho = imgParseOpenAiEcho(json)
     const arr = json.data || []
     // data[] 里没有 url / b64_json 的项（如只有 revised_prompt）不算图
     out.images = []
@@ -1000,12 +1047,22 @@ async function imgSynthRef(mime: ImgSynthRefs['mime'], index: number): Promise<I
   return { dataUri, name: `synth-${index + 1}.${mime.split('/')[1]}` }
 }
 
+// 用例列表由哪一套组成。模型框留空时按占位模型算，与实际发送的模型（planOf）一致。
+function imgCaseSetKey(t: ImgApiType, model: string, endpoint: ImgGeminiEndpoint): string {
+  const id = model.trim() || IMG_PLACEHOLDER_MODEL[t]
+  if (t === 'gemini' && imgIsNanoBanana21(id)) return 'nano:' + endpoint
+  if (t === 'openai') return 'openai:' + (imgGptImageFamily(id) || 'generic')
+  return t
+}
+
 function imgBuildCases(t: ImgApiType, model = '', endpoint: ImgGeminiEndpoint = 'interactions'): ImgCase[] {
-  const id = model.trim()
+  const id = model.trim() || IMG_PLACEHOLDER_MODEL[t]
   // nano 2.1 只用专属用例，不再拼通用 gemini 用例。端点决定 12 条还是 8 条。
+  // gpt-image 家族是通用 openai 用例 + 本家族追加的几条。
+  const family = t === 'openai' ? imgGptImageFamily(id) : null
   const defs = t === 'gemini' && imgIsNanoBanana21(id)
     ? (endpoint === 'generateContent' ? IMG_NANO_GENERATE_CONTENT_CASES : IMG_NANO_BANANA_CASES)
-    : (IMG_TEST_SETS[t] || [])
+    : [...(IMG_TEST_SETS[t] || []), ...(family ? IMG_GPT_IMAGE_CASES[family] : [])]
   return defs.map((c, i) => ({
     id: 'c' + i, name: c.name, desc: c.desc, params: JSON.parse(JSON.stringify(c.params)),
     needRef: !!c.needRef, synthRefs: c.synthRefs ? { ...c.synthRefs } : null, expect: c.expect, prompt: c.prompt || null,
@@ -1084,6 +1141,9 @@ function imgBuildChecks(rec: ImgRecord): ImgCheck[] {
       imageCount: rec.images.length,
       firstSize: first && first.w > 0 && first.h > 0 ? { w: first.w, h: first.h } : null,
     }))
+  }
+  if (rec.apiType === 'openai') {
+    c.push(...imgGptImageChecks({ targets: t, echo: rec.openaiEcho, model: rec.model, images: rec.images }))
   }
   if (t.generateContent || (t.searchReq && !t.interactions)) {
     c.push(...imgGenerateContentExtraChecks({
@@ -1642,7 +1702,7 @@ function ImgApiTestTool() {
   // 避免每敲一个字符就弹 confirm 拦住输入。
   const commitModel = (next: string) => {
     const prev = modelRef.current
-    const crossing = apiType === 'gemini' && imgIsNanoBanana21(prev) !== imgIsNanoBanana21(next)
+    const crossing = imgCaseSetKey(apiType, prev, geminiEndpoint) !== imgCaseSetKey(apiType, next, geminiEndpoint)
     if (crossing) {
       // 有结果、取消过勾选、改过请求预览，重建都会丢掉
       const dirty = casesRef.current.some(c => c.result || !c.selected || c.editedPreview != null)
@@ -1650,7 +1710,7 @@ function ImgApiTestTool() {
         setModel(prev)
         return
       }
-      setCases(imgBuildCases('gemini', next, geminiEndpoint))
+      setCases(imgBuildCases(apiType, next, geminiEndpoint))
       setSelAll(true)
       setCurrentRunId(null)
       setRestoredFrom(null)
@@ -1916,6 +1976,7 @@ function ImgApiTestTool() {
       if (parsed.interaction && prevId) parsed.interaction.prevId = prevId
       if (parsed.interaction) rec.interaction = parsed.interaction
       if (parsed.generateContent) rec.generateContent = parsed.generateContent
+      if (parsed.openaiEcho) rec.openaiEcho = parsed.openaiEcho
       rec.ok = parsed.ok
       rec.error = parsed.error
       const shownResponse = imgResponseForDisplay(parsed.rawSnippet)
@@ -1928,9 +1989,11 @@ function ImgApiTestTool() {
           let dim = !dataUri && im.url ? await imgProbeImage(im.url) : { w: 0, h: 0 }
           if ((!dim.w || !dim.h) && !dataUri && im.url) dataUri = await imgUrlToDataURI(im.url)
           let thumb: string | null = null
+          let alphaRatio: number | undefined
           if (dataUri) {
-            const decoded = await imgDecodeWithThumb(dataUri)
+            const decoded = await imgDecodeWithThumb(dataUri, 160, { alpha: targets.bgReq === 'transparent' })
             thumb = decoded.thumb
+            alphaRatio = decoded.alphaRatio
             if (!dim.w || !dim.h) dim = { w: decoded.w, h: decoded.h }
           }
           const uriFormat = imgDetectUriFormat(dataUri)
@@ -1942,6 +2005,7 @@ function ImgApiTestTool() {
             format,
             ...(sniffed && labelFmt !== 'unknown' && labelFmt !== format ? { formatLabel: labelFmt } : {}),
             carrier: im.carrier,
+            ...(alphaRatio != null ? { alphaRatio } : {}),
           })
         }
         rec.images = imgs

@@ -28,9 +28,13 @@ const CARRIERS = new Set<ImgCarrier>([
   'b64_json', 'b64_prefixed', 'inline', 'inline_prefixed', 'http-url', 'data-url', 'other-url',
 ])
 
+/** 去掉 `vendor/` 这类路径前缀后的模型名 */
+export function imgModelLeaf(model: string): string {
+  return String(model ?? '').trim().split('/').map(part => part.trim()).filter(Boolean).pop() || ''
+}
+
 export function imgIsGptImageModel(model: string): boolean {
-  const leaf = String(model ?? '').trim().split('/').map(part => part.trim()).filter(Boolean).pop() || ''
-  return /^(?:gpt-image|chatgpt-image)(?:$|[-.])/i.test(leaf)
+  return /^(?:gpt-image|chatgpt-image)(?:$|[-.])/i.test(imgModelLeaf(model))
 }
 
 export function imgExpectedCarrier(
