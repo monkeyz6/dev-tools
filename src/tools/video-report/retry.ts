@@ -15,7 +15,7 @@ function videoTaskSucceeded(st: string) {
 }
 
 function videoTaskFailed(st: string) {
-  return st === 'failed' || st === 'failure' || st === 'cancelled'
+  return st === 'failed' || st === 'failure' || st === 'cancelled' || st === 'expired'
 }
 
 /**

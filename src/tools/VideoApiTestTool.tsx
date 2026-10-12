@@ -8,7 +8,7 @@ import { uniqueCopyName } from '../shared/channel-copy'
 import { encryptLlmApiKey, decryptLlmApiKey } from '../shared/api-key-crypto'
 import { fetchVideoObjectUrl, probeVideoMeta, vidAspectRatio, vidCheckRatio, vidCheckResolution, vidFormatDuration, videoIsRemoteHttpUrl } from '../shared/video-meta'
 import type { VideoProbeResult } from '../shared/video-meta'
-import { VIDEO_API_TYPE_LABEL, VIDEO_CASE_DEFS, VIDEO_MATERIAL_DEFS, VIDEO_RESOLUTION_HEIGHT, videoApiTypeOf, videoModelMaxResolution, videoModelMaxResolutionLabel, videoFmtTime } from './video-report/types'
+import { VIDEO_API_TYPE_LABEL, VIDEO_CASE_DEFS, VIDEO_MATERIAL_DEFS, VIDEO_REQUIREMENT_LABEL, VIDEO_RESOLUTION_HEIGHT, videoApiTypeOf, videoModelMaxResolution, videoModelMaxResolutionLabel, videoModelMeetsRequirement, videoFmtTime } from './video-report/types'
 import type { VideoApiType, VideoCaseDef, VideoCaseKind, VideoCheck, VideoExpect, VideoRecord } from './video-report/types'
 import {
   OMNI_CASE_DEFS, OMNI_DEFAULT_MODEL, OMNI_DEFAULT_URLS, OMNI_MODEL_OPTIONS,
@@ -22,6 +22,8 @@ import { VIDEO_TASK_ENDPOINT, videoAssetEndpoint, videoSeedancePath, videoSeedan
 import { videoClassify, videoVerdict } from './video-report/summary'
 import { videoCanReprobe, videoCanRequery, videoHasUsableProbe, videoReprobeSrc, videoRetryAction, videoRetrySort, videoRetryTargets } from './video-report/retry'
 import { videoGroupBatches, videoTrimByBatch } from './video-report/batches'
+import { VIDEO_KIND_ROLES, videoApplyFeatureEcho, videoExtractEcho, videoAutoDurationChecks, videoDraftFinalContent, videoExtractFeatureEcho, videoFeatureChecks } from './video-report/seedance-features'
+import type { VideoDraftRef, VideoRoleSpec } from './video-report/seedance-features'
 import type { VideoBatch } from './video-report/batches'
 import VideoReportView from './video-report/VideoReportView'
 
@@ -162,6 +164,17 @@ interface VideoAssets {
   refAudio?: string
 }
 
+/** 尾帧是 jpeg 直链：<img> 读 naturalWidth/Height 不需要 CORS */
+function videoImageSize(url: string, ms: number): Promise<{ w: number; h: number }> {
+  return new Promise((resolve, reject) => {
+    const img = new Image()
+    const timer = setTimeout(() => { img.src = ''; reject(new Error('尾帧加载超时')) }, ms)
+    img.onload = () => { clearTimeout(timer); resolve({ w: img.naturalWidth, h: img.naturalHeight }) }
+    img.onerror = () => { clearTimeout(timer); reject(new Error('尾帧加载失败')) }
+    img.src = url
+  })
+}
+
 function videoUid() { return Date.now().toString(36) + Math.random().toString(36).slice(2, 7) }
 function videoEsc(s: unknown) { return String(s ?? '') }
 
@@ -260,7 +273,8 @@ function videoTaskSucceeded(st: string) {
 }
 
 function videoTaskFailed(st: string) {
-  return st === 'failed' || st === 'failure' || st === 'cancelled'
+  // expired：任务排队或运行超过 execution_expires_after 被官方终止，不会再变
+  return st === 'failed' || st === 'failure' || st === 'cancelled' || st === 'expired'
 }
 
 function videoExtractVideoUrl(json: any): string | null {
@@ -272,22 +286,7 @@ function videoExtractVideoUrl(json: any): string | null {
     || null
 }
 
-function videoExtractEcho(json: any): { resolution?: string; ratio?: string; duration?: number; generate_audio?: boolean; seed?: number } {
-  const src = json?.data?.data && typeof json.data.data === 'object' ? json.data.data : (json?.data && typeof json.data === 'object' && !json.data.content ? json.data : json)
-  const duration = src?.duration
-  const seed = src?.seed
-  return {
-    resolution: src?.resolution != null ? String(src.resolution) : undefined,
-    ratio: src?.ratio != null ? String(src.ratio) : undefined,
-    duration: typeof duration === 'number' ? duration : (duration != null ? Number(duration) : undefined),
-    generate_audio: typeof src?.generate_audio === 'boolean' ? src.generate_audio : undefined,
-    seed: typeof seed === 'number' ? seed : (seed != null && seed !== '' && !Number.isNaN(Number(seed)) ? Number(seed) : undefined),
-  }
-}
-
-type VideoAssetRole = Exclude<keyof VideoMediaUrls, 'sensitiveFace'>
-
-function videoMediaItems(urls: VideoMediaUrls, testMaterials: boolean, assets: VideoAssets | null, roles: Array<{ key: VideoAssetRole; type: 'image_url' | 'video_url' | 'audio_url'; role: string }>) {
+function videoMediaItems(urls: VideoMediaUrls, testMaterials: boolean, assets: VideoAssets | null, roles: VideoRoleSpec[]) {
   const skipped: string[] = []
   const content: Record<string, unknown>[] = []
   let missing: string | null = null
@@ -311,7 +310,7 @@ function videoMediaItems(urls: VideoMediaUrls, testMaterials: boolean, assets: V
   return { content, skipped, missing }
 }
 
-function videoBuildPlan(def: VideoCaseDef, model: string, prompt: string, urls: VideoMediaUrls, testMaterials: boolean, assets: VideoAssets | null): { plan: VideoPlan; skipped: string[]; missing: string | null; targets: Record<string, string | number | boolean | null> } {
+function videoBuildPlan(def: VideoCaseDef, model: string, prompt: string, urls: VideoMediaUrls, testMaterials: boolean, assets: VideoAssets | null, draft: VideoDraftRef | null = null): { plan: VideoPlan; skipped: string[]; missing: string | null; targets: Record<string, string | number | boolean | null> } {
   const kind = def.kind
   if (kind === 'material-group') {
     return {
@@ -345,37 +344,35 @@ function videoBuildPlan(def: VideoCaseDef, model: string, prompt: string, urls: 
     }
   }
 
-  const text = { type: 'text', text: prompt }
-  let extra: Record<string, unknown>[] = []
+  const text = { type: 'text', text: def.prompt ?? prompt }
+  let content: Record<string, unknown>[] = [text]
   let skipped: string[] = []
   let missing: string | null = null
   const targets: Record<string, string | number | boolean | null> = {}
 
-  if (kind === 'i2v-frames') {
-    const packed = videoMediaItems(urls, testMaterials, assets, [
-      { key: 'firstFrame', type: 'image_url', role: 'first_frame' },
-      { key: 'lastFrame', type: 'image_url', role: 'last_frame' },
-    ])
-    extra = packed.content
+  const roles = VIDEO_KIND_ROLES[kind]
+  if (roles) {
+    const packed = videoMediaItems(urls, testMaterials, assets, roles)
+    content = [text, ...packed.content]
     skipped = packed.skipped
     missing = packed.missing
-  } else if (kind === 'ref-omni') {
-    const packed = videoMediaItems(urls, testMaterials, assets, [
-      { key: 'refImage', type: 'image_url', role: 'reference_image' },
-      { key: 'refVideo', type: 'video_url', role: 'reference_video' },
-      { key: 'refAudio', type: 'audio_url', role: 'reference_audio' },
-    ])
-    extra = packed.content
-    skipped = packed.skipped
-    missing = packed.missing
+    if (!packed.content.length) missing = `${roles.map(r => r.role).join(' / ')} URL（左栏为空）`
   } else if (kind === 'i2v-reject') {
     // 名人照始终走 https 直链：不把它登记进素材组，也不受「测试素材库」开关影响
     const face = videoTrimUrl(urls.sensitiveFace)
     if (!face) missing = '敏感人像 URL（左栏为空）'
-    else extra = [{ type: 'image_url', image_url: { url: face }, role: 'first_frame' }]
+    else content = [text, { type: 'image_url', image_url: { url: face }, role: 'first_frame' }]
+  } else if (kind === 'draft-final') {
+    content = videoDraftFinalContent(draft?.taskId ?? null)
+    if (!draft) missing = '样片任务尚未成功（先跑「样片 · 480p」）'
+    else {
+      targets.draftTaskId = draft.taskId
+      if (draft.duration) targets.draftDuration = draft.duration
+      if (draft.w && draft.h) { targets.draftW = draft.w; targets.draftH = draft.h }
+    }
   }
 
-  const body: Record<string, unknown> = { model, content: [text, ...extra] }
+  const body: Record<string, unknown> = { model, content }
   for (const [k, v] of Object.entries(def.params)) {
     if (v === undefined) continue
     body[k] = v
@@ -431,7 +428,9 @@ function videoNegativeOutcome(rec: VideoRecord): { rejected: boolean; produced: 
   const http4xx = rec.status >= 400 && rec.status < 500
   // 提交 4xx 不会写入 taskId；查询 4xx 已有 taskId，只是轮询终态，不能算模型拒绝
   const submitRejected = http4xx && !rec.taskId
-  const taskFailed = videoTaskFailed(rec.taskStatus || '')
+  // expired 是超过 execution_expires_after 被调度终止：请求已被接受，不是模型拒绝，按超时记请求异常
+  const expired = (rec.taskStatus || '').toLowerCase() === 'expired'
+  const taskFailed = videoTaskFailed(rec.taskStatus || '') && !expired
   const mediaFetchErr = videoIsMediaFetchError(rec.error)
   const rejected = !produced && !mediaFetchErr && (submitRejected || taskFailed)
   const actual = produced ? '任务成功并出片'
@@ -439,6 +438,7 @@ function videoNegativeOutcome(rec: VideoRecord): { rejected: boolean; produced: 
       ? `素材跨域读失败（浏览器 fetch 被拦，不是模型拒绝，请换左栏链接）· ${rec.error}`
       : `素材拉取失败（网关取不到图，不是模型拒绝，请换左栏「敏感人像」链接）· ${rec.error}`)
     : submitRejected ? `HTTP ${rec.status} 已拒绝${rec.error ? ' · ' + rec.error : ''}`
+    : expired ? `任务 expired（已被接受，后因超过 execution_expires_after 被终止，属调度超时、不是拒绝）${rec.error ? ' · ' + rec.error : ''}`
     : taskFailed ? `任务 ${rec.taskStatus}${rec.error ? ' · ' + rec.error : ''}`
     : rec.status ? `HTTP ${rec.status}${rec.taskStatus ? ' · 任务 ' + rec.taskStatus : ''}${rec.error ? ' · ' + rec.error : ''}`
     : (rec.error || '无响应')
@@ -498,7 +498,13 @@ function videoBuildChecks(rec: VideoRecord): VideoCheck[] {
       checks.push({ name: '官方域名', target: official.target, actual: official.actual, pass: official.pass })
     }
   }
-  checks.push({ name: '成片元数据', target: '可读宽高时长', actual: rec.probe ? `${rec.probe.w}×${rec.probe.h} · ${rec.probe.duration.toFixed(2)}s` : (rec.error && !rec.probe ? rec.error : '未读到'), pass: !!(rec.probe && rec.probe.w && rec.probe.h && rec.probe.duration > 0) })
+  const probeOk = !!(rec.probe && rec.probe.w && rec.probe.h && rec.probe.duration > 0)
+  if (!probeOk && rec.targets.output_format === 'mov' && rec.videoUrl) {
+    // mov 是 H.264 yuv444p + PCM，浏览器多半解不了；出片与否由「视频地址」判，元数据请用本地播放器核对
+    checks.push({ name: '成片元数据', target: '可读宽高时长', actual: `mov（yuv444p）浏览器读不出元数据，请用 VLC / IINA 核对${rec.error ? ' · ' + rec.error : ''}`, pass: true, info: true })
+  } else {
+    checks.push({ name: '成片元数据', target: '可读宽高时长', actual: rec.probe ? `${rec.probe.w}×${rec.probe.h} · ${rec.probe.duration.toFixed(2)}s` : (rec.error && !rec.probe ? rec.error : '未读到'), pass: probeOk })
+  }
 
   const wantRes = rec.targets.resolution
   if (typeof wantRes === 'string' && rec.probe) {
@@ -518,7 +524,11 @@ function videoBuildChecks(rec: VideoRecord): VideoCheck[] {
   }
 
   const wantDur = rec.targets.duration
-  if (typeof wantDur === 'number' && rec.probe) {
+  if (wantDur === -1 && rec.kind === 't2v') {
+    // 智能时长的范围只对文生判。2.5 编辑的 -1 跟随原视频，成片可能短约 0.4s、回显又按帧数/24 向下取整，
+    // 4s 原视频会回显 3，套 [4,30] 会误判；编辑改由成片比回显 ±1s，2.5 另比参考视频
+    checks.push(...videoAutoDurationChecks(rec.model, rec.targets, rec.probe))
+  } else if (typeof wantDur === 'number' && wantDur > 0 && rec.probe) {
     const diff = Math.abs(rec.probe.duration - wantDur)
     checks.push({ name: '时长', target: `${wantDur}s ±${VIDEO_DURATION_TOL}s`, actual: `${rec.probe.duration.toFixed(2)}s`, pass: diff <= VIDEO_DURATION_TOL })
   } else if (rec.probe && typeof rec.targets.echoDuration === 'number') {
@@ -567,6 +577,9 @@ function videoBuildChecks(rec: VideoRecord): VideoCheck[] {
   if (rec.targets.watermark != null) {
     checks.push({ name: 'watermark', target: String(rec.targets.watermark), actual: rec.ok ? '任务已接受（画面水印需人工看）' : (rec.error || '未接受'), pass: rec.ok, info: true })
   }
+  if (videoTaskSucceeded(rec.taskStatus || '')) {
+    checks.push(...videoFeatureChecks({ model: rec.model, kind: rec.kind, targets: rec.targets, probe: rec.probe }))
+  }
   if (rec.usage) {
     const tokens = rec.usage.total_tokens ?? rec.usage.completion_tokens
     if (tokens != null) checks.push({ name: 'usage', target: 'total_tokens', actual: tokens, pass: true, info: true })
@@ -574,17 +587,20 @@ function videoBuildChecks(rec: VideoRecord): VideoCheck[] {
   return checks
 }
 
-function videoCapabilityHint(rec: Pick<VideoRecord, 'model' | 'apiType'>): string {
+function videoCapabilityHint(rec: Pick<VideoRecord, 'model' | 'apiType' | 'caseId'>): string {
   if (videoApiTypeOf(rec.apiType) === 'google-omni' && omniIs720OnlyModel(rec.model)) return '仅 720p'
+  const req = VIDEO_CASE_DEFS.find(d => d.id === rec.caseId)?.requires
+  if (req && !videoModelMeetsRequirement(rec.model, req)) return VIDEO_REQUIREMENT_LABEL[req]
   return `最高 ${videoModelMaxResolutionLabel(rec.model)}`
 }
 
-/** 用例分辨率超出模型能力表时按「预期不支持」判定；未知档位（500p）不参与 */
+/** 用例分辨率超出模型能力表、或模型不满足用例要求的能力（如样片仅 2.5）时按「预期不支持」判定；未知档位（500p）不参与 */
 function videoExpectFor(def: VideoCaseDef, model: string, apiType: VideoApiType = 'seedance'): VideoExpect {
   if (def.expect === 'reject') return 'reject'
   if (apiType === 'google-omni') {
     return omniSupportsResolution(model, def.params.resolution) ? 'success' : 'unsupported'
   }
+  if (!videoModelMeetsRequirement(model, def.requires)) return 'unsupported'
   const h = def.params.resolution ? VIDEO_RESOLUTION_HEIGHT[def.params.resolution.toLowerCase()] : undefined
   if (h && h > videoModelMaxResolution(model)) return 'unsupported'
   return 'success'
@@ -919,6 +935,8 @@ function VideoApiTestTool() {
   const urlsRef = useRef(urls)
   const assetsRef = useRef<VideoAssets>({ groupId: null })
   const omniSessionRef = useRef<{ lastInteractionId: string | null }>({ lastInteractionId: null })
+  /** 本轮「样片 · 480p」的任务 id 与成片规格，「样片转正式」引用它 */
+  const seedanceSessionRef = useRef<{ draft: VideoDraftRef | null }>({ draft: null })
   const omniMediaCacheRef = useRef(new Map<string, { mime: string; b64: string }>())
   const omniBlobUrlsRef = useRef(new Set<string>())
   const previewRecRef = useRef<VideoRecord | null>(null)
@@ -1174,6 +1192,7 @@ function VideoApiTestTool() {
     }
     revokeOmniBlobs()
     omniSessionRef.current = { lastInteractionId: null }
+    seedanceSessionRef.current = { draft: null }
     omniMediaCacheRef.current = new Map()
     assetsRef.current = { groupId: null }
     currentRunIdRef.current = null
@@ -1325,7 +1344,13 @@ function VideoApiTestTool() {
   }
 
   const runTask = async (c: VideoCase, ch: VideoChannel, apiKey: string, rec: VideoRecord) => {
-    const built = videoBuildPlan(c.def, model.trim() || VIDEO_DEFAULT_MODEL, prompt, urlsRef.current, testMaterials, assetsRef.current)
+    const built = videoBuildPlan(c.def, model.trim() || VIDEO_DEFAULT_MODEL, prompt, urlsRef.current, testMaterials, assetsRef.current, seedanceSessionRef.current.draft)
+    if (built.missing && c.kind === 'draft-final' && rec.expect === 'unsupported') {
+      // 非 2.5 模型的样片已按预期被拒，没有样片 id 可转；不发请求，记按预期完成
+      rec.ok = true
+      rec.checks = [{ name: '预期不支持', target: `4xx 或任务 failed（能力表：${videoCapabilityHint(rec)}）`, actual: '前置样片已按预期被拒，本条未发送', pass: true }]
+      return
+    }
     if (built.missing) {
       rec.ok = false
       rec.error = testMaterials ? `缺少可用素材：${built.missing}（请先跑素材用例，或关闭「测试素材库」）` : built.missing
@@ -1338,6 +1363,7 @@ function VideoApiTestTool() {
     rec.skippedRoles = built.skipped
     if (c.editedPreview != null) plan = videoParseEditedPreview(plan, c.editedPreview)
     rec.sentPreview = JSON.stringify(plan.body, null, 2)
+    if (c.kind === 'ref-video-edit' || c.kind === 'ref-video-extend') await captureRefVideoMeta(rec)
 
     const resp = await videoFetch(videoSeedanceUrl(ch.baseUrl, plan.endpoint), VIDEO_SUBMIT_TIMEOUT_MS, {
       method: 'POST', headers: videoHeaders(apiKey), body: JSON.stringify(plan.body),
@@ -1369,6 +1395,34 @@ function VideoApiTestTool() {
       return
     }
     await finalizeTask(rec, polled.lastJson)
+    rememberSeedanceDraft(rec)
+  }
+
+  /** 编辑 / 延长要和参考视频比宽高比与时长：发送前读一次左栏参考视频的元数据 */
+  const captureRefVideoMeta = async (rec: VideoRecord) => {
+    const src = videoTrimUrl(urlsRef.current.refVideo)
+    if (!src) return
+    try {
+      const meta = await probeVideoMeta(src, 20000)
+      rec.targets.refVideoW = meta.width
+      rec.targets.refVideoH = meta.height
+      rec.targets.refVideoDuration = meta.duration
+      if (meta.playUrl.startsWith('blob:') && meta.playUrl !== src) URL.revokeObjectURL(meta.playUrl)
+    } catch {
+      rec.targets.refVideoProbe = 'failed'
+    }
+  }
+
+  const rememberSeedanceDraft = (rec: VideoRecord) => {
+    if (videoApiTypeOf(rec.apiType) !== 'seedance' || rec.targets.draft !== true) return
+    if (!rec.taskId || !videoTaskSucceeded(rec.taskStatus || '') || !rec.videoUrl) return
+    const echoDur = typeof rec.targets.echoDuration === 'number' ? rec.targets.echoDuration : undefined
+    seedanceSessionRef.current.draft = {
+      taskId: rec.taskId,
+      w: rec.probe?.w,
+      h: rec.probe?.h,
+      duration: rec.probe?.duration || echoDur,
+    }
   }
 
   /**
@@ -1416,6 +1470,7 @@ function VideoApiTestTool() {
     if (echo.duration != null && !Number.isNaN(echo.duration)) rec.targets.echoDuration = echo.duration
     if (echo.resolution) rec.targets.echoResolution = echo.resolution
     if (typeof echo.seed === 'number') rec.targets.echoSeed = echo.seed
+    videoApplyFeatureEcho(rec.targets, videoExtractFeatureEcho(lastJson))
     const usage = lastJson?.usage || lastJson?.data?.usage || lastJson?.data?.data?.usage
     if (usage && typeof usage === 'object') rec.usage = usage
 
@@ -1437,6 +1492,15 @@ function VideoApiTestTool() {
       rec.ok = true
       rec.probe = null
       rec.error = e?.message || '成片元数据不可读'
+    }
+    if (typeof rec.targets.lastFrameUrl === 'string' && rec.targets.lastFrameUrl) {
+      try {
+        const size = await videoImageSize(rec.targets.lastFrameUrl, 20000)
+        rec.targets.lastFrameW = size.w
+        rec.targets.lastFrameH = size.h
+      } catch {
+        rec.targets.lastFrameProbe = 'failed'
+      }
     }
     rec.checks = videoBuildChecks(rec)
   }
@@ -1638,6 +1702,7 @@ function VideoApiTestTool() {
     next.durationMs = (rec.durationMs || 0) + Math.round(performance.now() - t0)
     next.ok = videoSettleOk(next)
     rememberOmniInteraction(next)
+    rememberSeedanceDraft(next)
     replaceRecord(next)
     if (!cancelled) {
       const st = next.taskStatus || ''
@@ -1768,7 +1833,7 @@ function VideoApiTestTool() {
     const t0 = performance.now()
     const rec: VideoRecord = {
       id: videoUid(), runId: currentRunIdRef.current, time: Date.now(),
-      caseName: c.name, caseDesc: c.desc, channelName: ch.name, model: m, prompt,
+      caseName: c.name, caseDesc: c.desc, channelName: ch.name, model: m, prompt: c.def.prompt ?? prompt,
       apiType, kind: c.kind, caseId: c.id, expect: videoExpectFor(c.def, m, apiType), testMaterials: apiType === 'seedance' && testMaterials, targets: {}, skippedRoles: [],
       status: 0, respHeaders: {}, reqId: '', sentPreview: '',
       ok: false, error: null, rawSnippet: '', taskId: null, taskStatus: null, pollCount: 0,
@@ -1801,6 +1866,7 @@ function VideoApiTestTool() {
     currentRunIdRef.current = null
     assetsRef.current = { groupId: null }
     omniSessionRef.current = { lastInteractionId: null }
+    seedanceSessionRef.current = { draft: null }
     omniMediaCacheRef.current = new Map()
     revokeOmniBlobs()
     setRestoredFrom(null)
@@ -1813,6 +1879,7 @@ function VideoApiTestTool() {
     currentRunIdRef.current = videoUid()
     assetsRef.current = { groupId: null }
     omniSessionRef.current = { lastInteractionId: null }
+    seedanceSessionRef.current = { draft: null }
     setRestoredFrom(null)
     stopRef.current = false
     try {
@@ -1998,7 +2065,7 @@ function VideoApiTestTool() {
     const m = model.trim() || (apiType === 'google-omni' ? OMNI_DEFAULT_MODEL : VIDEO_DEFAULT_MODEL)
     const built = apiType === 'google-omni'
       ? omniBuildPlan(c.def, m, prompt, urls, omniSessionRef.current.lastInteractionId)
-      : videoBuildPlan(c.def, m, prompt, urls, testMaterials, assetsRef.current)
+      : videoBuildPlan(c.def, m, prompt, urls, testMaterials, assetsRef.current, seedanceSessionRef.current.draft)
     const preview = !c.expanded && apiType === 'google-omni'
       ? ''
       : (c.editedPreview != null ? c.editedPreview : (apiType === 'google-omni' ? omniPreviewBody(built.plan.body) : videoPlanPreview(built.plan)))
@@ -2055,6 +2122,7 @@ function VideoApiTestTool() {
     const batchApi = videoApiTypeOf(batch.apiType || batch.records[0]?.apiType)
     revokeOmniBlobs()
     omniSessionRef.current = { lastInteractionId: null }
+    seedanceSessionRef.current = { draft: null }
     omniMediaCacheRef.current = new Map()
     if (batchApi === 'google-omni') {
       const last = [...batch.records]
@@ -2062,6 +2130,9 @@ function VideoApiTestTool() {
         .sort((a, b) => a.time - b.time)
         .at(-1)
       if (last?.taskId) omniSessionRef.current.lastInteractionId = last.taskId
+    } else {
+      const draft = [...batch.records].filter(r => r.caseId === 'draft-480p').sort((a, b) => a.time - b.time).at(-1)
+      if (draft) rememberSeedanceDraft(draft)
     }
     const nextCases = videoBuildCases(batchApi === 'seedance' && batch.records.some(r => r.testMaterials), batchApi)
     const byName = new Map(batch.records.map(r => [r.caseName, r]))
@@ -2080,7 +2151,9 @@ function VideoApiTestTool() {
     setCases(nextCases)
     casesRef.current = nextCases
     if (batch.models[0]) setModel(batch.models[0])
-    const generic = batch.records.find(r => r.prompt)
+    // 视频编辑 / 视频延长带自己的提示词，不能拿来覆盖左栏
+    const ownPrompt = (r: VideoRecord) => nextCases.some(c => (c.id === r.caseId || c.name === r.caseName) && c.def.prompt)
+    const generic = batch.records.find(r => r.prompt && !ownPrompt(r))
     if (generic?.prompt) setPrompt(generic.prompt)
     const ch = channelsRef.current.find(x => x.name === batch.channelName)
     if (ch) setActiveChId(ch.id)

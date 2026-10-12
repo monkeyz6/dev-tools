@@ -16,20 +16,39 @@ export type VideoCaseKind =
   | 'i2v'
   | 'i2v-frames'
   | 'ref-omni'
+  | 'ref-image-audio'
+  | 'ref-video-edit'
+  | 'ref-video-extend'
+  | 'ref-audio-only'
+  | 'draft-final'
   | 'i2v-reject'
 
 /** 期望结果：success 出片；reject 网关/审核应拒绝；unsupported 由模型能力表推断、运行时才会标上 */
 export type VideoExpect = 'success' | 'reject' | 'unsupported'
 
-/** 只列 Seedance 2.x 官方请求参数表里的字段；`camera_fixed` 是 1.x 专属，2.0 全系 400，不进用例 */
+/**
+ * 只列 Seedance 2.x 官方请求参数表里的字段。`camera_fixed`、`seed`、`frames` 官方只列 1.0 pro，
+ * 不进用例（camera_fixed 在 2.0 全系实测 400 `must be empty`）。
+ */
 export interface VideoCaseParams {
   resolution?: string
   ratio?: string
+  /** -1 表示由模型在有效范围内自选，实际值看查询回显 */
   duration?: number
   generate_audio?: boolean
   watermark?: boolean
+  /** 旧记录兼容：早期 480p 用例带过 seed */
   seed?: number
+  return_last_frame?: boolean
+  priority?: number
+  safety_identifier?: string
+  execution_expires_after?: number
+  output_format?: string
+  draft?: boolean
 }
+
+/** 用例要求的模型能力；不满足时按「预期不支持」运行 */
+export type VideoCaseRequirement = 'seedance-2.5'
 
 export interface VideoCaseDef {
   id: string
@@ -38,6 +57,9 @@ export interface VideoCaseDef {
   kind: VideoCaseKind
   params: VideoCaseParams
   expect: 'success' | 'reject'
+  /** 用例自带提示词，覆盖左栏（编辑 / 延长靠提示词关键词判定任务类型） */
+  prompt?: string
+  requires?: VideoCaseRequirement
 }
 
 export const VIDEO_MATERIAL_DEFS: VideoCaseDef[] = [
@@ -45,18 +67,21 @@ export const VIDEO_MATERIAL_DEFS: VideoCaseDef[] = [
   { id: 'material-assets', name: '素材登记', desc: '用当前左栏 URL 登记 Image / Video / Audio，并轮询到 Active', kind: 'material-assets', params: {}, expect: 'success' },
 ]
 
-/** 分辨率为主轴各一条，其余参数分摊；时长全部 ≤ 7s；拒绝类排最后 */
+/** 480p 用例搭载的终端用户标识：固定、不含个人信息 */
+export const VIDEO_SAFETY_IDENTIFIER = 'videotest-tool-user'
+
+/** 分辨率为主轴各一条，其余参数分摊；时长全部 ≤ 7s（智能时长与编辑由模型定）；拒绝类排最后 */
 export const VIDEO_CASE_DEFS: VideoCaseDef[] = [
   { id: 't2v-required', name: '文生 · 仅必填', desc: '只传 model + content[text]，看上游默认能否出片', kind: 't2v', params: {}, expect: 'success' },
   {
     id: 'res-480p', name: '480p · 9:16 · 4s', kind: 't2v', expect: 'success',
-    desc: '480p 竖版 4s，generate_audio=false，附带 seed=42（校验响应回显的 seed）',
-    params: { resolution: '480p', ratio: '9:16', duration: 4, generate_audio: false, seed: 42 },
+    desc: '480p 竖版 4s，generate_audio=false，附带 priority / safety_identifier / execution_expires_after；查询响应返回 priority 与 execution_expires_after 时比对，safety_identifier 官方不回显、只验被接受',
+    params: { resolution: '480p', ratio: '9:16', duration: 4, generate_audio: false, priority: 5, safety_identifier: VIDEO_SAFETY_IDENTIFIER, execution_expires_after: 3600 },
   },
   {
     id: 'res-720p', name: '720p · 21:9 · 5s', kind: 't2v', expect: 'success',
-    desc: '720p 超宽 5s，generate_audio=true，附带 watermark=true',
-    params: { resolution: '720p', ratio: '21:9', duration: 5, generate_audio: true, watermark: true },
+    desc: '720p 超宽 5s，generate_audio=true，附带 watermark=true 与 return_last_frame=true（校验尾帧地址与尺寸）',
+    params: { resolution: '720p', ratio: '21:9', duration: 5, generate_audio: true, watermark: true, return_last_frame: true },
   },
   {
     id: 'res-1080p', name: '1080p · 1:1 · 5s', kind: 't2v', expect: 'success',
@@ -69,6 +94,16 @@ export const VIDEO_CASE_DEFS: VideoCaseDef[] = [
     params: { resolution: '4k', ratio: '16:9', duration: 4 },
   },
   {
+    id: 't2v-auto-duration', name: '智能时长 · 480p · 4:3', kind: 't2v', expect: 'success',
+    desc: 'duration=-1 由模型自选时长：回显 duration 须在模型范围内（2.0 系列 4~15s、2.5 为 4~30s），成片时长与回显一致',
+    params: { resolution: '480p', ratio: '4:3', duration: -1 },
+  },
+  {
+    id: 'i2v-first', name: '首帧', kind: 'i2v', expect: 'success',
+    desc: '只传首帧（role=first_frame），ratio=adaptive，720p 5s',
+    params: { resolution: '720p', ratio: 'adaptive', duration: 5 },
+  },
+  {
     id: 'i2v-frames', name: '首尾帧', kind: 'i2v-frames', expect: 'success',
     desc: '首帧 + 尾帧，ratio=adaptive，720p 5s',
     params: { resolution: '720p', ratio: 'adaptive', duration: 5 },
@@ -77,6 +112,43 @@ export const VIDEO_CASE_DEFS: VideoCaseDef[] = [
     id: 'ref-omni', name: '多模态参考', kind: 'ref-omni', expect: 'success',
     desc: '参考图 + 参考视频 + 参考音频打在同一 content[]，ratio=adaptive，720p 5s',
     params: { resolution: '720p', ratio: 'adaptive', duration: 5 },
+  },
+  {
+    id: 'ref-image-audio', name: '参考图 + 音频 · 480p', kind: 'ref-image-audio', expect: 'success',
+    desc: '参考图 + 参考音频（2.0 系列音频须搭配图片或视频），480p 16:9 4s',
+    params: { resolution: '480p', ratio: '16:9', duration: 4 },
+  },
+  {
+    id: 'ref-video-edit', name: '视频编辑', kind: 'ref-video-edit', expect: 'success',
+    desc: '只传参考视频，提示词含「编辑视频」，ratio=adaptive、duration=-1，480p；2.5 要求宽高比与时长跟参考视频一致，2.0 系列官方不保证、只记提示',
+    prompt: '编辑视频：把视频中的茶杯改成红色的陶瓷杯，其余画面保持不变',
+    params: { resolution: '480p', ratio: 'adaptive', duration: -1 },
+  },
+  {
+    id: 'ref-video-extend', name: '视频延长', kind: 'ref-video-extend', expect: 'success',
+    desc: '只传参考视频，提示词含「向后延长」，ratio=adaptive，480p 4s；2.5 要求宽高比与参考视频一致，2.0 系列只记提示',
+    prompt: '向后延长视频：延续原视频的镜头运动和画面风格，续写接下来的内容',
+    params: { resolution: '480p', ratio: 'adaptive', duration: 4 },
+  },
+  {
+    id: 'ref-audio-only', name: '仅参考音频', kind: 'ref-audio-only', expect: 'success', requires: 'seedance-2.5',
+    desc: '只传参考音频，480p 16:9 4s；仅 2.5 支持，2.0 系列官方要求音频搭配图片或视频，按「预期不支持」判定',
+    params: { resolution: '480p', ratio: '16:9', duration: 4 },
+  },
+  {
+    id: 'output-mov', name: '输出 mov · 480p · 4s', kind: 't2v', expect: 'success', requires: 'seedance-2.5',
+    desc: 'output_format=mov（H.264 yuv444p + PCM）；官方查询响应不返回 output_format，本条只验被接受并出片，浏览器读不出 mov 元数据时只记提示；仅 2.5 支持',
+    params: { resolution: '480p', ratio: '16:9', duration: 4, output_format: 'mov' },
+  },
+  {
+    id: 'draft-480p', name: '样片 · 480p', kind: 't2v', expect: 'success', requires: 'seedance-2.5',
+    desc: 'draft=true 生成 480p 样片（样片只能 480p）；成功后本轮「样片转正式」用它的任务 id；仅 2.5 支持',
+    params: { resolution: '480p', ratio: '16:9', duration: 4, draft: true },
+  },
+  {
+    id: 'draft-final', name: '样片转正式 · 1080p', kind: 'draft-final', expect: 'success', requires: 'seedance-2.5',
+    desc: 'content 只放 draft_task.id，resolution=1080p（正式视频只能 1080p，提示词 / 素材 / 时长 / 比例禁止再传）；成片时长与比例须与样片一致，响应返回 draft_task_id 时须等于样片 id',
+    params: { resolution: '1080p' },
   },
   {
     id: 'reject-500p', name: '拒绝 · 500p', kind: 't2v', expect: 'reject',
@@ -108,8 +180,23 @@ export function videoModelMaxResolution(model: string): number {
     return 2160
   }
   if (/-(fast|mini)(-|$)/i.test(id)) return 720
-  if (/2-5|2\.5/i.test(id)) return 1080
+  if (videoIsSeedance25(id)) return 1080
   return 2160
+}
+
+/** doubao / dreamina-seedance-2-5（含日期快照）；样片、仅音频、mov 输出只有它支持 */
+export function videoIsSeedance25(model: string): boolean {
+  return /2-5|2\.5/i.test(model.trim())
+}
+
+export function videoModelMeetsRequirement(model: string, req: VideoCaseRequirement | undefined): boolean {
+  if (!req) return true
+  if (req === 'seedance-2.5') return videoIsSeedance25(model)
+  return true
+}
+
+export const VIDEO_REQUIREMENT_LABEL: Record<VideoCaseRequirement, string> = {
+  'seedance-2.5': '仅 Seedance 2.5 支持',
 }
 
 export function videoModelMaxResolutionLabel(model: string): string {

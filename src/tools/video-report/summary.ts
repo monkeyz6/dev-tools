@@ -14,7 +14,7 @@ export function videoClassify(r: VideoRecord): 'pass' | 'fail' | 'error' {
   return !r.ok ? 'error' : (videoVerdict(r.checks || []).level === 'ok' ? 'pass' : 'fail')
 }
 
-const VIDEO_CAPABILITY_ORDER = ['request', 'task', 'videoUrl', 'officialHost', 'probe', 'resolution', 'duration', 'ratio', 'audio', 'reject', 'material'] as const
+const VIDEO_CAPABILITY_ORDER = ['request', 'task', 'videoUrl', 'officialHost', 'probe', 'resolution', 'duration', 'ratio', 'audio', 'echo', 'lastFrame', 'draft', 'reject', 'material'] as const
 const VIDEO_CAPABILITY_LABEL: Record<string, string> = {
   request: '接口连通',
   task: '任务成功',
@@ -25,6 +25,9 @@ const VIDEO_CAPABILITY_LABEL: Record<string, string> = {
   duration: '时长',
   ratio: '宽高比',
   audio: '音轨',
+  echo: '参数回显',
+  lastFrame: '返回尾帧',
+  draft: '样片复用',
   reject: '拒绝 / 审核',
   material: '素材登记',
 }
@@ -36,9 +39,12 @@ function videoCapabilityKey(rawName: string): string | null {
   if (rawName === '官方域名') return 'officialHost'
   if (rawName === '成片元数据') return 'probe'
   if (rawName === '分辨率') return 'resolution'
-  if (rawName === '时长') return 'duration'
+  if (rawName === '时长' || rawName === '回显时长') return 'duration'
   if (rawName === '宽高比') return 'ratio'
   if (rawName === '音轨') return 'audio'
+  if (rawName.endsWith(' 回显')) return 'echo'
+  if (rawName.startsWith('尾帧')) return 'lastFrame'
+  if (rawName.startsWith('样片复用')) return 'draft'
   if (rawName === '预期拒绝' || rawName === '预期不支持') return 'reject'
   if (rawName.startsWith('素材') || rawName.startsWith('素材组')) return 'material'
   return null
