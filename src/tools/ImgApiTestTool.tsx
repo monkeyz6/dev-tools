@@ -6,12 +6,13 @@ import { historyDbGetAll, historyDbPutOne, historyDbDeleteOne, historyDbDeleteMa
 import { useDebouncedPersist } from '../shared/use-debounced-persist'
 import { uniqueCopyName } from '../shared/channel-copy'
 import { IMG_API_LABEL, imgFmtTime } from './img-report/types'
-import type { ImgApiType, ImgC2paResult, ImgCarrier, ImgCheck, ImgInteractionMeta, ImgRecImage, ImgRecord } from './img-report/types'
+import type { ImgApiType, ImgC2paResult, ImgCarrier, ImgCheck, ImgGeminiEndpoint, ImgGenerateContentMeta, ImgInteractionMeta, ImgRecImage, ImgRecord } from './img-report/types'
 import { imgC2paIncomplete, imgC2paPending, imgC2paUnreadable } from './img-report/c2pa'
 import ImgC2paLine from './img-report/C2paLine'
 import { imgClassify, imgExpectedRejected, imgVerdict } from './img-report/summary'
 import { imgCarrierCheck, imgClassifyGeminiPart, imgClassifyOpenAiImage, sniffImageMime } from './img-report/carrier'
 import { IMG_NANO_TIER_TOKENS, imgInteractionChecks, imgParseInteraction } from './img-report/interactions'
+import { imgGenerateContentExtraChecks, imgGenerateContentGrounded, imgGenerateContentImageTokens, imgIsThoughtPart } from './img-report/generate-content'
 import { imgGroupBatches, imgTrimByBatch } from './img-report/batches'
 import type { ImgBatch } from './img-report/batches'
 import ImgReportView from './img-report/ImgReportView'
@@ -70,11 +71,25 @@ async function imgDecryptApiKey(stored: string): Promise<string> {
 
 interface ImgPrice { model: string; tier: string; usd: number; note?: string }
 const IMG_INPUT_IMAGE_TIER = 'input_image'
-// 官方模型 ID。图片输入走 Interactions API，不走 generateContent。
+// 官方模型 ID。默认走 Interactions；模型框下可改走 generateContent。
 const IMG_NANO_BANANA_21 = 'gemini-nano-banana-2.1'
 // 网关常带 google/ 前缀或改大小写，统一归一化后再比
 function imgIsNanoBanana21(model: string): boolean {
   return model.trim().toLowerCase().replace(/^.*\//, '') === IMG_NANO_BANANA_21
+}
+function imgNanoEndpoint(raw: unknown): ImgGeminiEndpoint {
+  return raw === 'generateContent' ? 'generateContent' : 'interactions'
+}
+/** 非 nano 记录没有端点。旧 nano 记录缺字段时按 Interactions。 */
+function imgRecordGeminiEndpoint(r: Pick<ImgRecord, 'apiType' | 'model' | 'geminiEndpoint'>): ImgGeminiEndpoint | null {
+  if (r.apiType !== 'gemini' || !imgIsNanoBanana21(r.model || '')) return null
+  return imgNanoEndpoint(r.geminiEndpoint)
+}
+function imgBatchEndpointLabel(records: ImgRecord[]): string | null {
+  const nanos = records.filter(r => imgRecordGeminiEndpoint(r))
+  if (!nanos.length) return null
+  const latest = [...nanos].sort((a, b) => b.time - a.time)[0]
+  return imgRecordGeminiEndpoint(latest) === 'generateContent' ? 'generateContent' : 'Interactions'
 }
 const IMG_DEFAULT_PRICES: ImgPrice[] = [
   // OpenAI GPT Image 系列（1024×1024 基准，按 quality 档；官网已核实）
@@ -291,6 +306,19 @@ const IMG_NANO_BANANA_CASES: ImgCaseDef[] = [
   { name: 'google_search · 1K 16:9 · JPEG', desc: 'tools: [{type:google_search}]：响应里要有 google_search_call 步骤（搜索可能单独计费）', params: { imageSize: '1K', aspectRatio: '16:9', outputMime: 'image/jpeg', googleSearch: true }, prompt: '用 Google 搜索查今天旧金山的天气，并把结果画成一张简洁的天气信息图，必须使用 google_search 工具' },
 ]
 
+// 同一模型改走 generateContent 时的 8 条。名字与上面 12 条都不重复，历史按用例名还原才不会串端点。
+// 尺寸只写 imageConfig。除「默认参数」外都带 responseModalities。不写 responseFormat，格式只记 info。
+const IMG_NANO_GENERATE_CONTENT_CASES: ImgCaseDef[] = [
+  { name: '默认参数 · 仅 contents', desc: '只有 contents[].parts[].text，不带 generationConfig：尺寸 / 比例 / 格式只记 info', params: { bare: true } },
+  { name: '2K · 16:9 · imageConfig', desc: 'generationConfig.imageConfig：imageSize=2K · aspectRatio=16:9，另加 responseModalities（格式只记 info）', params: { imageSize: '2K', aspectRatio: '16:9' } },
+  { name: '2K · 9:16 · imageConfig', desc: 'imageConfig：imageSize=2K · aspectRatio=9:16，另加 responseModalities（格式只记 info）', params: { imageSize: '2K', aspectRatio: '9:16' } },
+  { name: '4K · 21:9 · imageConfig', desc: 'imageConfig：imageSize=4K · aspectRatio=21:9（最高档 + 超宽，单张约 $0.113），另加 responseModalities', params: { imageSize: '4K', aspectRatio: '21:9' } },
+  { name: '参考图 · 单图 JPEG · 1K 1:1 · imageConfig', desc: 'contents.parts 里 1 张 inline_data image/jpeg（画布合成）· imageConfig 1K · 1:1', params: { imageSize: '1K', aspectRatio: '1:1' }, needRef: true, synthRefs: { count: 1, mime: 'image/jpeg' }, prompt: '基于这张参考图，保持构图，改成水彩插画风格' },
+  { name: '参考图 · 三图 PNG · 2K 5:4 · imageConfig', desc: 'contents.parts 里 3 张 inline_data image/png（画布合成）· imageConfig 2K · 5:4', params: { imageSize: '2K', aspectRatio: '5:4' }, needRef: true, synthRefs: { count: 3, mime: 'image/png' }, prompt: '把这三张参考图里的色块与形状融合成一张构图' },
+  { name: 'thinkingLevel=minimal · 1K 1:1', desc: 'imageConfig 1K · 1:1，另加 thinkingConfig.thinkingLevel=minimal：只判参数被接受并出图', params: { imageSize: '1K', aspectRatio: '1:1', thinkingLevel: 'minimal' } },
+  { name: 'google_search · 1K 16:9', desc: 'tools: [{google_search:{}}] · imageConfig 1K · 16:9：响应 groundingMetadata 里要有搜索证据（搜索可能单独计费）', params: { imageSize: '1K', aspectRatio: '16:9', googleSearch: true }, prompt: '用 Google 搜索查今天旧金山的天气，并把结果画成一张简洁的天气信息图' },
+]
+
 interface ImgPlan {
   kind: 'json' | 'multipart'
   endpoint: string
@@ -300,6 +328,8 @@ interface ImgPlan {
   multipart?: { fields: Record<string, string>; imagesField: string; images: string[] }
   /** 多轮用例的第一轮请求：先发它，拿到 interaction id 再发 body（见 runCase） */
   pre?: { body: any }
+  /** 不随请求发送。用来区分 nano 的 generateContent 与通用 Gemini：两者 URL 相同，请求体也都没有 model。 */
+  geminiEndpoint?: ImgGeminiEndpoint
 }
 
 function imgUid() { return Date.now().toString(36) + Math.random().toString(36).slice(2, 7) }
@@ -479,7 +509,7 @@ async function imgHistTrim(): Promise<void> {
   const overflow = list.filter(r => !keep.has(r.id))
   if (overflow.length) await historyDbDeleteMany('imgtest', overflow.map(r => r.id))
 }
-function imgLoadUi(): { apiType?: ImgApiType; model?: string; prompt?: string } {
+function imgLoadUi(): { apiType?: ImgApiType; model?: string; prompt?: string; geminiEndpoint?: ImgGeminiEndpoint } {
   if (typeof window === 'undefined') return {}
   try {
     const raw = kvGet(IMG_UI_KEY)
@@ -529,7 +559,7 @@ function imgPriceTotals(p: { usd: number; cny: number; count: number; inputUsd?:
   return { usd: p.usd * n + (p.inputUsd || 0) * (p.inputCount || 0), cny: p.cny * n + (p.inputCny || 0) * (p.inputCount || 0) }
 }
 
-function imgBuildPlan(type: ImgApiType, model: string, prompt: string, params: ImgCaseParams, refCount: number): ImgPlan {
+function imgBuildPlan(type: ImgApiType, model: string, prompt: string, params: ImgCaseParams, refCount: number, endpoint: ImgGeminiEndpoint = 'interactions'): ImgPlan {
   if (type === 'openai') {
     if (refCount > 0) {
       const fields: Record<string, string> = { model, prompt }
@@ -563,7 +593,35 @@ function imgBuildPlan(type: ImgApiType, model: string, prompt: string, params: I
     return { kind: 'json', endpoint: refCount > 0 ? '/v1/images/edits' : '/v1/images/generations', method: 'POST', headers: { Authorization: '{{APIKEY}}', 'Content-Type': 'application/json' }, body }
   }
   if (type === 'gemini') {
-    // Nano Banana 2.1 走官方 Interactions：input 可以是纯字符串，也可以是 [{type:text|image}]；尺寸 / 比例 / 格式在 response_format。
+    // Nano Banana 2.1 可改走 generateContent：尺寸在 imageConfig，不写 responseFormat。默认参数不带 generationConfig。
+    if (imgIsNanoBanana21(model) && endpoint === 'generateContent') {
+      const parts: any[] = [{ text: prompt }]
+      for (let i = 1; i <= refCount; i++) {
+        parts.push({ inline_data: { mime_type: `__REF_${i}_MIME__`, data: `__REF_${i}_BASE64__` } })
+      }
+      const body: any = { contents: [{ parts }] }
+      if (!params.bare) {
+        const generationConfig: any = { responseModalities: ['TEXT', 'IMAGE'] }
+        if (params.imageSize || params.aspectRatio) {
+          const imageConfig: any = {}
+          if (params.aspectRatio) imageConfig.aspectRatio = params.aspectRatio
+          if (params.imageSize) imageConfig.imageSize = params.imageSize
+          generationConfig.imageConfig = imageConfig
+        }
+        if (params.thinkingLevel) generationConfig.thinkingConfig = { thinkingLevel: params.thinkingLevel }
+        body.generationConfig = generationConfig
+      }
+      if (params.googleSearch) body.tools = [{ google_search: {} }]
+      return {
+        kind: 'json',
+        endpoint: `/v1/models/${encodeURIComponent(model)}:generateContent`,
+        method: 'POST',
+        headers: { 'x-goog-api-key': '{{APIKEY}}', 'Content-Type': 'application/json' },
+        body,
+        geminiEndpoint: 'generateContent',
+      }
+    }
+    // Nano Banana 2.1 默认走官方 Interactions：input 可以是纯字符串，也可以是 [{type:text|image}]；尺寸 / 比例 / 格式在 response_format。
     if (imgIsNanoBanana21(model)) {
       const responseFormat = (): any => {
         if (!(params.imageSize || params.aspectRatio || params.outputMime)) return undefined
@@ -595,7 +653,7 @@ function imgBuildPlan(type: ImgApiType, model: string, prompt: string, params: I
       if (params.thinkingLevel) body.generation_config = { thinking_level: params.thinkingLevel }
       if (params.googleSearch) body.tools = [{ type: 'google_search' }]
       if (responseFormat()) body.response_format = responseFormat()
-      return { kind: 'json', endpoint: '/v1beta/interactions', method: 'POST', headers, body, ...(pre ? { pre } : {}) }
+      return { kind: 'json', endpoint: '/v1beta/interactions', method: 'POST', headers, body, geminiEndpoint: 'interactions', ...(pre ? { pre } : {}) }
     }
     const parts: any[] = [{ text: prompt }]
     for (let i = 1; i <= refCount; i++) {
@@ -706,7 +764,16 @@ function imgDeriveTargets(type: ImgApiType, plan: ImgPlan): Record<string, any> 
   if (type === 'grok') { imgSetResolutionTierTarget(t, body.resolution); t.ratioReq = (body.aspect_ratio && body.aspect_ratio !== 'auto') ? body.aspect_ratio : null }
   if (type === 'gemini') {
     const rf = body?.response_format
-    if (typeof body?.model === 'string' && imgIsNanoBanana21(body.model) && plan.endpoint.includes('/interactions')) {
+    if (plan.geminiEndpoint === 'generateContent') {
+      // 与通用 Gemini 的 URL 相同，靠计划上的标记区分。格式不进通过率。
+      t.generateContent = true
+      t.formatInfo = true
+      const ic = body?.generationConfig?.imageConfig || {}
+      imgSetResolutionTierTarget(t, ic.imageSize)
+      t.ratioReq = ic.aspectRatio
+      if (!ic.imageSize && !ic.aspectRatio) t.defaultParams = true
+      if (Array.isArray(body?.tools) && body.tools.some((x: any) => x && (x.google_search != null || x.googleSearch != null))) t.searchReq = true
+    } else if (typeof body?.model === 'string' && imgIsNanoBanana21(body.model) && plan.endpoint.includes('/interactions')) {
       // Interactions：除参数透传外，还要核对响应结构、模型回显、usage 里的图片输出 token
       t.interactions = true
       t.modelReq = body.model
@@ -799,6 +866,8 @@ interface ImgParsedResponse {
   error: string | null
   /** Interactions 响应的结构 / usage 信息；其它协议没有 */
   interaction?: ImgInteractionMeta
+  /** candidates 响应上的用量与搜索证据 */
+  generateContent?: ImgGenerateContentMeta
 }
 function imgParseResponse(type: ImgApiType, text: string, headers: Record<string, string>, httpStatus: number, ok: boolean, fmtHint: string | undefined): ImgParsedResponse {
   const out: ImgParsedResponse = { ok, httpStatus, headers, images: [], rawSnippet: text, error: null }
@@ -820,8 +889,15 @@ function imgParseResponse(type: ImgApiType, text: string, headers: Record<string
       }))
       out.interaction = interaction.meta
     } else {
+      if (Array.isArray(json.candidates)) {
+        out.generateContent = {
+          imageTokens: imgGenerateContentImageTokens(json),
+          grounded: imgGenerateContentGrounded(json),
+        }
+      }
       for (const candidate of json.candidates || []) {
         for (const part of candidate?.content?.parts || []) {
+          if (imgIsThoughtPart(part)) continue
           const hit = imgClassifyGeminiPart(part)
           if (!hit) continue
           const mime = hit.mime || 'image/png'
@@ -924,10 +1000,12 @@ async function imgSynthRef(mime: ImgSynthRefs['mime'], index: number): Promise<I
   return { dataUri, name: `synth-${index + 1}.${mime.split('/')[1]}` }
 }
 
-function imgBuildCases(t: ImgApiType, model = ''): ImgCase[] {
+function imgBuildCases(t: ImgApiType, model = '', endpoint: ImgGeminiEndpoint = 'interactions'): ImgCase[] {
   const id = model.trim()
-  // nano 2.1 走 Interactions，只用专属用例，不再拼通用 gemini 用例
-  const defs = t === 'gemini' && imgIsNanoBanana21(id) ? IMG_NANO_BANANA_CASES : (IMG_TEST_SETS[t] || [])
+  // nano 2.1 只用专属用例，不再拼通用 gemini 用例。端点决定 12 条还是 8 条。
+  const defs = t === 'gemini' && imgIsNanoBanana21(id)
+    ? (endpoint === 'generateContent' ? IMG_NANO_GENERATE_CONTENT_CASES : IMG_NANO_BANANA_CASES)
+    : (IMG_TEST_SETS[t] || [])
   return defs.map((c, i) => ({
     id: 'c' + i, name: c.name, desc: c.desc, params: JSON.parse(JSON.stringify(c.params)),
     needRef: !!c.needRef, synthRefs: c.synthRefs ? { ...c.synthRefs } : null, expect: c.expect, prompt: c.prompt || null,
@@ -977,7 +1055,7 @@ function imgBuildChecks(rec: ImgRecord): ImgCheck[] {
       // 格式以文件头字节为准；响应标签与字节不一致时一并写出
       const shown = im.formatLabel && norm(im.formatLabel) !== norm(im.format) ? `${im.format}（标签 ${im.formatLabel}）` : im.format
       c.push({ name: tag + '输出格式', target: t._of, actual: shown, pass: norm(im.format) === norm(t._of) })
-    } else if (t.defaultParams || t.interactions) {
+    } else if (t.defaultParams || t.interactions || t.formatInfo) {
       // 没指定格式：只记实际出图格式，不计通过率
       c.push({ name: tag + '输出格式', target: '—', actual: im.format, pass: true, info: true })
     }
@@ -1005,6 +1083,14 @@ function imgBuildChecks(rec: ImgRecord): ImgCheck[] {
       meta: rec.interaction,
       imageCount: rec.images.length,
       firstSize: first && first.w > 0 && first.h > 0 ? { w: first.w, h: first.h } : null,
+    }))
+  }
+  if (t.generateContent || (t.searchReq && !t.interactions)) {
+    c.push(...imgGenerateContentExtraChecks({
+      generateContent: !!t.generateContent,
+      searchReq: !!t.searchReq && !t.interactions,
+      imageTokens: rec.generateContent?.imageTokens,
+      grounded: rec.generateContent?.grounded,
     }))
   }
   return c
@@ -1388,6 +1474,7 @@ const ImgHistoryPane = React.memo(function ImgHistoryPane({
         )}
         {batches.map(b => {
           const open = isOpen(b.id)
+          const endpointLabel = imgBatchEndpointLabel(b.records)
           return (
             // shrink-0：overflow-hidden 会让 flex 子项最小高度变成 0，容器一旦限高就会被压扁
             <div key={b.id} data-testid="imgtest-batch" className="shrink-0 rounded-xl overflow-hidden" style={{ border: '1px solid var(--border)' }}>
@@ -1396,7 +1483,7 @@ const ImgHistoryPane = React.memo(function ImgHistoryPane({
                 <span className="text-xs w-3 inline-block" style={{ color: 'var(--t3)' }}>{open ? '▾' : '▸'}</span>
                 <span className="text-xs font-semibold whitespace-nowrap" style={{ color: 'var(--text)' }}>{imgFmtTime(b.startAt)}</span>
                 <span className="text-xs max-w-[160px] truncate" style={{ color: 'var(--t2)' }} title={b.channelName}>{b.channelName || '—'}</span>
-                <span className="text-xs" style={{ color: 'var(--t2)' }}>{IMG_API_LABEL[b.apiType] || b.apiType}</span>
+                <span className="text-xs" style={{ color: 'var(--t2)' }}>{IMG_API_LABEL[b.apiType] || b.apiType}{endpointLabel ? ` · ${endpointLabel}` : ''}</span>
                 <span className="text-xs font-mono max-w-[220px] truncate" style={{ color: 'var(--t2)' }} title={b.models.join(' / ')}>{b.models.join(' / ') || '—'}</span>
                 <span className="text-xs" style={{ color: 'var(--t3)' }}>{b.records.length} 个用例</span>
                 <Badge color={b.passed === b.records.length ? 'ok' : b.passed === 0 ? 'err' : 'warn'}>通过 {b.passed}/{b.records.length}</Badge>
@@ -1432,6 +1519,7 @@ function ImgApiTestTool() {
   const [apiType, setApiType] = useState<ImgApiType>(ui0.apiType ?? 'openai')
   const [model, setModel] = useState(ui0.model ?? '')
   const modelRef = useRef(ui0.model ?? '')
+  const [geminiEndpoint, setGeminiEndpoint] = useState<ImgGeminiEndpoint>(() => imgNanoEndpoint(ui0.geminiEndpoint))
   const [prompt, setPrompt] = useState(ui0.prompt ?? '一只在月球上喝咖啡的猫，电影质感')
   const [refImages, setRefImages] = useState<ImgRef[]>([])
   const [prices, setPrices] = useState<ImgPrice[]>(() => imgLoadPrices())
@@ -1444,7 +1532,7 @@ function ImgApiTestTool() {
   const [editingChId, setEditingChId] = useState<string | null>(null)
   const [priceForm, setPriceForm] = useState({ model: '', tier: '', usd: '', note: '' })
 
-  const [cases, setCases] = useState<ImgCase[]>(() => imgBuildCases(ui0.apiType ?? 'openai', ui0.model ?? ''))
+  const [cases, setCases] = useState<ImgCase[]>(() => imgBuildCases(ui0.apiType ?? 'openai', ui0.model ?? '', imgNanoEndpoint(ui0.geminiEndpoint)))
   const [selAll, setSelAll] = useState(true)
   const [running, setRunning] = useState(false)
   // 单条「运行此用例 / 逐个」不经 runList、不设 running，用例自身的 running 状态也算
@@ -1519,7 +1607,7 @@ function ImgApiTestTool() {
     })()
     return () => { cancelled = true }
   }, [])
-  useDebouncedPersist(() => { try { kvSet(IMG_UI_KEY, JSON.stringify({ apiType, model, prompt })) } catch { /* ignore */ } }, [apiType, model, prompt])
+  useDebouncedPersist(() => { try { kvSet(IMG_UI_KEY, JSON.stringify({ apiType, model, prompt, geminiEndpoint })) } catch { /* ignore */ } }, [apiType, model, prompt, geminiEndpoint])
   useEffect(() => {
     setCases(cs => cs.map(c => c.editedPreview == null ? { ...c, plan: null } : c))
   }, [apiType, model, prompt])
@@ -1562,7 +1650,7 @@ function ImgApiTestTool() {
         setModel(prev)
         return
       }
-      setCases(imgBuildCases('gemini', next))
+      setCases(imgBuildCases('gemini', next, geminiEndpoint))
       setSelAll(true)
       setCurrentRunId(null)
       setRestoredFrom(null)
@@ -1571,17 +1659,29 @@ function ImgApiTestTool() {
     setModel(next)
   }
 
+  const switchGeminiEndpoint = (next: ImgGeminiEndpoint) => {
+    if (next === geminiEndpoint) return
+    if (running) { toastShow('测试进行中，请先停止'); return }
+    const dirty = casesRef.current.some(c => c.result || !c.selected || c.editedPreview != null)
+    if (dirty && !window.confirm('切换端点会更换用例列表，当前结果、勾选和编辑过的请求会被重置，确定吗？')) return
+    setGeminiEndpoint(next)
+    setCases(imgBuildCases('gemini', modelRef.current, next))
+    setSelAll(true)
+    setCurrentRunId(null)
+    setRestoredFrom(null)
+  }
+
   const switchApiType = (t: ImgApiType) => {
     setApiType(t)
     modelRef.current = model
-    setCases(imgBuildCases(t, model))
+    setCases(imgBuildCases(t, model, geminiEndpoint))
     setSelAll(true)
     // 用例集整套换掉，之前那一批到此为止，下次运行开新批
     setCurrentRunId(null)
     setRestoredFrom(null)
   }
 
-  const planOf = (c: ImgCase): ImgPlan => c.plan ?? imgBuildPlan(apiType, model.trim() || IMG_PLACEHOLDER_MODEL[apiType], c.prompt ?? prompt, c.params, imgRefCountFor(c, refImages.length))
+  const planOf = (c: ImgCase): ImgPlan => c.plan ?? imgBuildPlan(apiType, model.trim() || IMG_PLACEHOLDER_MODEL[apiType], c.prompt ?? prompt, c.params, imgRefCountFor(c, refImages.length), geminiEndpoint)
   const bodyOf = (plan: ImgPlan) => plan.kind === 'json' ? plan.body : (plan.multipart?.fields) || {}
 
   const saveChannel = useCallback(async () => {
@@ -1708,6 +1808,7 @@ function ImgApiTestTool() {
     targets: {}, useRef: c.needRef, refThumbs: [], price: null,
     status: 0, respHeaders: {}, reqId: '', sentPreview: '',
     ok: false, error: err, rawSnippet: '', images: [], returnedN: 0, durationMs: 0, checks: [], validationVersion: IMG_VALIDATION_VERSION,
+    ...(apiType === 'gemini' && imgIsNanoBanana21(m) ? { geminiEndpoint } : {}),
   })
 
   // deferTrim：批量运行里每条只写入，整批结束后统一裁剪一次（裁剪要整库读出再分组）
@@ -1750,7 +1851,7 @@ function ImgApiTestTool() {
     setCases([...casesRef.current])
 
     const usePrompt = c.prompt || prompt
-    let plan = imgBuildPlan(apiType, m, usePrompt, c.params, imgRefCountFor(c, refs.length))
+    let plan = imgBuildPlan(apiType, m, usePrompt, c.params, imgRefCountFor(c, refs.length), geminiEndpoint)
     c.plan = plan
     if (c.editedPreview != null) {
       try { plan = imgParseEditedPreview(plan, c.editedPreview) }
@@ -1782,6 +1883,7 @@ function ImgApiTestTool() {
       status: 0, respHeaders: {}, reqId: '', sentPreview: '',
       ok: false, error: null, rawSnippet: '', responseBodyComplete: true, images: [], returnedN: 0, durationMs: 0, checks: [],
       validationVersion: IMG_VALIDATION_VERSION,
+      ...(plan.geminiEndpoint ? { geminiEndpoint: plan.geminiEndpoint } : {}),
     }
     try {
       const resolved = await imgResolvePlan(plan, refs)
@@ -1813,6 +1915,7 @@ function ImgApiTestTool() {
       const parsed = imgParseResponse(apiType, exec.text, exec.headers, exec.httpStatus, exec.resp.ok, fmtHint)
       if (parsed.interaction && prevId) parsed.interaction.prevId = prevId
       if (parsed.interaction) rec.interaction = parsed.interaction
+      if (parsed.generateContent) rec.generateContent = parsed.generateContent
       rec.ok = parsed.ok
       rec.error = parsed.error
       const shownResponse = imgResponseForDisplay(parsed.rawSnippet)
@@ -2246,7 +2349,10 @@ function ImgApiTestTool() {
 
     // 没记模型名就沿用输入框里的，保证用例集与模型框一致
     const nextModel = batch.models[0] || modelRef.current
-    const nextCases = imgBuildCases(batch.apiType, nextModel)
+    const latestNano = [...batch.records].filter(r => imgIsNanoBanana21(r.model)).sort((a, b) => b.time - a.time)[0]
+    const nextEndpoint = latestNano ? imgRecordGeminiEndpoint(latestNano)! : geminiEndpoint
+    const nanoEnds = new Set(batch.records.map(r => imgRecordGeminiEndpoint(r)).filter((x): x is ImgGeminiEndpoint => !!x))
+    const nextCases = imgBuildCases(batch.apiType, nextModel, nextEndpoint)
     const byName = new Map<string, ImgRecord>()
     // 同名用例取这批里最新的那条
     for (const r of [...batch.records].sort((a, b) => a.time - b.time)) byName.set(r.caseName, r)
@@ -2261,6 +2367,7 @@ function ImgApiTestTool() {
     }
 
     setApiType(batch.apiType)
+    if (latestNano) setGeminiEndpoint(nextEndpoint)
     setCases(nextCases)
     casesRef.current = nextCases
     setSelAll(true)
@@ -2279,6 +2386,7 @@ function ImgApiTestTool() {
     const skipped = byName.size
     toastShow(`已还原 ${imgFmtTime(batch.endAt).slice(11, 16)} 那一轮（${restored} 条）` +
       (skipped ? ` · ${skipped} 条对不上当前用例集，已跳过` : '') +
+      (nanoEnds.size > 1 ? ' · 这批里端点不一致，已按最新一条还原' : '') +
       (ch ? '' : ' · 未找到同名渠道，请手动选择'))
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
@@ -2306,7 +2414,17 @@ function ImgApiTestTool() {
             <Label className="block mb-1.5">模型编码（自由输入）</Label>
             <CustomInput value={model} onChange={setModel} onBlur={() => commitModel(model)} placeholder={IMG_PLACEHOLDER_MODEL[apiType]} />
             {apiType === 'gemini' && imgIsNanoBanana21(model) && (
-              <p className="text-[11px] mt-1.5" style={{ color: 'var(--t3)' }}>此模型按官方 Interactions 发送：POST /v1beta/interactions</p>
+              <div className="mt-2">
+                <SegmentedControl className="w-full" value={geminiEndpoint} onChange={v => switchGeminiEndpoint(v as ImgGeminiEndpoint)} options={[
+                  { value: 'interactions', label: 'Interactions' },
+                  { value: 'generateContent', label: 'generateContent' },
+                ]} />
+                <p className="text-[11px] mt-1.5" style={{ color: 'var(--t3)' }}>
+                  {geminiEndpoint === 'generateContent'
+                    ? `此模型按 generateContent 发送：POST /v1/models/${model.trim()}:generateContent`
+                    : '此模型按官方 Interactions 发送：POST /v1beta/interactions'}
+                </p>
+              </div>
             )}
           </div>
           <div>

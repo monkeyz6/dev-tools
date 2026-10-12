@@ -64,6 +64,15 @@ export interface ImgRecImage {
   c2pa?: ImgC2paResult
 }
 
+/** nano 模型在 Interactions 与 generateContent 之间的选择。旧记录没有该字段。 */
+export type ImgGeminiEndpoint = 'interactions' | 'generateContent'
+
+/** generateContent 响应里只作说明的用量，以及搜索是否留下证据。 */
+export interface ImgGenerateContentMeta {
+  imageTokens: number | null
+  grounded: boolean
+}
+
 /** Interactions 响应里与「是否与官方一致」有关的字段 */
 export interface ImgInteractionMeta {
   id: string | null
@@ -114,6 +123,10 @@ export interface ImgRecord {
   /** 用例预期：unsupported = 官方未承诺支持，被 4xx 拒绝也算通过 */
   expect?: 'unsupported'
   interaction?: ImgInteractionMeta
+  /** nano 模型这次走的端点。旧记录没有；还原时缺省按 Interactions。 */
+  geminiEndpoint?: ImgGeminiEndpoint
+  /** candidates 解析读到的用量与搜索证据。Interactions 记录不写。 */
+  generateContent?: ImgGenerateContentMeta
 }
 
 export function imgFmtTime(ts: number) {
