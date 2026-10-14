@@ -4,7 +4,8 @@ import { decideOrigin, probeRefreshedOrigin, probeShownSource, signalsFromProbeL
 import { probeProtocolOf, setProbeAnthropicCapField } from './protocol.ts'
 import {
   aggregateProbeStatus, anthropicBaseBlocked, anthropicCapAction, anthropicMaxTokensConclusion,
-  basicProtocolGate, decideFamily, profileFromName, reclassifyExpected, scoreProtocolGate,
+  basicProtocolGate, claudeAcceptsThinkingBudget, claudeForcedToolChoiceBlocked, claudeProbeCap,
+  claudeTierFromName, decideFamily, profileFromName, reclassifyExpected, scoreProtocolGate,
 } from './profiles.ts'
 import { probeEmptyUsage, probeMergeUsage, probeSoleParamMatch } from './protocol.ts'
 
@@ -552,6 +553,32 @@ describe('名单归类', () => {
     assert.equal(profileFromName('gpt-4o-mini'), 'unknown')
   })
 
+  it('Claude 4.5–5.5 按模型名分代，日期快照跟主 id 同一档', () => {
+    const t45 = [
+      'claude-sonnet-4-5-20250929', 'claude-sonnet-4-5', 'anthropic/claude-sonnet-4-5-20250929',
+      'claude-haiku-4-5', 'claude-haiku-4-5-20251001', 'claude-opus-4-5-20251101',
+    ]
+    const t46 = ['claude-sonnet-4-6', 'claude-opus-4-6', 'claude-opus-4-7', 'claude-opus-4-8']
+    const t5 = [
+      'claude-sonnet-5', 'claude-sonnet-5-5', 'claude-opus-5', 'claude-opus-5-5',
+      'claude-fable-5', 'claude-fable-5-1', 'claude-haiku-5-5',
+    ]
+    for (const name of t45) assert.equal(claudeTierFromName(name), '4.5', name)
+    for (const name of t46) assert.equal(claudeTierFromName(name), '4.6', name)
+    for (const name of t5) assert.equal(claudeTierFromName(name), '5', name)
+    assert.equal(claudeTierFromName('claude-sonnet-4'), null)
+    assert.equal(claudeTierFromName('claude-3-5-sonnet-20241022'), null)
+    assert.equal(claudeTierFromName('gpt-4o'), null)
+    assert.equal(claudeAcceptsThinkingBudget('claude-sonnet-4-5-20250929'), true)
+    assert.equal(claudeAcceptsThinkingBudget('claude-sonnet-4-6'), true)
+    assert.equal(claudeAcceptsThinkingBudget('claude-opus-4-7'), false)
+    assert.equal(claudeAcceptsThinkingBudget('claude-sonnet-5-5'), false)
+    assert.equal(claudeProbeCap('claude-sonnet-5-5'), 2048)
+    assert.equal(claudeProbeCap('claude-sonnet-4-5-20250929'), 120)
+    assert.equal(claudeForcedToolChoiceBlocked('forced tool_choice is not supported', 'claude-sonnet-5-5'), true)
+    assert.equal(claudeForcedToolChoiceBlocked('forced tool_choice is not supported', 'claude-sonnet-4-5-20250929'), false)
+  })
+
   it('gpt-4o 即使拒绝 temperature 也保持经典档，不改判符合预期', () => {
     const family = decideFamily(signalsFromProbeLogs({
       requestModel: 'gpt-4o',
@@ -630,5 +657,155 @@ describe('协议预期拒绝', () => {
     assert.equal(scoreProtocolGate('block', true), 'expected')
     assert.equal(scoreProtocolGate('reject-success', true), 'abnormal')
     assert.equal(scoreProtocolGate(null, true), null)
+  })
+})
+
+describe('Claude 分代预期拒绝', () => {
+  const claudeFamily = decideFamily(signalsFromProbeLogs({
+    requestModel: 'claude-sonnet-4-5-20250929',
+    baseUrl: 'https://api.anthropic.com',
+    logs: [],
+  }))
+  const origin = { access: { id: 'gateway' as const, label: '网关', reasons: [] } }
+  const familyOf = (model: string) => decideFamily(signalsFromProbeLogs({
+    requestModel: model,
+    baseUrl: 'https://gw.example',
+    logs: [],
+  }))
+
+  it('4.5 拒绝 effort / adaptive 记符合预期，接受记异常', () => {
+    const model = 'claude-sonnet-4-5-20250929'
+    const family = familyOf(model)
+    const rejected = reclassifyExpected('effort@anthropic', {
+      status: 'unsupported',
+      detail: 'output_config.effort is not supported for this model',
+      format: 'anthropic',
+    }, family, origin, model)
+    assert.equal(rejected?.status, 'expected')
+    const accepted = reclassifyExpected('effort@anthropic', {
+      status: 'passed', detail: '组合请求通过', format: 'anthropic',
+    }, family, origin, model)
+    assert.equal(accepted?.status, 'abnormal')
+    const adaptive = reclassifyExpected('thinking-adaptive@anthropic', {
+      status: 'unsupported',
+      detail: 'thinking.type adaptive is not supported',
+      format: 'anthropic',
+    }, family, origin, model)
+    assert.equal(adaptive?.status, 'expected')
+  })
+
+  it('4.5 接受或拒绝 temperature / top_p，都不套 5.x 采样规则', () => {
+    const model = 'claude-sonnet-4-5-20250929'
+    const family = familyOf(model)
+    assert.equal(reclassifyExpected('temperature@anthropic', {
+      status: 'passed', detail: '组合请求通过', format: 'anthropic',
+    }, family, origin, model), null)
+    assert.equal(reclassifyExpected('temperature@anthropic', {
+      status: 'unsupported',
+      detail: 'temperature is not supported with this model.',
+      format: 'anthropic',
+    }, family, origin, model), null)
+    assert.equal(reclassifyExpected('top_p@chat', {
+      status: 'unsupported',
+      detail: 'top_p is not supported with this model.',
+      format: 'chat',
+    }, family, origin, model), null)
+  })
+
+  it('5.x 拒绝非默认 temperature 记符合预期，接受记异常', () => {
+    const model = 'claude-sonnet-5-5'
+    const family = familyOf(model)
+    const rejected = reclassifyExpected('temperature@chat', {
+      status: 'unsupported',
+      detail: "temperature is not supported with this model.",
+      format: 'chat',
+    }, family, origin, model)
+    assert.equal(rejected?.status, 'expected')
+    const accepted = reclassifyExpected('temperature@anthropic', {
+      status: 'passed', detail: '组合请求通过', format: 'anthropic',
+    }, family, origin, model)
+    assert.equal(accepted?.status, 'abnormal')
+  })
+
+  it('5.x 接受 effort，拒绝 budget 记符合预期', () => {
+    const model = 'claude-sonnet-5-5'
+    const family = familyOf(model)
+    assert.equal(reclassifyExpected('effort@anthropic', {
+      status: 'passed', detail: '独立降级请求通过', format: 'anthropic',
+    }, family, origin, model), null)
+    const budget = reclassifyExpected('thinking-budget@anthropic', {
+      status: 'unsupported',
+      detail: 'thinking.type.enabled is not supported for this model',
+      format: 'anthropic',
+    }, family, origin, model)
+    assert.equal(budget?.status, 'expected')
+    const budgetOk = reclassifyExpected('thinking-budget@anthropic', {
+      status: 'passed', detail: '组合请求通过', format: 'anthropic',
+    }, family, origin, model)
+    assert.equal(budgetOk?.status, 'abnormal')
+  })
+
+  it('4.6 接受 budget，4.7 拒绝 budget', () => {
+    const ok46 = reclassifyExpected('thinking-budget@anthropic', {
+      status: 'passed', detail: '组合请求通过', format: 'anthropic',
+    }, familyOf('claude-sonnet-4-6'), origin, 'claude-sonnet-4-6')
+    assert.equal(ok46, null)
+    const reject47 = reclassifyExpected('thinking-budget@anthropic', {
+      status: 'unsupported',
+      detail: 'thinking.type.enabled is not supported for this model',
+      format: 'anthropic',
+    }, familyOf('claude-opus-4-7'), origin, 'claude-opus-4-7')
+    assert.equal(reject47?.status, 'expected')
+  })
+
+  it('4.6 与同桶 4.7 接受 effort / adaptive 不改判', () => {
+    for (const model of ['claude-sonnet-4-6', 'claude-opus-4-7']) {
+      const family = familyOf(model)
+      assert.equal(reclassifyExpected('effort@anthropic', {
+        status: 'passed', detail: '组合请求通过', format: 'anthropic',
+      }, family, origin, model), null, model)
+      assert.equal(reclassifyExpected('thinking-adaptive@anthropic', {
+        status: 'passed', detail: '组合请求通过', format: 'anthropic',
+      }, family, origin, model), null, model)
+    }
+  })
+
+  it('reasoning_effort 各代都按 OpenAI 字段改判', () => {
+    const model = 'claude-sonnet-4-5-20250929'
+    const accepted = reclassifyExpected('reasoning_effort@anthropic', {
+      status: 'passed', detail: '组合请求通过', format: 'anthropic',
+    }, claudeFamily, origin, model)
+    assert.equal(accepted?.status, 'abnormal')
+    const rejected = reclassifyExpected('reasoning_effort@anthropic', {
+      status: 'unsupported',
+      detail: 'unknown parameter: reasoning_effort',
+      format: 'anthropic',
+    }, claudeFamily, origin, model)
+    assert.equal(rejected?.status, 'expected')
+  })
+
+  it('5.x 拒绝 temperature 不把 Claude 名打成不确定', () => {
+    const family = decideFamily(signalsFromProbeLogs({
+      requestModel: 'claude-sonnet-5-5',
+      baseUrl: 'https://gw.example',
+      logs: [{
+        url: 'https://gw.example/v1/chat/completions',
+        status: 400,
+        resultKey: 'temperature@chat',
+        format: 'chat',
+        requestBody: { model: 'claude-sonnet-5-5', temperature: 0.2 },
+        responseHeaders: { 'content-type': 'application/json' },
+        responseBody: { error: { message: 'temperature is not supported with this model.' } },
+        usage: { input: null },
+      }],
+    }))
+    assert.equal(family.profile, 'claude')
+    assert.equal(family.conflict, false)
+    const next = reclassifyExpected('temperature@chat', {
+      status: 'unsupported',
+      detail: 'temperature is not supported with this model.',
+      format: 'chat',
+    }, family, origin, 'claude-sonnet-5-5')
+    assert.equal(next?.status, 'expected')
   })
 })

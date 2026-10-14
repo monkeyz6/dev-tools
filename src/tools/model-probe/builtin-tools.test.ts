@@ -24,6 +24,8 @@ describe('matchBuiltinVendor', () => {
     assert.equal(matchBuiltinVendor('gpt-4o-mini'), 'openai')
     assert.equal(matchBuiltinVendor('grok-4.6'), 'xai')
     assert.equal(matchBuiltinVendor('claude-sonnet-4'), 'anthropic')
+    assert.equal(matchBuiltinVendor('claude-sonnet-4-5-20250929'), 'anthropic')
+    assert.equal(matchBuiltinVendor('claude-sonnet-5-5'), 'anthropic')
     assert.equal(matchBuiltinVendor('qwen-plus'), 'qwen')
     assert.equal(matchBuiltinVendor('qwen3.8-max'), 'qwen')
     assert.equal(matchBuiltinVendor('kimi-k2'), 'kimi')
@@ -67,6 +69,13 @@ describe('matchBuiltinToolCases', () => {
   })
   it('embedding 模型不追加', () => {
     assert.deepEqual(matchBuiltinToolCases('text-embedding-3-small'), [])
+  })
+  it('带日期的 Claude 4.5 / 5.5 同样追加 Anthropic 原生工具', () => {
+    const ids = matchBuiltinToolCases('claude-sonnet-4-5-20250929').map(c => c.id)
+    assert.deepEqual(ids, matchBuiltinToolCases('claude-sonnet-5-5').map(c => c.id))
+    assert.ok(ids.includes('native-anthropic-web_search'))
+    assert.ok(ids.includes('native-anthropic-web_fetch'))
+    assert.ok(ids.includes('native-anthropic-code_execution'))
   })
 })
 

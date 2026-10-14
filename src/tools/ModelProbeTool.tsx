@@ -14,10 +14,10 @@ import { probeHistoryNewestFirst, probeHistoryOverflow, probeLogsSince, probeNam
 import {
   type ProbeFormat, type ProbeSseEvent, type ProbeUsage,
   probeEmptyUsage, probeUsageOf, probeUsageFromSse, probeParseSseBlock,
-  probeProtocolOf, probeParamComboBody, probeSoleParamMatch,
+  probeProtocolOf, probeParamComboBody, probeComboPendingAndSolos, probeSoleParamMatch,
   probeChatMaxTokenBlame, probeChatMaxAcceptLabel, probeToolChoiceForcedBlocked, probeResponsesResourceId, setProbeAnthropicCapField, CHAT_MAX_TOKEN_KEYS,
   PROBE_ENDPOINTS, PROBE_RED_PNG_B64, PROBE_TRUNCATION_PROMPT, PROBE_TRUNCATION_CAP, PROBE_DEFAULT_CAP,
-  PROBE_SCHEMA_PROMPT, PROBE_SCHEMA_CAP, PROBE_TOOL_FORCE_PROMPT, PROBE_WEATHER_TOOL,
+  PROBE_SCHEMA_PROMPT, PROBE_TOOL_FORCE_PROMPT, PROBE_WEATHER_TOOL,
   PROBE_SYSTEM_INSTRUCTION, PROBE_SYSTEM_USER, PROBE_MULTITURN_TURN1, PROBE_MULTITURN_TURN2,
   PROBE_IMAGE_PROMPT,
 } from './model-probe/protocol'
@@ -35,7 +35,8 @@ import {
 import {
   type ProbeProfileId,
   aggregateProbeStatus, anthropicBaseBlocked, anthropicCapAction, anthropicMaxTokensConclusion,
-  basicProtocolGate, decideFamily, nameSuggestsGpt, profileFromName, reclassifyExpected, scoreProtocolGate,
+  basicProtocolGate, claudeForcedToolChoiceBlocked, claudeProbeCap, claudeSchemaCap, claudeTierFromName,
+  decideFamily, nameSuggestsGpt, profileFromName, reclassifyExpected, scoreProtocolGate,
 } from './model-probe/profiles'
 import { decideOrigin, probeRefreshedOrigin, probeShownSource, signalsFromProbeLogs } from './model-probe/origin'
 import { probeRequestIdFromHeaders, probeRequestIdFromRecord, probeRequestIdHeaders, probeShownRequestId } from './model-probe/request-id'
@@ -195,14 +196,17 @@ const PROBE_TESTS: ProbeTestDef[] = [
   { id: 'chat-basic', group: '协议基础', name: 'OpenAI Chat Completions', desc: '验证 /v1/chat/completions 基础非流式请求', explain: 'OpenAI 系兼容网关最通用的协议格式，也是中转渠道的第一道验证关卡。', kind: 'basic', format: 'chat' },
   { id: 'responses-basic', group: '协议基础', name: 'OpenAI Responses', desc: '验证 /v1/responses 基础非流式请求', explain: 'Responses API 是 OpenAI 新一代接口，请求/响应结构与 Chat Completions 不同。', kind: 'basic', format: 'responses' },
   { id: 'anthropic-basic', group: '协议基础', name: 'Anthropic Messages', desc: '验证 /v1/messages 基础非流式请求', explain: 'Anthropic Messages 使用 x-api-key 鉴权与不同的消息结构，常被中转站映射为 OpenAI 格式。', kind: 'basic', format: 'anthropic' },
-  { id: 'expect-reject', group: '参数与特性', name: '预期拒绝', desc: '按模型档位核对本来就该拒绝的请求。默认不勾选', explain: '勾选后才改判。GPT 推理档拒绝 temperature、top_p，或 Chat 上工具与 reasoning_effort 不能同用，记为符合预期；这些请求却返回成功则记异常。Codex 产品线的 Chat Completions、Claude 官方的 Chat / Responses、Claude 的 reasoning_effort 同样处理。gpt-4o、gpt-4.1 和未识别的模型名仍按普通能力判定。不勾选时，拒绝记为不支持或失败，成功记为通过。Anthropic 被要求改用 max_completion_tokens 时，无论是否勾选都会改字段再测。', kind: 'score', defaultSelected: false },
-  { id: 'temperature', group: '参数与特性', name: 'temperature', desc: '采样温度参数支持情况', explain: 'temperature 控制采样随机性。拒绝记为不支持，接受记为通过。勾选「预期拒绝」后，GPT 推理模型拒绝非默认值或不接受该参数时记为符合预期，请求成功则记异常。gpt-4o / gpt-4.1 不套这套规则。', kind: 'parameter' },
-  { id: 'top_p', group: '参数与特性', name: 'top_p', desc: '核采样参数支持情况', explain: 'top_p 与 temperature 同为采样参数。默认按是否接受来判。勾选「预期拒绝」后，GPT 推理模型不接受 top_p 记为符合预期，请求成功记异常。', kind: 'parameter' },
+  { id: 'expect-reject', group: '参数与特性', name: '预期拒绝', desc: '按模型档位核对本来就该拒绝的请求。默认不勾选', explain: '勾选后才改判。GPT 推理档拒绝 temperature、top_p，或 Chat 上工具与 reasoning_effort 不能同用，记为符合预期；这些请求却返回成功则记异常。Codex 产品线的 Chat Completions、Claude 官方的 Chat / Responses、Claude 的 reasoning_effort 同样处理。Claude 4.5 拒绝 output_config.effort 与 adaptive thinking、Claude 5.x 拒绝非默认采样，按模型名分代改判。gpt-4o、gpt-4.1 和未识别的模型名仍按普通能力判定。不勾选时，拒绝记为不支持或失败，成功记为通过。Anthropic 被要求改用 max_completion_tokens 时，无论是否勾选都会改字段再测。', kind: 'score', defaultSelected: false },
+  { id: 'temperature', group: '参数与特性', name: 'temperature', desc: '采样温度参数支持情况', explain: 'temperature 控制采样随机性。拒绝记为不支持，接受记为通过。勾选「预期拒绝」后，GPT 推理模型与 Claude 5.x 拒绝非默认值记为符合预期，请求成功则记异常。Claude 4.5 / 4.6–4.8 接受即通过。gpt-4o / gpt-4.1 不套这套规则。', kind: 'parameter' },
+  { id: 'top_p', group: '参数与特性', name: 'top_p', desc: '核采样参数支持情况', explain: 'top_p 与 temperature 同为采样参数。默认按是否接受来判。勾选「预期拒绝」后，GPT 推理模型与 Claude 5.x 不接受 top_p 记为符合预期，请求成功记异常。', kind: 'parameter' },
   { id: 'top_p_range', group: '参数与特性', name: 'top_p 越界', desc: '发送 top_p=2，只看状态码是否拒绝', explain: '三种协议都在基础请求上带 top_p=2。Anthropic 固定 max_tokens=120，不跟随本轮改成 max_completion_tokens。其它 4xx 记通过，2xx 记失败；401、403、408、429、5xx、超时和网络错误记异常。不看错误正文是否提到 top_p，也不走「预期拒绝」。', kind: 'extra', subtype: 'top-p-range' },
-  { id: 'reasoning_effort', group: '参数与特性', name: 'reasoning_effort', desc: '推理强度参数支持情况', explain: 'reasoning_effort（low/medium/high）仅推理模型支持，普通模型通常会报参数错误。勾选「预期拒绝」后，Claude 拒绝该参数记为符合预期，接受则记异常。', kind: 'parameter' },
+  { id: 'reasoning_effort', group: '参数与特性', name: 'reasoning_effort', desc: '推理强度参数支持情况', explain: 'reasoning_effort（low/medium/high）是 OpenAI 字段。勾选「预期拒绝」后，Claude 各代拒绝该参数记为符合预期，接受则记异常。Claude 官方深度控制是 output_config.effort，见「effort」。', kind: 'parameter' },
+  { id: 'effort', group: '参数与特性', name: 'effort', desc: 'Anthropic output_config.effort', explain: '只跑 Anthropic。发送 output_config.effort=low。Claude 4.6 起与 5.x 应接受；4.5 官方 400。勾选「预期拒绝」后，4.5 拒绝记符合预期，接受记异常。与 OpenAI 的 reasoning_effort 不是同一字段。', kind: 'parameter', format: 'anthropic' },
+  { id: 'thinking-adaptive', group: '参数与特性', name: 'thinking adaptive', desc: 'Anthropic thinking.type=adaptive', explain: '只跑 Anthropic。发送 thinking: {type:adaptive}。4.5 官方 400；4.6 起与 5.x 应接受。勾选「预期拒绝」后，4.5 拒绝记符合预期，接受记异常。', kind: 'parameter', format: 'anthropic' },
+  { id: 'thinking-budget', group: '参数与特性', name: 'thinking budget', desc: 'Anthropic thinking.budget_tokens', explain: '只跑 Anthropic。发送 thinking: {type:enabled, budget_tokens:1024}，max_tokens ≥ 2048。4.5 与 4.6 应接受；4.7 起与 5.x 官方 400。默认不勾，会消耗思考 token。', kind: 'parameter', format: 'anthropic', defaultSelected: false },
   { id: 'max_tokens', group: '参数与特性', name: 'Token 上限参数', desc: 'Chat 同时试 max_tokens 与 max_completion_tokens，并核验截断原因', explain: 'Chat Completions 在同一发里带 max_tokens 与 max_completion_tokens；其中一个被拒就丢掉该字段再试，互斥则拆开各测一次。Responses 用 max_output_tokens，Anthropic 默认用 max_tokens。推理模型若被要求改用 max_completion_tokens，会改字段再测；勾选「预期拒绝」时这一次拒绝记为符合预期。接受后再发长输出 + 很小 cap 核验截断原因。finish_reason=length 记通过；请求若返回 400，且正文是 Could not finish the message because max_tokens or model output limit was reached，也记通过，组合里的上限字段算接受。每次语义重试都单独看这句，命中就停止。其它状态码仍记失败。', kind: 'parameter' },
-  { id: 'structured_output', group: '参数与特性', name: '结构化输出', desc: '接受 Schema 约束并校验返回 JSON', explain: 'combo 先验证 json_schema / text.format / output_config 是否被接受。接受后再发充足 cap 的 Schema 请求，解析 JSON 并校验 ok 为布尔值。Anthropic 走 output_config.format。', kind: 'parameter' },
-  { id: 'tool_calling', group: '参数与特性', name: '工具调用', desc: '接受 tools，并强制调用 get_weather', explain: 'combo 用双工具 + tool_choice=auto 验证请求被接受。接受后再发强制指定 get_weather，核验响应里真有该调用。thinking 模式拒绝 required/object 的 tool_choice 时降级为 auto 再核验。无调用但 HTTP 成功记失败。', kind: 'parameter' },
+  { id: 'structured_output', group: '参数与特性', name: '结构化输出', desc: '接受 Schema 约束并校验返回 JSON', explain: 'combo 先验证 json_schema / text.format / output_config 是否被接受。接受后再发充足 cap 的 Schema 请求，解析 JSON 并校验 ok 为布尔值。Anthropic 走 output_config.format。Claude 5.x 默认 cap 提到 2048，避免思考链吃掉额度。', kind: 'parameter' },
+  { id: 'tool_calling', group: '参数与特性', name: '工具调用', desc: '接受 tools，并强制调用 get_weather', explain: 'combo 用双工具 + tool_choice=auto 验证请求被接受。接受后再发强制指定 get_weather，核验响应里真有该调用。thinking 模式拒绝 required/object 的 tool_choice 时降级为 auto 再核验。Claude 5.x 官方拒绝强制 tool_choice，只要错误点名 tool_choice 就降级。无调用但 HTTP 成功记失败。', kind: 'parameter' },
   { id: 'stream-false', group: '传输与稳定性', name: '非流式响应', desc: '验证 stream=false 的完整 JSON 响应与 usage', explain: '非流式是计费与解析最简单的路径。HTTP 成功时必须带回 input 与 output Token，否则视为计费无法落地。', kind: 'stream' },
   { id: 'stream-true', group: '传输与稳定性', name: 'SSE 流式响应', desc: '验证 stream=true、SSE 格式与带 Token 上限时的 usage', explain: '流式响应按 SSE 分块返回。Chat 带 max_completion_tokens、Responses 带 max_output_tokens、Anthropic 带 max_tokens。通过条件：SSE 可解析且能读到 input + output Token。结束标记（[DONE] / response.completed / message_stop）写入说明，不作为通过条件。', kind: 'stream' },
   { id: 'stream-pure', group: '传输与稳定性', name: '纯流式（无 Token 上限）', desc: 'Chat 最小体：model + messages + stream，提示「讲个笑话」', explain: '不带 max_tokens / max_completion_tokens。用于检出「加上限才回 usage、不加就不回」的渠道。只跑 Chat Completions；Anthropic 强制要 max_tokens，无法做此对照。通过条件：SSE 可解析且能读到 input + output Token。', kind: 'stream', format: 'chat' },
@@ -277,10 +281,17 @@ const probeExtractError = (data: any): string => {
   if (typeof data === 'string') return data
   return probeJsonPretty(data?.error || data)
 }
-const probeBaseBody = (cfg: ProbeCfg, format: ProbeFormat, prompt = 'Reply with exactly: OK') =>
-  probeProtocolOf(format).baseBody(cfg.model, prompt)
+const probeBaseBody = (cfg: ProbeCfg, format: ProbeFormat, prompt = 'Reply with exactly: OK') => {
+  const proto = probeProtocolOf(format)
+  const body = proto.baseBody(cfg.model, prompt)
+  const cap = claudeProbeCap(cfg.model)
+  if (cap !== PROBE_DEFAULT_CAP) proto.applyMaxTokens(body, cap)
+  return body
+}
 const probeComboBody = (cfg: ProbeCfg, format: ProbeFormat, pending: Iterable<string>, chatMaxKeys?: string[]) =>
-  probeParamComboBody(cfg.model, format, pending, chatMaxKeys)
+  probeParamComboBody(cfg.model, format, pending, chatMaxKeys, claudeProbeCap(cfg.model))
+const probeToolChoiceShouldFallback = (err: string, model: string): boolean =>
+  probeToolChoiceForcedBlocked(err) || claudeForcedToolChoiceBlocked(err, model)
 const probeParamLabel = (id: string): string => probeTestById(id)?.name || id
 const PROBE_SEMANTIC_IDS = new Set(['max_tokens', 'tool_calling', 'structured_output'])
 const probeResult = (status: ProbeStatus, detail: string, extra: Partial<ProbeResult> = {}): ProbeResult => ({ status, detail, duration: null, repro: null, ...extra })
@@ -324,7 +335,10 @@ const probeResetLogResponse = (log: ProbeLog) => {
   log.usage = probeEmptyUsage()
   log.requestId = null
 }
-const probeAppliesToFormat = (_id: string, _format: ProbeFormat): boolean => true
+const probeAppliesToFormat = (id: string, format: ProbeFormat): boolean => {
+  const t = probeTestById(id)
+  return !t?.format || t.format === format
+}
 const probeLegacyHidden = (key: string, result?: { detail?: string } | null): boolean =>
   key === 'structured_output@anthropic' && !!result?.detail?.includes('无原生 response_format')
 const probeResultVisible = (key: string, result?: { detail?: string } | null): boolean =>
@@ -1875,10 +1889,13 @@ function ModelProbeTool() {
     const chatKeys = format === 'chat' && extra?.chatMaxKeys?.length ? extra.chatMaxKeys : undefined
     const body: Record<string, any> = proto.baseBody(cfg.model, id === 'max_tokens' ? PROBE_TRUNCATION_PROMPT : id === 'tool_calling' ? PROBE_TOOL_FORCE_PROMPT : PROBE_SCHEMA_PROMPT)
     if (id === 'max_tokens') proto.applyMaxTokens(body, PROBE_TRUNCATION_CAP, chatKeys)
-    else if (id === 'tool_calling') proto.applyTools(body, [PROBE_WEATHER_TOOL], { name: 'get_weather' })
-    else {
+    else if (id === 'tool_calling') {
+      proto.applyTools(body, [PROBE_WEATHER_TOOL], { name: 'get_weather' })
+      const cap = claudeProbeCap(cfg.model)
+      if (cap !== PROBE_DEFAULT_CAP) proto.applyMaxTokens(body, cap, chatKeys)
+    } else {
       proto.applyStructuredOutput(body)
-      proto.applyMaxTokens(body, PROBE_SCHEMA_CAP, chatKeys)
+      proto.applyMaxTokens(body, claudeSchemaCap(cfg.model), chatKeys)
     }
     const failSemantic = (r: { data: any; log: ProbeLog }, err: string) => {
       const brief = err.replace(/\s+/g, ' ').slice(0, 80)
@@ -1920,10 +1937,12 @@ function ModelProbeTool() {
         }
       }
       let toolChoiceFallback = false
-      if (!r.ok && id === 'tool_calling' && probeToolChoiceForcedBlocked(probeExtractError(r.data))) {
+      if (!r.ok && id === 'tool_calling' && probeToolChoiceShouldFallback(probeExtractError(r.data), cfg.model)) {
         if (stopRef.current) return probeResult('skipped', PROBE_STOP_DETAIL, { format, repro: accepted.repro })
         const retryBody = proto.baseBody(cfg.model, PROBE_TOOL_FORCE_PROMPT)
         proto.applyTools(retryBody, [PROBE_WEATHER_TOOL], 'auto')
+        const cap = claudeProbeCap(cfg.model)
+        if (cap !== PROBE_DEFAULT_CAP) proto.applyMaxTokens(retryBody, cap)
         const retryLog = probeNewLog(probeKey(id, format), `${probeParamLabel(id)} 语义 auto 降级（${PROBE_FORMAT_LABELS[format]}）`, format)
         r = await probeRequest(retryLog, format, retryBody)
         toolChoiceFallback = true
@@ -1935,7 +1954,7 @@ function ModelProbeTool() {
         : id === 'tool_calling' ? oracleToolNamed(proto.toolCallsOf(r.data), 'get_weather')
         : oracleSchemaOk(proto.textOf(r.data))
       const noted = toolChoiceFallback
-        ? { ...check, detail: `thinking 模式不支持强制 tool_choice，已用 auto 核验；${check.detail}` }
+        ? { ...check, detail: `${claudeTierFromName(cfg.model) === '5' ? 'Claude 5.x' : 'thinking 模式'}不支持强制 tool_choice，已用 auto 核验；${check.detail}` }
         : check
       return mergeAcceptedSemantic(accepted, acceptedLabel, probeResult(noted.passed ? 'passed' : 'failed', noted.detail, {
         format, duration: r.log.duration, usage: r.log.usage, repro: probeReproOf(r.log),
@@ -1960,7 +1979,10 @@ function ModelProbeTool() {
       }
       return outcomes
     }
-    const pending = new Set(paramIds.filter(id => probeAppliesToFormat(id, format)))
+    const applicable = paramIds.filter(id => probeAppliesToFormat(id, format))
+    const peeled = probeComboPendingAndSolos(applicable)
+    const pending = new Set(peeled.combo)
+    const thinkingSolos = peeled.solos
     if (format === 'anthropic' && anthropicMaxTokensRowRef.current && pending.has('max_tokens')) {
       outcomes[probeKey('max_tokens', format)] = anthropicMaxTokensRowRef.current
       pending.delete('max_tokens')
@@ -1988,6 +2010,76 @@ function ModelProbeTool() {
       })
       pending.delete('max_tokens')
       chatMaxKeys.clear()
+    }
+    const runSoloParam = async (id: string, splitNote = '') => {
+      const singleLog = probeNewLog(probeKey(id, format), `${probeParamLabel(id)}（${PROBE_FORMAT_LABELS[format]}）`, format)
+      const singleBody = probeComboBody(cfgRef.current!, format, [id], id === 'max_tokens' && format === 'chat' ? [...chatMaxKeys] : undefined)
+      try {
+        const one = await probeRequest(singleLog, format, singleBody)
+        if (one.ok || (id === 'max_tokens' && outputLimitAccepted(one))) {
+          const maxNote = format === 'chat' && id === 'max_tokens' ? probeChatMaxAcceptLabel(chatMaxKeys, rejectedMax) : ''
+          const label = [maxNote ? `独立降级请求通过；${maxNote}` : '独立降级请求通过', splitNote].filter(Boolean).join(' ')
+          const accepted = probeResult('passed', label, { format, duration: one.log.duration, usage: one.log.usage, repro: probeReproOf(one.log) })
+          await finishPassed([id], accepted, label)
+        } else if (id === 'max_tokens' && outputLimitSentence(one.data)) {
+          outcomes[probeKey(id, format)] = probeResult('failed', probeExtractError(one.data), { format, duration: one.log.duration, usage: one.log.usage, repro: probeReproOf(one.log) })
+        } else if (format === 'chat' && id === 'max_tokens' && chatMaxKeys.size > 1) {
+          const proto = probeProtocolOf(format)
+          let okAlias: string | null = null
+          let stoppedOnLimit = false
+          const limitKeys: string[] = []
+          let limitRow: { log: ProbeLog } | null = null
+          let last = one
+          for (const key of [...chatMaxKeys]) {
+            const aliasBody = proto.baseBody(cfgRef.current!.model, 'Reply with exactly: OK')
+            proto.applyMaxTokens(aliasBody, PROBE_DEFAULT_CAP, [key])
+            const aliasLog = probeNewLog(probeKey('max_tokens', format), `Token 上限 ${key}（${PROBE_FORMAT_LABELS[format]}）`, format)
+            last = await probeRequest(aliasLog, format, aliasBody)
+            if (outputLimitAccepted(last)) {
+              limitKeys.push(key)
+              limitRow = last
+              continue
+            }
+            if (last.ok) {
+              okAlias = key
+              for (const other of [...chatMaxKeys]) {
+                if (other !== key && !limitKeys.includes(other)) rejectedMax.push(other)
+              }
+              chatMaxKeys.clear()
+              chatMaxKeys.add(key)
+              for (const kept of limitKeys) chatMaxKeys.add(kept)
+              break
+            }
+            if (outputLimitSentence(last.data)) {
+              outcomes[probeKey(id, format)] = probeResult('failed', probeExtractError(last.data), { format, duration: last.log.duration, usage: last.log.usage, repro: probeReproOf(last.log) })
+              stoppedOnLimit = true
+              break
+            }
+            rejectedMax.push(key)
+          }
+          if (!stoppedOnLimit) {
+            const source = okAlias ? last : limitRow
+            if (source) {
+              if (!okAlias) {
+                chatMaxKeys.clear()
+                for (const key of limitKeys) chatMaxKeys.add(key)
+              }
+              const label = `独立降级请求通过；${probeChatMaxAcceptLabel(chatMaxKeys, rejectedMax)}`
+              const accepted = probeResult('passed', label, { format, duration: source.log.duration, usage: source.log.usage, repro: probeReproOf(source.log) })
+              await finishPassed([id], accepted, label)
+            } else {
+              markMaxUnsupported(last.log, probeExtractError(last.data))
+            }
+          }
+        } else {
+          const raw = probeExtractError(one.data)
+          const s: ProbeStatus = /unsupported|unknown|invalid|not supported|not implemented/i.test(raw) ? 'unsupported' : 'failed'
+          outcomes[probeKey(id, format)] = probeResult(s, splitNote ? `${raw} ${splitNote}` : raw, { format, duration: one.log.duration, usage: one.log.usage, repro: probeReproOf(one.log) })
+        }
+      } catch (e: any) {
+        outcomes[probeKey(id, format)] = probeCatchResult(e, format, singleLog)
+      }
+      pending.delete(id)
     }
     while (pending.size) {
       const body = probeComboBody(
@@ -2056,77 +2148,9 @@ function ModelProbeTool() {
           ? (scoreExpected && reasoningLike ? '组合互斥符合预期，已拆开重测。' : '组合里工具与 reasoning_effort 互相点名，已拆开重测。')
           : '一条错误同时点名多个参数，已拆开重测。')
         : ''
-      for (const id of [...pending]) {
-        const singleLog = probeNewLog(probeKey(id, format), `${probeParamLabel(id)}（${PROBE_FORMAT_LABELS[format]}）`, format)
-        const singleBody = probeComboBody(cfgRef.current!, format, [id], id === 'max_tokens' && format === 'chat' ? [...chatMaxKeys] : undefined)
-        try {
-          const one = await probeRequest(singleLog, format, singleBody)
-          if (one.ok || (id === 'max_tokens' && outputLimitAccepted(one))) {
-            const maxNote = format === 'chat' && id === 'max_tokens' ? probeChatMaxAcceptLabel(chatMaxKeys, rejectedMax) : ''
-            const label = [maxNote ? `独立降级请求通过；${maxNote}` : '独立降级请求通过', splitNote].filter(Boolean).join(' ')
-            const accepted = probeResult('passed', label, { format, duration: one.log.duration, usage: one.log.usage, repro: probeReproOf(one.log) })
-            await finishPassed([id], accepted, label)
-          } else if (id === 'max_tokens' && outputLimitSentence(one.data)) {
-            outcomes[probeKey(id, format)] = probeResult('failed', probeExtractError(one.data), { format, duration: one.log.duration, usage: one.log.usage, repro: probeReproOf(one.log) })
-          } else if (format === 'chat' && id === 'max_tokens' && chatMaxKeys.size > 1) {
-            const proto = probeProtocolOf(format)
-            let okAlias: string | null = null
-            let stoppedOnLimit = false
-            const limitKeys: string[] = []
-            let limitRow: { log: ProbeLog } | null = null
-            let last = one
-            for (const key of [...chatMaxKeys]) {
-              const aliasBody = proto.baseBody(cfgRef.current!.model, 'Reply with exactly: OK')
-              proto.applyMaxTokens(aliasBody, PROBE_DEFAULT_CAP, [key])
-              const aliasLog = probeNewLog(probeKey('max_tokens', format), `Token 上限 ${key}（${PROBE_FORMAT_LABELS[format]}）`, format)
-              last = await probeRequest(aliasLog, format, aliasBody)
-              if (outputLimitAccepted(last)) {
-                limitKeys.push(key)
-                limitRow = last
-                continue
-              }
-              if (last.ok) {
-                okAlias = key
-                for (const other of [...chatMaxKeys]) {
-                  if (other !== key && !limitKeys.includes(other)) rejectedMax.push(other)
-                }
-                chatMaxKeys.clear()
-                chatMaxKeys.add(key)
-                for (const kept of limitKeys) chatMaxKeys.add(kept)
-                break
-              }
-              if (outputLimitSentence(last.data)) {
-                outcomes[probeKey(id, format)] = probeResult('failed', probeExtractError(last.data), { format, duration: last.log.duration, usage: last.log.usage, repro: probeReproOf(last.log) })
-                stoppedOnLimit = true
-                break
-              }
-              rejectedMax.push(key)
-            }
-            if (!stoppedOnLimit) {
-              const source = okAlias ? last : limitRow
-              if (source) {
-                if (!okAlias) {
-                  chatMaxKeys.clear()
-                  for (const key of limitKeys) chatMaxKeys.add(key)
-                }
-                const label = `独立降级请求通过；${probeChatMaxAcceptLabel(chatMaxKeys, rejectedMax)}`
-                const accepted = probeResult('passed', label, { format, duration: source.log.duration, usage: source.log.usage, repro: probeReproOf(source.log) })
-                await finishPassed([id], accepted, label)
-              } else {
-                markMaxUnsupported(last.log, probeExtractError(last.data))
-              }
-            }
-          } else {
-            const raw = probeExtractError(one.data)
-            const s: ProbeStatus = /unsupported|unknown|invalid|not supported|not implemented/i.test(raw) ? 'unsupported' : 'failed'
-            outcomes[probeKey(id, format)] = probeResult(s, splitNote ? `${raw} ${splitNote}` : raw, { format, duration: one.log.duration, usage: one.log.usage, repro: probeReproOf(one.log) })
-          }
-        } catch (e: any) {
-          outcomes[probeKey(id, format)] = probeCatchResult(e, format, singleLog)
-        }
-        pending.delete(id)
-      }
+      for (const id of [...pending]) await runSoloParam(id, splitNote)
     }
+    for (const id of thinkingSolos) await runSoloParam(id)
     return outcomes
   }
 
@@ -2141,7 +2165,7 @@ function ModelProbeTool() {
     } else {
       const proto = probeProtocolOf(format)
       body = { ...probeBaseBody(cfg, format), stream }
-      if (stream) proto.applyMaxTokens(body, PROBE_STREAM_MAX_TOKENS)
+      if (stream) proto.applyMaxTokens(body, claudeProbeCap(cfg.model, PROBE_STREAM_MAX_TOKENS))
     }
     const log = probeNewLog(t.id, t.name, format)
     try {
@@ -2378,29 +2402,45 @@ function ModelProbeTool() {
     const blocked = untestedBecauseBlocked(format)
     if (blocked) return blocked
     const proto = probeProtocolOf(format)
-    const body = proto.baseBody(cfgRef.current!.model, spec.prompt)
+    const cfg = cfgRef.current!
+    const body = proto.baseBody(cfg.model, spec.prompt)
+    const cap = claudeProbeCap(cfg.model)
+    if (cap !== PROBE_DEFAULT_CAP) proto.applyMaxTokens(body, cap)
     applyBuiltinTool(body, spec)
     const log = probeNewLog(probeKey(t.id, format), `${t.name}（${PROBE_FORMAT_LABELS[format]}）`, format)
     try {
-      const r = await probeRequest(log, format, body)
+      let r = await probeRequest(log, format, body)
+      let toolChoiceFallback = false
+      if (!r.ok && probeToolChoiceShouldFallback(probeExtractError(r.data), cfg.model)) {
+        const retryBody = proto.baseBody(cfg.model, spec.prompt)
+        if (cap !== PROBE_DEFAULT_CAP) proto.applyMaxTokens(retryBody, cap)
+        applyBuiltinTool(retryBody, spec)
+        retryBody.tool_choice = format === 'anthropic' ? { type: 'auto' } : 'auto'
+        const retryLog = probeNewLog(probeKey(t.id, format), `${t.name} auto 降级（${PROBE_FORMAT_LABELS[format]}）`, format)
+        r = await probeRequest(retryLog, format, retryBody)
+        toolChoiceFallback = true
+      }
       if (!r.ok) {
         const err = probeExtractError(r.data)
         const s: ProbeStatus = oracleUnsupportedNativeTool(err) ? 'unsupported' : 'failed'
         return probeResult(s, err, { format, duration: r.log.duration, usage: r.log.usage, repro: probeReproOf(r.log) })
       }
       const check = oracleNativeToolEvidence(r.data, spec)
-      if (!check.passed) {
+      const noted = toolChoiceFallback
+        ? { ...check, detail: `${claudeTierFromName(cfg.model) === '5' ? 'Claude 5.x' : 'thinking 模式'}不支持强制 tool_choice，已用 auto 核验；${check.detail}` }
+        : check
+      if (!noted.passed) {
         if (!probeUsageComplete(r.log.usage)) {
-          return probeResult('failed', `${check.detail}；${probeUsageFailDetail(r.log.usage)}`, {
-            format, duration: r.log.duration, usage: r.log.usage, repro: probeReproOf(r.log), checks: [check],
+          return probeResult('failed', `${noted.detail}；${probeUsageFailDetail(r.log.usage)}`, {
+            format, duration: r.log.duration, usage: r.log.usage, repro: probeReproOf(r.log), checks: [noted],
           })
         }
-        return probeResult('abnormal', `异常：渠道没有执行 ${spec.tool}，但请求成功了。${check.detail}`, {
-          format, duration: r.log.duration, usage: r.log.usage, repro: probeReproOf(r.log), checks: [check],
+        return probeResult('abnormal', `异常：渠道没有执行 ${spec.tool}，但请求成功了。${noted.detail}`, {
+          format, duration: r.log.duration, usage: r.log.usage, repro: probeReproOf(r.log), checks: [noted],
         })
       }
-      return probeResult('passed', check.detail, {
-        format, duration: r.log.duration, usage: r.log.usage, repro: probeReproOf(r.log), checks: [check],
+      return probeResult('passed', noted.detail, {
+        format, duration: r.log.duration, usage: r.log.usage, repro: probeReproOf(r.log), checks: [noted],
       })
     } catch (e: any) {
       return probeCatchResult(e, format, log)
@@ -2675,7 +2715,7 @@ function ModelProbeTool() {
       const origin = decideOrigin(signals)
       if (selectedRef.current['expect-reject']) {
         for (const [key, result] of Object.entries(resultsObj)) {
-          const next = reclassifyExpected(key, result, family, origin)
+          const next = reclassifyExpected(key, result, family, origin, cfg.model)
           if (!next) continue
           resultsObj[key] = { ...result, status: next.status, detail: next.detail }
           setTestStatus(key, next.status, next.detail)
@@ -2793,7 +2833,7 @@ function ModelProbeTool() {
         const origin = hadLogs
           ? decideOrigin(signals)
           : { access: { id: 'uncertain', label: '不确定', reasons: [] } }
-        const rewritten = reclassifyExpected(key, gated, family, origin)
+        const rewritten = reclassifyExpected(key, gated, family, origin, source.target.model)
         if (rewritten) gated = { ...gated, status: rewritten.status, detail: rewritten.detail }
       }
       const verdict = hadLogs

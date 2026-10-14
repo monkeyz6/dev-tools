@@ -1,5 +1,5 @@
 import type { OriginDecision, ProbeSignals } from './origin'
-import { probeErrorMessage } from './protocol'
+import { PROBE_DEFAULT_CAP, PROBE_SCHEMA_CAP, probeErrorMessage } from './protocol'
 
 export type ProbeFamilyId = 'gpt' | 'claude' | 'unknown'
 export type GptVariant = 'reasoning' | 'classic' | null
@@ -16,11 +16,15 @@ export interface FamilyDecision {
 }
 
 export type ProbeRunStatus = 'passed' | 'failed' | 'abnormal' | 'unsupported' | 'skipped' | 'expected' | 'untested'
+/** 4.6 桶含 4.6–4.8；budget_tokens 是否接受另看 claudeAcceptsThinkingBudget。 */
+export type ClaudeTier = '4.5' | '4.6' | '5' | null
 
 const GPT_REASONING_RE = /^(?:gpt-5(?:[.-]|$)|gpt-6(?:[.-]|$)|o1(?:[.-]|$)|o3(?:[.-]|$)|o4(?:[.-]|$))/i
 const GPT_CLASSIC_RE = /^(?:gpt-4o|gpt-4\.1)(?:-\d{4}-\d{2}-\d{2})?$/i
 const GPT_WEAK_RE = /^gpt-/i
 const CLAUDE_RE = /^claude-/i
+const CLAUDE_NEW_RE = /^claude-(?:sonnet|opus|haiku|fable|mythos)-(\d+)(?:-(\d+))?(?:-\d{8})?$/
+export const PROBE_CLAUDE5_CAP = 2048
 
 export const normalizeProbeFamilyName = (model: string): string => {
   let s = String(model || '').trim().toLowerCase()
@@ -28,6 +32,45 @@ export const normalizeProbeFamilyName = (model: string): string => {
   if (slash >= 0) s = s.slice(slash + 1)
   return s
 }
+
+interface ClaudeParsed { major: number; minor: number | null }
+
+const parseClaudeName = (model: string): ClaudeParsed | null => {
+  const m = normalizeProbeFamilyName(model).match(CLAUDE_NEW_RE)
+  if (!m) return null
+  return { major: Number(m[1]), minor: m[2] != null ? Number(m[2]) : null }
+}
+
+/** 新命名 claude-{size}-{major}-{minor}；日期快照跟主 id 同一档。3.x / claude-sonnet-4 返回 null。 */
+export const claudeTierFromName = (model: string): ClaudeTier => {
+  const p = parseClaudeName(model)
+  if (!p) return null
+  if (p.major === 4 && p.minor === 5) return '4.5'
+  if (p.major === 4 && p.minor != null && p.minor >= 6 && p.minor <= 8) return '4.6'
+  if (p.major === 5) return '5'
+  return null
+}
+
+/** 4.5 与 4.6 仍接受 thinking.budget_tokens；4.7+ 与 5.x 官方 400。 */
+export const claudeAcceptsThinkingBudget = (model: string): boolean => {
+  const p = parseClaudeName(model)
+  return !!p && p.major === 4 && (p.minor === 5 || p.minor === 6)
+}
+
+export const claudeProbeCap = (model: string, fallback = PROBE_DEFAULT_CAP): number =>
+  claudeTierFromName(model) === '5' ? PROBE_CLAUDE5_CAP : fallback
+
+export const claudeSchemaCap = (model: string): number =>
+  claudeTierFromName(model) === '5' ? PROBE_CLAUDE5_CAP : PROBE_SCHEMA_CAP
+
+export const claudeForcedToolChoiceMentioned = (err: string): boolean => {
+  const e = probeErrorMessage(err).toLowerCase()
+  return /tool[_ -]?choice|forced tool/.test(e)
+}
+
+/** 5.x 官方拒绝强制 tool_choice，不必再命中 thinking 词。 */
+export const claudeForcedToolChoiceBlocked = (err: string, model: string): boolean =>
+  claudeTierFromName(model) === '5' && claudeForcedToolChoiceMentioned(err)
 
 /** 名单归类。带日期的快照与主 id 同一档；不在名单里的名字是 unknown，不套预期拒绝。 */
 export const profileFromName = (model: string): ProbeProfileId => {
@@ -101,14 +144,17 @@ export function decideFamily(signals: ProbeSignals): FamilyDecision {
   if (signals.flags.reasoningEffort) reasons.push('成功响应含 reasoning.effort')
   if (signals.flags.reasoningTokens) reasons.push('用量含 reasoning_tokens')
 
-  const gptBehavior = errorKinds.size > 0 || signals.flags.reasoningEffort || signals.flags.reasoningTokens
+  const gptCore = errorKinds.has('max_completion') || errorKinds.has('tool_effort') || signals.flags.reasoningEffort || signals.flags.reasoningTokens
+  const gptSampling = errorKinds.has('temperature') || errorKinds.has('top_p')
+  const gptBehavior = gptCore || gptSampling
   const claudeBehavior = signals.basic.anthropic === 'ok' && signals.flags.anthropicNative && !errorKinds.has('max_completion')
   if (claudeBehavior) reasons.push('Anthropic 基础请求成功，响应含 stop_reason 或 input_tokens')
   if (requestProfile === 'classic' && gptBehavior) reasons.push('名字属于 GPT 经典系列，但响应表现像推理模型')
 
   const claudeName = kinds.has('claude')
   const gptName = kinds.has('reasoning') || kinds.has('classic') || kinds.has('codex') || kinds.has('weak')
-  const conflict = (claudeName && gptBehavior) || (gptName && claudeBehavior && !gptBehavior) || (claudeBehavior && gptBehavior)
+  // Claude 5.x 官方也拒非默认采样，单凭 temperature/top_p 不能把 Claude 名打成不确定。
+  const conflict = (claudeName && gptCore) || (gptName && claudeBehavior && !gptBehavior) || (claudeBehavior && gptCore)
 
   const done = (
     family: ProbeFamilyId,
@@ -124,7 +170,8 @@ export function decideFamily(signals: ProbeSignals): FamilyDecision {
   if (requestProfile === 'classic') return done('gpt', 'classic', 'classic', 'GPT 经典', false)
   if (requestProfile === 'reasoning') return done('gpt', 'reasoning', 'reasoning', 'GPT 推理', false)
 
-  if (gptBehavior || gptName) {
+  // Claude 5.x 也会拒非默认采样；名字已是 Claude 时不要仅凭 temperature/top_p 走进 GPT 分支。
+  if (!claudeName && (gptBehavior || gptName)) {
     const variant: GptVariant = (gptBehavior || kinds.has('reasoning')) ? 'reasoning' : kinds.has('classic') ? 'classic' : null
     return done('gpt', variant, 'unknown', variant === 'reasoning' ? 'GPT 推理' : 'GPT', false)
   }
@@ -205,12 +252,24 @@ export function anthropicMaxTokensConclusion(
   return null
 }
 
+const claudeLooksRejected = (message: string, name: RegExp): boolean => {
+  const e = probeErrorMessage(message).toLowerCase()
+  if (!name.test(e)) return false
+  return /unknown parameter|unexpected|not supported|unsupported|does not support|invalid|not permitted|extra inputs|cannot|must (?:be )?omitted|must not/.test(e)
+}
+
+const claudeSamplingRejected = (param: 'temperature' | 'top_p', message: string): boolean => {
+  if (gptReasoningErrorKind(message) === param) return true
+  return claudeLooksRejected(message, param === 'top_p' ? /top[_-]?p/ : /temperature/)
+}
+
 /** 只在勾选「预期拒绝」之后调用。对上的报错改记符合预期；本该拒绝却成功改记异常。 */
 export function reclassifyExpected(
   key: string,
   result: { status: string; detail: string; format?: string; repro?: { status: number | null } | null },
   family: FamilyDecision,
   origin: Pick<OriginDecision, 'access'>,
+  model?: string,
 ): ExpectedRewrite | null {
   if (family.conflict) return null
   const profile = family.profile
@@ -218,12 +277,25 @@ export function reclassifyExpected(
   const param = at > 0 ? key.slice(0, at) : key
   const format = result.format || (at > 0 ? key.slice(at + 1) : '')
   const message = probeErrorMessage(result.detail)
+  const tier = model ? claudeTierFromName(model) : null
 
   if (result.status === 'passed' && reasoningLike(profile) && (param === 'temperature' || param === 'top_p')) {
     return { status: 'abnormal', detail: `异常：GPT 推理模型不应接受 ${param}，但请求成功了。${result.detail}` }
   }
+  if (result.status === 'passed' && profile === 'claude' && tier === '5' && (param === 'temperature' || param === 'top_p')) {
+    return { status: 'abnormal', detail: `异常：Claude 5.x 不应接受非默认 ${param}，但请求成功了。${result.detail}` }
+  }
   if (result.status === 'passed' && profile === 'claude' && format === 'anthropic' && param === 'reasoning_effort') {
     return { status: 'abnormal', detail: `异常：Claude 不使用 OpenAI 的 reasoning_effort，但请求成功了。${result.detail}` }
+  }
+  if (result.status === 'passed' && profile === 'claude' && format === 'anthropic' && param === 'effort' && tier === '4.5') {
+    return { status: 'abnormal', detail: `异常：Claude 4.5 不支持 output_config.effort，但请求成功了。${result.detail}` }
+  }
+  if (result.status === 'passed' && profile === 'claude' && format === 'anthropic' && param === 'thinking-adaptive' && tier === '4.5') {
+    return { status: 'abnormal', detail: `异常：Claude 4.5 不支持 adaptive thinking，但请求成功了。${result.detail}` }
+  }
+  if (result.status === 'passed' && profile === 'claude' && format === 'anthropic' && param === 'thinking-budget' && model && !claudeAcceptsThinkingBudget(model)) {
+    return { status: 'abnormal', detail: `异常：该 Claude 代际不接受 thinking.budget_tokens，但请求成功了。${result.detail}` }
   }
 
   if (result.status !== 'failed' && result.status !== 'unsupported') return null
@@ -247,10 +319,24 @@ export function reclassifyExpected(
     return { status: 'expected', detail: `符合预期：Codex 产品线不提供 Chat Completions。${result.detail}` }
   }
 
+  if (profile === 'claude' && tier === '5' && (param === 'temperature' || param === 'top_p') && claudeSamplingRejected(param, message)) {
+    return { status: 'expected', detail: `符合预期：Claude 5.x 不接受非默认 ${param}。${result.detail}` }
+  }
+
   if (profile === 'claude' && format === 'anthropic' && param === 'reasoning_effort') {
     if (/reasoning_effort|unknown parameter|unexpected|not supported|invalid/i.test(message) && !anthropicBaseBlocked(message)) {
       return { status: 'expected', detail: `符合预期：Claude 不使用 OpenAI 的 reasoning_effort。${result.detail}` }
     }
+  }
+
+  if (profile === 'claude' && format === 'anthropic' && param === 'effort' && tier === '4.5' && claudeLooksRejected(message, /\beffort\b|output_config/)) {
+    return { status: 'expected', detail: `符合预期：Claude 4.5 不支持 output_config.effort。${result.detail}` }
+  }
+  if (profile === 'claude' && format === 'anthropic' && param === 'thinking-adaptive' && tier === '4.5' && claudeLooksRejected(message, /thinking|adaptive/)) {
+    return { status: 'expected', detail: `符合预期：Claude 4.5 不支持 adaptive thinking。${result.detail}` }
+  }
+  if (profile === 'claude' && format === 'anthropic' && param === 'thinking-budget' && model && !claudeAcceptsThinkingBudget(model) && claudeLooksRejected(message, /thinking|budget/)) {
+    return { status: 'expected', detail: `符合预期：该 Claude 代际不接受 thinking.budget_tokens。${result.detail}` }
   }
 
   if (profile === 'claude' && origin.access.id === 'direct' && (format === 'chat' || format === 'responses') && result.repro?.status === 404) {

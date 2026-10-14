@@ -68,6 +68,8 @@ export const PROBE_TRUNCATION_CAP = 16
 export const PROBE_DEFAULT_CAP = 120
 export const PROBE_SCHEMA_PROMPT = 'Return a JSON object with ok=true.'
 export const PROBE_SCHEMA_CAP = 256
+export const PROBE_THINKING_BUDGET_TOKENS = 1024
+export const PROBE_THINKING_BUDGET_CAP = 2048
 export const PROBE_TOOL_FORCE_PROMPT = 'What is the weather in Shanghai tomorrow? You must call the get_weather tool.'
 export const PROBE_SYSTEM_INSTRUCTION = 'Always reply exactly SYSTEM_OK'
 export const PROBE_SYSTEM_USER = 'Respond now'
@@ -547,6 +549,12 @@ const anthropicProtocol: ProbeProtocol = {
       case 'max_tokens': return { [anthropicCapField]: PROBE_DEFAULT_CAP }
       case 'structured_output':
         return { output_config: { format: { type: 'json_schema', schema: PROBE_JSON_SCHEMA } } }
+      case 'effort':
+        return { output_config: { effort: 'low' } }
+      case 'thinking-adaptive':
+        return { thinking: { type: 'adaptive' } }
+      case 'thinking-budget':
+        return { thinking: { type: 'enabled', budget_tokens: PROBE_THINKING_BUDGET_TOKENS } }
       case 'tool_calling': return weatherAndOrder('anthropic')
       default: return {}
     }
@@ -668,20 +676,38 @@ export const probeChatMaxAcceptLabel = (accepted: Iterable<string>, rejected: It
   return `接受 ${acc.join(' 与 ')}（已排除 ${rej.join('、')}）`
 }
 
-export const probeParamComboBody = (model: string, format: ProbeFormat, pending: Iterable<string>, chatMaxKeys?: string[]): Record<string, any> => {
+export const probeParamComboBody = (
+  model: string,
+  format: ProbeFormat,
+  pending: Iterable<string>,
+  chatMaxKeys?: string[],
+  cap = PROBE_DEFAULT_CAP,
+): Record<string, any> => {
   const proto = probeProtocolOf(format)
   const ids = pending instanceof Set ? pending : new Set(pending)
   const toolCalling = ids.has('tool_calling')
   const prompt = toolCalling ? PROBE_TOOL_CALL_PROMPT : PROBE_PARAM_COMBO_PROMPT
   const body: Record<string, any> = proto.baseBody(model, prompt)
+  if (cap !== PROBE_DEFAULT_CAP) proto.applyMaxTokens(body, cap)
   if (toolCalling && format === 'responses') body.input = probeResponsesInput(prompt)
-  for (const id of ids) Object.assign(body, proto.paramFragment(id))
+  for (const id of ids) {
+    const frag = proto.paramFragment(id)
+    if (frag.output_config && body.output_config && typeof body.output_config === 'object' && !Array.isArray(body.output_config)) {
+      body.output_config = { ...body.output_config, ...frag.output_config }
+      const rest = { ...frag }
+      delete rest.output_config
+      Object.assign(body, rest)
+    } else {
+      Object.assign(body, frag)
+    }
+  }
   if (format === 'chat' && ids.has('max_tokens')) {
     delete body.max_tokens
     delete body.max_completion_tokens
     const keys = chatMaxKeys?.length ? chatMaxKeys : [...CHAT_MAX_TOKEN_KEYS]
-    for (const k of keys) body[k] = PROBE_DEFAULT_CAP
+    for (const k of keys) body[k] = cap
   }
+  if (ids.has('thinking-budget')) proto.applyMaxTokens(body, Math.max(cap, PROBE_THINKING_BUDGET_CAP), chatMaxKeys)
   return body
 }
 
@@ -690,8 +716,14 @@ export const probeParamMatched = (id: string, err: string, format?: ProbeFormat)
     if (format === 'chat') return false
     return /max[_ ]?(completion|output)?[_ ]?tokens/.test(err)
   }
-  if (id === 'structured_output') return /response_format|json\s?schema|text\.format|output_config|output_format/.test(err)
+  if (id === 'structured_output') {
+    if (/response_format|json\s?schema|text\.format|output_config\.format|output_format/.test(err)) return true
+    return /output_config/.test(err) && !/\beffort\b/.test(err)
+  }
   if (id === 'tool_calling') return /tool|function/.test(err)
+  if (id === 'effort') return /\beffort\b/.test(err) && !/reasoning_effort/.test(err)
+  if (id === 'thinking-adaptive') return /thinking|adaptive/.test(err)
+  if (id === 'thinking-budget') return /thinking|budget/.test(err)
   return err.includes(id)
 }
 
@@ -699,6 +731,19 @@ export const probeParamMatched = (id: string, err: string, format?: ProbeFormat)
 export const probeSoleParamMatch = (ids: Iterable<string>, err: string, format?: ProbeFormat): string | null => {
   const hit = [...ids].filter(id => probeParamMatched(id, err, format))
   return hit.length === 1 ? hit[0] : null
+}
+
+export const PROBE_THINKING_PARAM_IDS = ['thinking-adaptive', 'thinking-budget'] as const
+
+const isThinkingParamId = (id: string): boolean =>
+  (PROBE_THINKING_PARAM_IDS as readonly string[]).includes(id)
+
+/** 官方 thinking 是 adaptive 或 enabled+budget，同一发不能并存。两项都勾时从 combo 拿掉、各自单发。 */
+export const probeComboPendingAndSolos = (ids: Iterable<string>): { combo: string[]; solos: string[] } => {
+  const list = [...ids]
+  const thinking = list.filter(isThinkingParamId)
+  if (thinking.length <= 1) return { combo: list, solos: [] }
+  return { combo: list.filter(id => !isThinkingParamId(id)), solos: thinking }
 }
 
 export const probeResponsesResourceId = (data: unknown): string | null => {

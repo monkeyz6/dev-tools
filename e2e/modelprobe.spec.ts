@@ -270,6 +270,112 @@ test.describe('模型探测', () => {
     await expect(again).toContainText('不应接受 temperature')
   })
 
+  test('Claude 4.5：预期拒绝后 effort / adaptive 被拒记符合预期', async ({ page }) => {
+    await page.route('**/v1/messages', async route => {
+      const body = route.request().postDataJSON()
+      if (body?.output_config?.effort) {
+        await route.fulfill({
+          status: 400, contentType: 'application/json',
+          body: JSON.stringify({ error: { message: 'output_config.effort is not supported for this model' } }),
+        })
+        return
+      }
+      if (body?.thinking?.type === 'adaptive') {
+        await route.fulfill({
+          status: 400, contentType: 'application/json',
+          body: JSON.stringify({ error: { message: 'thinking.type adaptive is not supported for this model' } }),
+        })
+        return
+      }
+      await route.fulfill({ status: 200, contentType: 'application/json', body: ANTHROPIC_OK() })
+    })
+
+    await goto(page, /模型探测/)
+    await inputByLabel(page, '模型名称').fill('claude-sonnet-4-5-20250929')
+    await page.getByRole('button', { name: '全不选' }).click()
+    await check(page, 'anthropic-basic')
+    await check(page, 'effort')
+    await check(page, 'thinking-adaptive')
+    await check(page, 'expect-reject')
+    await addChannel(page, { apiKey: 'sk-test-probe' })
+    await page.getByRole('button', { name: '▶ 开始测试' }).click()
+    await page.getByRole('dialog').locator('input').fill('e2e-claude45预期拒绝')
+    await page.getByRole('button', { name: '确认并开始' }).click()
+    await openFinishedReport(page, 'e2e-claude45预期拒绝')
+
+    const effort = page.locator('main').locator('[data-probe-tile]').filter({ hasText: 'effort' })
+    await expect(effort).toContainText('符合预期', { timeout: 10000 })
+    await expect(effort).toContainText('Claude 4.5 不支持 output_config.effort')
+    const adaptive = page.locator('main').locator('[data-probe-tile]').filter({ hasText: 'thinking adaptive' })
+    await expect(adaptive).toContainText('符合预期')
+    await expect(adaptive).toContainText('Claude 4.5 不支持 adaptive thinking')
+  })
+
+  test('Claude 5.5：预期拒绝后非默认 temperature 记符合预期，强制 tool_choice 无 thinking 词也降级', async ({ page }) => {
+    const forcedErr = JSON.stringify({
+      error: { message: 'forced tool_choice is not supported for this model' },
+    })
+    const anthropicBodies: any[] = []
+    await page.route('**/v1/chat/completions', async route => {
+      const body = route.request().postDataJSON()
+      if (body?.temperature !== undefined) {
+        await route.fulfill({
+          status: 400, contentType: 'application/json',
+          body: JSON.stringify({ error: { message: 'temperature is not supported with this model.' } }),
+        })
+        return
+      }
+      await route.fulfill({ status: 200, contentType: 'application/json', body: smartChat(body, 11) })
+    })
+    await page.route('**/v1/messages', async route => {
+      const body = route.request().postDataJSON()
+      anthropicBodies.push(body)
+      if (body?.temperature !== undefined) {
+        await route.fulfill({
+          status: 400, contentType: 'application/json',
+          body: JSON.stringify({ error: { message: 'temperature is not supported with this model.' } }),
+        })
+        return
+      }
+      if (isForcedWeather(body)) {
+        await route.fulfill({ status: 400, contentType: 'application/json', body: forcedErr })
+        return
+      }
+      const forceTool = extractPrompt(body).includes('must call the get_weather')
+      await route.fulfill({
+        status: 200, contentType: 'application/json',
+        body: forceTool ? ANTHROPIC_OK({ toolName: 'get_weather' }) : ANTHROPIC_OK(),
+      })
+    })
+
+    await goto(page, /模型探测/)
+    await inputByLabel(page, '模型名称').fill('claude-sonnet-5-5')
+    await page.getByRole('button', { name: '全不选' }).click()
+    await check(page, 'chat-basic')
+    await check(page, 'anthropic-basic')
+    await check(page, 'temperature')
+    await check(page, 'tool_calling')
+    await check(page, 'expect-reject')
+    await addChannel(page, { apiKey: 'sk-test-probe' })
+    await page.getByRole('button', { name: '▶ 开始测试' }).click()
+    await page.getByRole('dialog').locator('input').fill('e2e-claude55分代')
+    await page.getByRole('button', { name: '确认并开始' }).click()
+    await openFinishedReport(page, 'e2e-claude55分代')
+
+    const temp = page.locator('main').locator('[data-probe-tile]').filter({ hasText: /temperature/ }).filter({ hasText: 'Chat Completions' })
+    await expect(temp).toContainText('符合预期', { timeout: 10000 })
+    await expect(temp).toContainText('Claude 5.x 不接受非默认 temperature')
+    const tempAnth = page.locator('main').locator('[data-probe-tile]').filter({ hasText: /temperature/ }).filter({ hasText: 'Anthropic' })
+    await expect(tempAnth).toContainText('符合预期')
+    await expect(tempAnth).toContainText('Claude 5.x 不接受非默认 temperature')
+    const tool = page.locator('main').locator('[data-probe-tile]').filter({ hasText: /工具调用/ }).filter({ hasText: 'Anthropic' })
+    await expect(tool).toContainText('通过')
+    await expect(tool).toContainText('已用 auto 核验')
+    const anthAuto = anthropicBodies.find(b => b.tool_choice?.type === 'auto' && extractPrompt(b).includes('must call the get_weather'))
+    expect(anthAuto).toBeTruthy()
+    expect(anthAuto.max_tokens).toBe(2048)
+  })
+
   test('工具调用：combo auto 后再发强制 get_weather', async ({ page }) => {
     const chatBodies: any[] = []
     const responsesBodies: any[] = []
