@@ -2,9 +2,14 @@ import { type ProbeFormat, PROBE_DEFAULT_CAP, probeProtocolOf } from './protocol
 
 export type ProbeTopPTransport = 'http' | 'timeout' | 'network'
 
-export function scoreTopPRange(
+/**
+ * 官方写明该返回 4xx 的请求：其它 4xx 通过，2xx 失败；鉴权、408、429、5xx、超时和网络错误记异常。
+ * what 写进失败说明，例如「top_p=2」。
+ */
+export function scoreExpectedReject(
   status: number | null,
   transport: ProbeTopPTransport,
+  what: string,
 ): { status: 'passed' | 'failed' | 'abnormal'; detail: string } {
   if (transport === 'timeout') return { status: 'abnormal', detail: '异常：请求超时' }
   if (transport === 'network') return { status: 'abnormal', detail: '异常：网络错误' }
@@ -12,7 +17,7 @@ export function scoreTopPRange(
     return { status: 'abnormal', detail: '异常：没有 HTTP 状态码' }
   }
   if (status >= 200 && status < 300) {
-    return { status: 'failed', detail: `失败：top_p=2 被接受（HTTP ${status}）` }
+    return { status: 'failed', detail: `失败：${what} 被接受（HTTP ${status}）` }
   }
   if (status === 401 || status === 403) {
     return { status: 'abnormal', detail: `异常：鉴权失败（HTTP ${status}）` }
@@ -21,9 +26,17 @@ export function scoreTopPRange(
     return { status: 'abnormal', detail: `异常：HTTP ${status}` }
   }
   if (status >= 400 && status < 500) {
-    return { status: 'passed', detail: `通过：非法 top_p 返回 HTTP ${status}` }
+    return { status: 'passed', detail: `通过：${what} 返回 HTTP ${status}` }
   }
   return { status: 'abnormal', detail: `异常：HTTP ${status}` }
+}
+
+export function scoreTopPRange(
+  status: number | null,
+  transport: ProbeTopPTransport,
+): { status: 'passed' | 'failed' | 'abnormal'; detail: string } {
+  const scored = scoreExpectedReject(status, transport, 'top_p=2')
+  return scored.status === 'passed' ? { ...scored, detail: `通过：非法 top_p 返回 HTTP ${status}` } : scored
 }
 
 /** 基础体加 top_p=2。Anthropic 固定 max_tokens，不跟随本轮改成 max_completion_tokens。 */

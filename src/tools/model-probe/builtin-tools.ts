@@ -1,5 +1,6 @@
 import type { ProbeFormat } from './protocol'
 import { probeCheck, type ProbeCheck } from './oracles'
+import { isMuseWonderModel } from './profiles'
 
 /** 厂商服务端内置工具（一发可测）。自定义 Function Calling 仍走 tool_calling。 */
 export type BuiltinVendor =
@@ -12,6 +13,7 @@ export type BuiltinVendor =
   | 'minimax'
   | 'gemini'
   | 'doubao'
+  | 'meta'
 
 export const NATIVE_TEST_GROUP = '原生工具调用'
 
@@ -346,6 +348,34 @@ const doubaoCases: BuiltinProbeCase[] = [
   }),
 ]
 
+/** Meta Model API：官方只接受 tool_choice=auto，模型自己决定要不要搜，所以提示里明确要求先搜。 */
+const metaCases: BuiltinProbeCase[] = [
+  caseBase({
+    id: 'native-meta-web_search',
+    vendor: 'meta',
+    tool: 'web_search',
+    name: 'Muse 联网搜索',
+    desc: 'Responses web_search，tool_choice=auto',
+    explain: `Meta Responses 声明 {type:web_search}，带 include:["web_search_call.results"]。官方 tool_choice 只能是 auto，模型可能跳过搜索，提示里要求先搜。证据取 web_search_call 或 url_citation。每千次搜索 $2.5。${PAID}`,
+    format: 'responses',
+    prompt: 'What is a major news headline from today? You must search the live web before answering and cite your source.',
+    apply: { tools: [{ type: 'web_search' }], tool_choice: 'auto', extra: { include: ['web_search_call.results'] } },
+    evidence: ['web_search_call', 'url_citation'],
+  }),
+  caseBase({
+    id: 'native-meta-web_search-messages',
+    vendor: 'meta',
+    tool: 'web_search',
+    name: 'Muse 联网搜索（Messages）',
+    desc: 'Messages 适配层 web_search，tool_choice=auto',
+    explain: `Meta Messages 适配层支持内置 web_search，但文档没给 type 字符串，这里按 {type:web_search} 发，属于推断。证据取 server_tool_use、web_search_tool_result、web_search_call 或 url_citation。${PAID}`,
+    format: 'anthropic',
+    prompt: 'What is a major news headline from today? You must search the live web before answering and cite your source.',
+    apply: { tools: [{ type: 'web_search' }], tool_choice: { type: 'auto' } },
+    evidence: ['server_tool_use', 'web_search_tool_result', 'web_search_call', 'url_citation'],
+  }),
+]
+
 /** 每家带官方文档。DeepSeek 官方无服务端内置搜索，不进名单。 */
 export const BUILTIN_VENDOR_PROFILES: BuiltinVendorProfile[] = [
   {
@@ -411,6 +441,13 @@ export const BUILTIN_VENDOR_PROFILES: BuiltinVendorProfile[] = [
     prefixes: ['doubao-', 'ep-'],
     cases: doubaoCases,
   },
+  {
+    id: 'meta',
+    source: 'https://dev.meta.ai/docs/search-grounding',
+    exact: ['muse-wonder', 'muse-wonder-1.0'],
+    prefixes: ['muse-wonder-1.0-', 'muse-wonder-1.0.'],
+    cases: metaCases,
+  },
 ]
 
 const EXCLUDE_RE = /(?:^|[-_.])(?:embedding|tts|whisper|transcribe|moderation|dall-e|dalle|realtime)(?:[-_.]|$)/i
@@ -454,6 +491,8 @@ function casesForMatch(model: string): BuiltinProbeCase[] {
   }
   const vendor = matchBuiltinVendor(model)
   if (!vendor) return []
+  // 前缀 muse-wonder-1.0- 也会盖住 Wonder Full 这类别的模型，名字规则以 isMuseWonderModel 为准
+  if (vendor === 'meta' && !isMuseWonderModel(model)) return []
   const profile = BUILTIN_VENDOR_PROFILES.find(p => p.id === vendor)
   if (!profile) return []
   return profile.cases.filter(c => !c.onlyExact)

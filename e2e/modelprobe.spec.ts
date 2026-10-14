@@ -3107,3 +3107,299 @@ test.describe('模型探测', () => {
     await expect(tile).toContainText('HTTP 400')
   })
 })
+
+test.describe('模型探测 · Muse Wonder 规格', () => {
+  const tileOf = (page: import('@playwright/test').Page, key: string) => page.locator(`[data-probe-tile][data-probe-key="${key}"]`)
+
+  async function start(page: import('@playwright/test').Page, name: string) {
+    await addChannel(page, { apiKey: 'sk-test-probe' })
+    await page.getByRole('button', { name: '▶ 开始测试' }).click()
+    await page.getByRole('dialog').locator('input').fill(name)
+    await page.getByRole('button', { name: '确认并开始' }).click()
+    await openFinishedReport(page, name)
+  }
+
+  test('muse-wonder 追加规格分组与 Meta web_search，默认不勾；其它模型不出现', async ({ page }) => {
+    await goto(page, /模型探测/)
+    await inputByLabel(page, '模型名称').fill('muse-wonder-1.0')
+    for (const id of ['spec-muse-chat-effort-max', 'spec-muse-anthropic-top-k', 'spec-muse-responses-video', 'native-meta-web_search', 'native-meta-web_search-messages']) {
+      await expect(page.locator(`input[data-id="${id}"]`)).toBeVisible()
+      await expect(page.locator(`input[data-id="${id}"]`)).not.toBeChecked()
+    }
+    await expect(page.locator('div.uppercase.tracking-wide', { hasText: 'Muse Wonder · 官方约束' })).toBeVisible()
+    // 「全选」要连规格分组与 Meta 原生工具一起勾上
+    await page.getByRole('button', { name: '全选' }).click()
+    for (const id of ['spec-muse-chat-effort-max', 'spec-muse-anthropic-top-k', 'spec-muse-responses-video', 'native-meta-web_search', 'native-meta-web_search-messages']) {
+      await expect(page.locator(`input[data-id="${id}"]`)).toBeChecked()
+    }
+    await page.getByRole('button', { name: '全不选' }).click()
+    await inputByLabel(page, '模型名称').fill('gpt-4o')
+    await expect(page.locator('input[data-id="spec-muse-chat-effort-max"]')).toHaveCount(0)
+    await expect(page.locator('input[data-id="native-meta-web_search"]')).toHaveCount(0)
+    await inputByLabel(page, '模型名称').fill('muse-spark-1.3')
+    await expect(page.locator('input[data-id="spec-muse-chat-effort-max"]')).toHaveCount(0)
+    await expect(page.locator('input[data-id="native-meta-web_search"]')).toHaveCount(0)
+    await expect(page.locator('input[data-id="native-meta-web_search-messages"]')).toHaveCount(0)
+  })
+
+  test('官方约束：400 记通过，被接受记失败', async ({ page }) => {
+    const chatBodies: any[] = []
+    let bareSeen = 0
+    await page.route('**/v1/chat/completions', async route => {
+      const body = route.request().postDataJSON()
+      chatBodies.push(body)
+      if (body.stop !== undefined) {
+        await route.fulfill({ status: 400, contentType: 'application/json', body: JSON.stringify({ error: { message: "Unsupported parameter: 'stop'", type: 'invalid_request_error' } }) })
+        return
+      }
+      if (body.n === 2) {
+        await route.fulfill({ status: 200, contentType: 'application/json', body: CHAT_OK(12) })
+        return
+      }
+      // 基础请求与 n=2 用例的提示词相同，只差 n。不带 n 的请求只放行第一条（基础请求最先发）；
+      // 用例若漏发 n 会落到下面的 500，格子变成异常而不是「n=2 被接受」，免得误绿
+      if (body.n === undefined && bareSeen++ === 0) {
+        await route.fulfill({ status: 200, contentType: 'application/json', body: CHAT_OK(12) })
+        return
+      }
+      await route.fulfill({ status: 500, contentType: 'application/json', body: JSON.stringify({ error: { message: 'unexpected request' } }) })
+    })
+
+    await goto(page, /模型探测/)
+    await inputByLabel(page, '模型名称').fill('muse-wonder-1.0')
+    await page.getByRole('button', { name: '全不选' }).click()
+    await check(page, 'chat-basic')
+    await check(page, 'spec-muse-chat-stop')
+    await check(page, 'spec-muse-chat-n2')
+    await start(page, 'e2e-muse-约束')
+
+    const stopTile = tileOf(page, 'spec-muse-chat-stop@chat')
+    const nTile = tileOf(page, 'spec-muse-chat-n2@chat')
+    await expect(stopTile.locator('.probe-status-text')).toHaveText('通过', { timeout: 10000 })
+    await expect(stopTile).toContainText('stop 返回 HTTP 400')
+    await expect(nTile.locator('.probe-status-text')).toHaveText('失败')
+    await expect(nTile).toContainText('n=2 被接受（HTTP 200）')
+    expect(chatBodies.filter(b => b.stop !== undefined)).toHaveLength(1)
+    expect(chatBodies.filter(b => b.stop !== undefined)[0].stop).toEqual(['\n'])
+    expect(chatBodies.filter(b => b.n === 2)).toHaveLength(1)
+  })
+
+  test('推理档位：官方支持的档位被 400 拒绝记失败，none 被 400 拒绝记通过', async ({ page }) => {
+    const reject = { status: 400, contentType: 'application/json', body: JSON.stringify({ error: { message: 'invalid reasoning_effort', type: 'invalid_request_error' } }) }
+    await page.route('**/v1/chat/completions', async route => {
+      const body = route.request().postDataJSON()
+      if (body.reasoning_effort === 'max' || body.reasoning_effort === 'none') { await route.fulfill(reject); return }
+      await route.fulfill({ status: 200, contentType: 'application/json', body: CHAT_OK(12) })
+    })
+
+    await goto(page, /模型探测/)
+    await inputByLabel(page, '模型名称').fill('muse-wonder-1.0')
+    await page.getByRole('button', { name: '全不选' }).click()
+    await check(page, 'chat-basic')
+    await check(page, 'spec-muse-chat-effort-max')
+    await check(page, 'spec-muse-chat-effort-none')
+    await start(page, 'e2e-muse-档位被拒')
+
+    // 同样的 400：接受类是失败，被拒类才是通过
+    const maxTile = tileOf(page, 'spec-muse-chat-effort-max@chat')
+    await expect(maxTile.locator('.probe-status-text')).toHaveText('失败', { timeout: 10000 })
+    await expect(maxTile).toContainText('官方支持，但请求被拒（HTTP 400）')
+    await expect(maxTile).toContainText('invalid reasoning_effort')
+    const noneTile = tileOf(page, 'spec-muse-chat-effort-none@chat')
+    await expect(noneTile.locator('.probe-status-text')).toHaveText('通过')
+    await expect(noneTile).toContainText('reasoning_effort=none 返回 HTTP 400')
+  })
+
+  test('官方约束：400 正文是额度用尽时说明参数已被接受，记失败', async ({ page }) => {
+    await page.route('**/v1/chat/completions', async route => {
+      const body = route.request().postDataJSON()
+      if (body.logprobs === true) {
+        await route.fulfill({
+          status: 400, contentType: 'application/json',
+          body: JSON.stringify({ error: { message: 'Could not finish the message because max_tokens or model output limit was reached.', type: 'invalid_request_error' } }),
+        })
+        return
+      }
+      await route.fulfill({ status: 200, contentType: 'application/json', body: CHAT_OK(12) })
+    })
+
+    await goto(page, /模型探测/)
+    await inputByLabel(page, '模型名称').fill('muse-wonder-1.0')
+    await page.getByRole('button', { name: '全不选' }).click()
+    await check(page, 'chat-basic')
+    await check(page, 'spec-muse-chat-logprobs')
+    await start(page, 'e2e-muse-额度用尽')
+
+    const tile = tileOf(page, 'spec-muse-chat-logprobs@chat')
+    await expect(tile.locator('.probe-status-text')).toHaveText('失败', { timeout: 10000 })
+    await expect(tile).toContainText('logprobs=true 已被接受，HTTP 400 是输出额度用尽')
+    await expect(tile).not.toContainText('返回 HTTP 400：')
+  })
+
+  test('通用用例适配：强制 tool_choice 被拒改用 auto；Responses 推理字段写成 reasoning.effort', async ({ page }) => {
+    const responsesBodies: any[] = []
+    const chatBodies: any[] = []
+    const onlyAuto = { status: 400, contentType: 'application/json', body: JSON.stringify({ error: { message: 'only "auto" is supported for `tool_choice`', type: 'invalid_request_error' } }) }
+    await page.route('**/v1/chat/completions', async route => {
+      const body = route.request().postDataJSON()
+      chatBodies.push(body)
+      if (isForcedWeather(body)) { await route.fulfill(onlyAuto); return }
+      const forcePrompt = extractPrompt(body).includes('You must call the get_weather tool')
+      await route.fulfill({ status: 200, contentType: 'application/json', body: forcePrompt ? CHAT_OK(12, 0, { toolName: 'get_weather' }) : smartChat(body) })
+    })
+    // 两个协议都只接受 auto：任一协议漏了降级，那一格就会失败
+    await page.route('**/v1/responses', async route => {
+      const body = route.request().postDataJSON()
+      responsesBodies.push(body)
+      if (isForcedWeather(body)) { await route.fulfill(onlyAuto); return }
+      const forcePrompt = extractPrompt(body).includes('You must call the get_weather tool')
+      await route.fulfill({ status: 200, contentType: 'application/json', body: forcePrompt ? RESPONSES_OK({ toolName: 'get_weather' }) : smartResponses(body) })
+    })
+
+    await goto(page, /模型探测/)
+    await inputByLabel(page, '模型名称').fill('muse-wonder-1.0')
+    await page.getByRole('button', { name: '全不选' }).click()
+    await check(page, 'chat-basic')
+    await check(page, 'responses-basic')
+    await check(page, 'tool_calling')
+    await check(page, 'reasoning_effort')
+    await start(page, 'e2e-muse-适配')
+
+    for (const key of ['tool_calling@chat', 'tool_calling@responses']) {
+      const tool = tileOf(page, key)
+      await expect(tool.locator('.probe-status-text')).toHaveText('通过', { timeout: 10000 })
+      await expect(tool).toContainText('Muse Wonder 官方只接受 tool_choice=auto')
+    }
+    await expect(tileOf(page, 'reasoning_effort@responses').locator('.probe-status-text')).toHaveText('通过')
+    await expect(tileOf(page, 'reasoning_effort@chat').locator('.probe-status-text')).toHaveText('通过')
+    // 两个协议都确实先发了强制 tool_choice、被拒后才降级为 auto
+    for (const bodies of [chatBodies, responsesBodies]) {
+      expect(bodies.some(isForcedWeather)).toBe(true)
+      expect(bodies.some(b => b.tool_choice === 'auto' && extractPrompt(b).includes('You must call the get_weather tool'))).toBe(true)
+    }
+    // Responses 改写成 reasoning.effort
+    const combo = responsesBodies.find(b => b.reasoning)
+    expect(combo?.reasoning).toEqual({ effort: 'low' })
+    expect(responsesBodies.some(b => b.reasoning_effort !== undefined)).toBe(false)
+    // Chat 仍是顶层 reasoning_effort，不能被一并改写
+    const chatCombo = chatBodies.find(b => b.reasoning_effort !== undefined)
+    expect(chatCombo?.reasoning_effort).toBe('low')
+    expect(chatBodies.some(b => b.reasoning !== undefined)).toBe(false)
+  })
+
+  test('Meta 联网搜索：Responses 实际带 include 与 tool_choice=auto，有 web_search_call 记通过', async ({ page }) => {
+    const nativeBodies: any[] = []
+    await page.route('**/v1/responses', async route => {
+      const body = route.request().postDataJSON()
+      if (JSON.stringify(body.tools || []).includes('"web_search"')) {
+        nativeBodies.push(body)
+        await route.fulfill({
+          status: 200, contentType: 'application/json',
+          body: JSON.stringify({
+            id: 'resp-ws', status: 'completed',
+            output: [
+              { type: 'web_search_call', id: 'ws_1', status: 'completed', results: [{ type: 'text_result', title: 't', url: 'https://example.com', snippet: 's' }] },
+              { type: 'message', role: 'assistant', content: [{ type: 'output_text', text: 'Headline', annotations: [{ type: 'url_citation', url: 'https://example.com', title: 't', start_index: 0, end_index: 8 }] }] },
+            ],
+            usage: { input_tokens: 10, output_tokens: 4 },
+          }),
+        })
+        return
+      }
+      await route.fulfill({ status: 200, contentType: 'application/json', body: smartResponses(body) })
+    })
+
+    await goto(page, /模型探测/)
+    await inputByLabel(page, '模型名称').fill('muse-wonder-1.0')
+    await page.getByRole('button', { name: '全不选' }).click()
+    await check(page, 'responses-basic')
+    await check(page, 'native-meta-web_search')
+    await start(page, 'e2e-muse-联网')
+
+    const tile = tileOf(page, 'native-meta-web_search@responses')
+    await expect(tile.locator('.probe-status-text')).toHaveText('通过', { timeout: 10000 })
+    await expect(tile).toContainText('已调用 web_search')
+    expect(nativeBodies).toHaveLength(1)
+    expect(nativeBodies[0].tools).toEqual([{ type: 'web_search' }])
+    expect(nativeBodies[0].tool_choice).toBe('auto')
+    expect(nativeBodies[0].include).toEqual(['web_search_call.results'])
+  })
+
+  test('Meta 联网搜索（Messages）：请求带 {type:web_search} 与 auto；2xx 没有搜索证据记异常', async ({ page }) => {
+    const nativeBodies: any[] = []
+    await page.route('**/v1/messages', async route => {
+      const body = route.request().postDataJSON()
+      if (JSON.stringify(body.tools || []).includes('"web_search"')) {
+        nativeBodies.push(body)
+        // 只有正文、没有 server_tool_use / web_search_tool_result：渠道没真去搜
+        await route.fulfill({ status: 200, contentType: 'application/json', body: ANTHROPIC_OK({ text: 'Some headline from memory.' }) })
+        return
+      }
+      await route.fulfill({ status: 200, contentType: 'application/json', body: smartAnthropic(body) })
+    })
+
+    await goto(page, /模型探测/)
+    await inputByLabel(page, '模型名称').fill('muse-wonder-1.0')
+    await page.getByRole('button', { name: '全不选' }).click()
+    await check(page, 'anthropic-basic')
+    await check(page, 'native-meta-web_search-messages')
+    await start(page, 'e2e-muse-联网-messages')
+
+    const tile = tileOf(page, 'native-meta-web_search-messages@anthropic')
+    await expect(tile.locator('.probe-status-text')).toHaveText('异常', { timeout: 10000 })
+    await expect(tile).toContainText('渠道没有执行 web_search')
+    expect(nativeBodies).toHaveLength(1)
+    expect(nativeBodies[0].tools).toEqual([{ type: 'web_search' }])
+    expect(nativeBodies[0].tool_choice).toEqual({ type: 'auto' })
+  })
+
+  test('多模态与用量：复述 PDF 口令、max 档带回官方用量字段', async ({ page }) => {
+    await page.route('**/v1/responses', async route => {
+      const body = route.request().postDataJSON()
+      const parts = Array.isArray(body.input) ? body.input.flatMap((m: any) => m.content || []) : []
+      const file = parts.find((p: any) => p.type === 'input_file')
+      if (file) {
+        const pdf = Buffer.from(String(file.file_data).split(',')[1], 'base64').toString('latin1')
+        const code = pdf.match(/The code is (MW-[A-Z0-9]+)/)?.[1] ?? 'none'
+        await route.fulfill({ status: 200, contentType: 'application/json', body: RESPONSES_OK({ text: code }) })
+        return
+      }
+      if (body.reasoning?.effort === 'max') {
+        await route.fulfill({
+          status: 200, contentType: 'application/json',
+          body: JSON.stringify({
+            id: 'resp-max', status: 'completed',
+            output: [{ type: 'message', role: 'assistant', content: [{ type: 'output_text', text: 'OK' }] }],
+            // 网关两层并存：顶层只抄 input/output，官方明细在 response.usage
+            usage: { input_tokens: 10, output_tokens: 40 },
+            response: { usage: { input_tokens: 10, output_tokens: 40, input_tokens_details: { cached_tokens: 0 }, output_tokens_details: { reasoning_tokens: 36 } } },
+          }),
+        })
+        return
+      }
+      await route.fulfill({ status: 200, contentType: 'application/json', body: smartResponses(body) })
+    })
+
+    await goto(page, /模型探测/)
+    await inputByLabel(page, '模型名称').fill('muse-wonder-1.0')
+    await page.getByRole('button', { name: '全不选' }).click()
+    await check(page, 'responses-basic')
+    await check(page, 'spec-muse-responses-pdf')
+    await check(page, 'spec-muse-responses-effort-max')
+    await check(page, 'spec-muse-responses-effort-minimal')
+    await start(page, 'e2e-muse-多模态')
+
+    const pdfTile = tileOf(page, 'spec-muse-responses-pdf@responses')
+    const maxTile = tileOf(page, 'spec-muse-responses-effort-max@responses')
+    const minTile = tileOf(page, 'spec-muse-responses-effort-minimal@responses')
+    await expect(pdfTile.locator('.probe-status-text')).toHaveText('通过', { timeout: 10000 })
+    await expect(pdfTile).toContainText('复述出 PDF 口令')
+    await expect(maxTile.locator('.probe-status-text')).toHaveText('通过')
+    await expect(maxTile).toContainText('用量字段齐全')
+    await expect(maxTile).toContainText('reasoning_tokens=36')
+    // 普通 mock 没有 reasoning_tokens：必须判失败，并点名缺的那个字段
+    await expect(minTile.locator('.probe-status-text')).toHaveText('失败')
+    await expect(minTile).toContainText('用量缺少官方字段：usage.output_tokens_details.reasoning_tokens')
+    await expect(minTile).not.toContainText('用量字段齐全')
+  })
+})

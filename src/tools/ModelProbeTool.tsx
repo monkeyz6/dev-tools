@@ -36,8 +36,13 @@ import {
   type ProbeProfileId,
   aggregateProbeStatus, anthropicBaseBlocked, anthropicCapAction, anthropicMaxTokensConclusion,
   basicProtocolGate, claudeForcedToolChoiceBlocked, claudeProbeCap, claudeSchemaCap, claudeTierFromName,
-  decideFamily, nameSuggestsGpt, profileFromName, reclassifyExpected, scoreProtocolGate,
+  decideFamily, museForcedToolChoiceBlocked, nameSuggestsGpt, probeToolChoiceFallbackNote,
+  profileFromName, reclassifyExpected, scoreProtocolGate,
 } from './model-probe/profiles'
+import {
+  type MuseSpecCase,
+  MUSE_SPEC_CASES, matchMuseSpecCases, museAdaptComboBody, museSpecCaseById, museSpecContext, probeUnionMuseSpecCases, scoreMuseSpecReject, scoreMuseSpecReply,
+} from './model-probe/muse-spec'
 import { decideOrigin, probeRefreshedOrigin, probeShownSource, signalsFromProbeLogs } from './model-probe/origin'
 import { probeRequestIdFromHeaders, probeRequestIdFromRecord, probeRequestIdHeaders, probeShownRequestId } from './model-probe/request-id'
 import { probeKeptResponseBody, probeTopPRangeBody, scoreTopPRange } from './model-probe/negative'
@@ -49,6 +54,7 @@ import { probeMatchRetryChannel, probeReplaceCellLogs } from './model-probe/cell
 // 参数 combo 只验接受；上限/工具/结构化输出在接受后再发语义请求；
 // System / 多轮核验指令；图片输入默认不勾选。
 // 厂商内置工具（kind=native）按模型名命中后追加，默认不勾，单独发请求。
+// Muse Wonder 官方规格（kind=spec）同样按模型名追加、默认不勾；每条只跑自己的协议，被拒类只看状态码。
 // 「预期拒绝」（kind=score）默认不勾，不发请求，只决定要不要把本该拒绝的结果改判。
 // 「top_p 越界」在基础请求上带 top_p=2，只按状态码判定。报告里每一格可以单独重试，并覆盖这一格的结论。
 
@@ -60,7 +66,7 @@ interface ProbeTestDef {
   name: string
   desc: string
   explain: string
-  kind: 'basic' | 'parameter' | 'stream' | 'token' | 'cache' | 'extra' | 'native' | 'score'
+  kind: 'basic' | 'parameter' | 'stream' | 'token' | 'cache' | 'extra' | 'native' | 'spec' | 'score'
   format?: ProbeFormat
   subtype?: string
   defaultSelected?: boolean
@@ -226,7 +232,18 @@ const toNativeProbeTest = (c: BuiltinProbeCase): ProbeTestDef => ({
   kind: 'native', format: c.format, defaultSelected: false,
 })
 const PROBE_BUILTIN_TESTS: ProbeTestDef[] = ALL_BUILTIN_PROBE_CASES.map(toNativeProbeTest)
-const probeCatalog = (): ProbeTestDef[] => [...PROBE_TESTS, ...PROBE_BUILTIN_TESTS]
+const toSpecProbeTest = (c: MuseSpecCase): ProbeTestDef => ({
+  id: c.id, group: c.group, name: c.name, desc: c.desc, explain: c.explain,
+  kind: 'spec', format: c.format, defaultSelected: false,
+})
+const PROBE_SPEC_TESTS: ProbeTestDef[] = MUSE_SPEC_CASES.map(toSpecProbeTest)
+/** 按模型名追加的用例（原生工具 + Muse 规格），默认不勾。 */
+const PROBE_MODEL_TESTS: ProbeTestDef[] = [...PROBE_BUILTIN_TESTS, ...PROBE_SPEC_TESTS]
+const probeModelTestsFor = (model: string): ProbeTestDef[] => [
+  ...matchBuiltinToolCases(model).map(toNativeProbeTest),
+  ...matchMuseSpecCases(model).map(toSpecProbeTest),
+]
+const probeCatalog = (): ProbeTestDef[] => [...PROBE_TESTS, ...PROBE_MODEL_TESTS]
 const probeTestById = (id: string): ProbeTestDef | undefined => probeCatalog().find(t => t.id === id)
 const probeKey = (id: string, format?: ProbeFormat): string => format ? `${id}@${format}` : id
 const probeFormatOfKey = (key: string): ProbeFormat | null => {
@@ -288,10 +305,11 @@ const probeBaseBody = (cfg: ProbeCfg, format: ProbeFormat, prompt = 'Reply with 
   if (cap !== PROBE_DEFAULT_CAP) proto.applyMaxTokens(body, cap)
   return body
 }
-const probeComboBody = (cfg: ProbeCfg, format: ProbeFormat, pending: Iterable<string>, chatMaxKeys?: string[]) =>
-  probeParamComboBody(cfg.model, format, pending, chatMaxKeys, claudeProbeCap(cfg.model))
+const probeComboBody = (cfg: ProbeCfg, format: ProbeFormat, pending: Iterable<string>, chatMaxKeys?: string[]) => {
+  return museAdaptComboBody(cfg.model, format, probeParamComboBody(cfg.model, format, pending, chatMaxKeys, claudeProbeCap(cfg.model)))
+}
 const probeToolChoiceShouldFallback = (err: string, model: string): boolean =>
-  probeToolChoiceForcedBlocked(err) || claudeForcedToolChoiceBlocked(err, model)
+  probeToolChoiceForcedBlocked(err) || claudeForcedToolChoiceBlocked(err, model) || museForcedToolChoiceBlocked(err, model)
 const probeParamLabel = (id: string): string => probeTestById(id)?.name || id
 const PROBE_SEMANTIC_IDS = new Set(['max_tokens', 'tool_calling', 'structured_output'])
 const probeResult = (status: ProbeStatus, detail: string, extra: Partial<ProbeResult> = {}): ProbeResult => ({ status, detail, duration: null, repro: null, ...extra })
@@ -316,7 +334,7 @@ const probeReproOf = (log: ProbeLog): ProbeResult['repro'] => {
   if (responseBody !== undefined) repro.responseBody = responseBody
   return repro
 }
-const probeMultiFormatKinds: ProbeTestDef['kind'][] = ['parameter', 'token', 'stream', 'extra', 'native']
+const probeMultiFormatKinds: ProbeTestDef['kind'][] = ['parameter', 'token', 'stream', 'extra', 'native', 'spec']
 const PROBE_STREAM_MAX_TOKENS = PROBE_DEFAULT_CAP
 const PROBE_PURE_STREAM_PROMPT = '讲个笑话'
 const PROBE_429_RETRY_MAX = 2
@@ -1478,7 +1496,7 @@ function ModelProbeTool() {
   const [selected, setSelected] = useState<Record<string, boolean>>(() => {
     const all: Record<string, boolean> = {}
     PROBE_TESTS.forEach(t => { all[t.id] = cfg0.selected?.[t.id] ?? (t.defaultSelected !== false) })
-    for (const t of PROBE_BUILTIN_TESTS) {
+    for (const t of PROBE_MODEL_TESTS) {
       if (cfg0.selected?.[t.id] !== undefined) all[t.id] = !!cfg0.selected[t.id]
     }
     return all
@@ -1486,14 +1504,17 @@ function ModelProbeTool() {
   const selectedRef = useRef(selected)
   useEffect(() => { selectedRef.current = selected }, [selected])
   const parsedModels = useMemo(() => probeSplitModels(model), [model])
-  const nativeTests = useMemo(() => probeUnionBuiltinCases(parsedModels).map(toNativeProbeTest), [parsedModels])
-  const visibleTests = useMemo(() => [...PROBE_TESTS, ...nativeTests], [nativeTests])
+  const modelTests = useMemo(() => [
+    ...probeUnionBuiltinCases(parsedModels).map(toNativeProbeTest),
+    ...probeUnionMuseSpecCases(parsedModels).map(toSpecProbeTest),
+  ], [parsedModels])
+  const visibleTests = useMemo(() => [...PROBE_TESTS, ...modelTests], [modelTests])
   useEffect(() => {
-    const visibleIds = new Set(nativeTests.map(t => t.id))
+    const visibleIds = new Set(modelTests.map(t => t.id))
     setSelected(prev => {
       let changed = false
       const next = { ...prev }
-      for (const t of PROBE_BUILTIN_TESTS) {
+      for (const t of PROBE_MODEL_TESTS) {
         if (!visibleIds.has(t.id)) continue
         if (next[t.id] === undefined) {
           next[t.id] = false
@@ -1502,7 +1523,7 @@ function ModelProbeTool() {
       }
       return changed ? next : prev
     })
-  }, [nativeTests])
+  }, [modelTests])
 
   useDebouncedPersist(() => {
     saveProbeCfg({ model, randomString, tokenRuns, includeStreamUsage, selected })
@@ -1954,7 +1975,7 @@ function ModelProbeTool() {
         : id === 'tool_calling' ? oracleToolNamed(proto.toolCallsOf(r.data), 'get_weather')
         : oracleSchemaOk(proto.textOf(r.data))
       const noted = toolChoiceFallback
-        ? { ...check, detail: `${claudeTierFromName(cfg.model) === '5' ? 'Claude 5.x' : 'thinking 模式'}不支持强制 tool_choice，已用 auto 核验；${check.detail}` }
+        ? { ...check, detail: `${probeToolChoiceFallbackNote(cfg.model)}${check.detail}` }
         : check
       return mergeAcceptedSemantic(accepted, acceptedLabel, probeResult(noted.passed ? 'passed' : 'failed', noted.detail, {
         format, duration: r.log.duration, usage: r.log.usage, repro: probeReproOf(r.log),
@@ -2427,7 +2448,7 @@ function ModelProbeTool() {
       }
       const check = oracleNativeToolEvidence(r.data, spec)
       const noted = toolChoiceFallback
-        ? { ...check, detail: `${claudeTierFromName(cfg.model) === '5' ? 'Claude 5.x' : 'thinking 模式'}不支持强制 tool_choice，已用 auto 核验；${check.detail}` }
+        ? { ...check, detail: `${probeToolChoiceFallbackNote(cfg.model)}${check.detail}` }
         : check
       if (!noted.passed) {
         if (!probeUsageComplete(r.log.usage)) {
@@ -2443,6 +2464,35 @@ function ModelProbeTool() {
         format, duration: r.log.duration, usage: r.log.usage, repro: probeReproOf(r.log), checks: [noted],
       })
     } catch (e: any) {
+      return probeCatchResult(e, format, log)
+    }
+  }
+
+  // Muse Wonder 规格：每条只跑自己的协议。被拒类只看状态码；接受类非 2xx 记失败，2xx 再核对用量字段 / 口令。
+  const runProbeSpec = async (t: ProbeTestDef): Promise<ProbeResult> => {
+    const spec = museSpecCaseById(t.id)
+    const format = t.format
+    if (!spec || !format) return probeResult('failed', '未找到规格用例定义')
+    const blocked = untestedBecauseBlocked(format)
+    if (blocked) return blocked
+    const proto = probeProtocolOf(format)
+    const ctx = museSpecContext()
+    const body = spec.build(cfgRef.current!.model, ctx)
+    const log = probeNewLog(probeKey(t.id, format), `${t.name}（${PROBE_FORMAT_LABELS[format]}）`, format)
+    try {
+      const r = await probeRequest(log, format, body)
+      const extra = { format, duration: r.log.duration, usage: r.log.usage, repro: probeReproOf(r.log) }
+      const scored = scoreMuseSpecReply({ ...spec, name: t.name }, {
+        status: r.status, ok: r.ok, data: r.data,
+        text: r.ok ? proto.textOf(r.data) : '', errorText: r.ok ? undefined : probeExtractError(r.data),
+      }, ctx)
+      return probeResult(scored.status, scored.detail, scored.checks ? { ...extra, checks: scored.checks } : extra)
+    } catch (e: any) {
+      if (spec.expect === 'reject') {
+        if (stopRef.current) return probeResult('skipped', PROBE_STOP_DETAIL, { format, repro: probeReproOf(log) })
+        const scored = scoreMuseSpecReject({ status: log.status, transport: e?.name === 'TimeoutError' ? 'timeout' : 'network' }, spec.what || t.name)
+        return probeResult(scored.status, scored.detail, { format, duration: log.duration, repro: probeReproOf(log) })
+      }
       return probeCatchResult(e, format, log)
     }
   }
@@ -2517,14 +2567,14 @@ function ModelProbeTool() {
     else {
       const selectedAcross = new Map<string, ProbeTestDef>()
       for (const modelName of models) {
-        for (const t of [...PROBE_TESTS, ...matchBuiltinToolCases(modelName).map(toNativeProbeTest)]) {
+        for (const t of [...PROBE_TESTS, ...probeModelTestsFor(modelName)]) {
           if (selectedRef.current[t.id] && t.kind !== 'score') selectedAcross.set(t.id, t)
         }
       }
       if (!selectedAcross.size) errs.push('请至少勾选一个测试项。')
       const needFormats = [...selectedAcross.values()].some(t => probeMultiFormatKinds.includes(t.kind))
       const activeFormats = (['chat', 'responses', 'anthropic'] as ProbeFormat[]).filter(f => selectedRef.current[`${f}-basic`])
-      if (needFormats && activeFormats.length === 0) errs.push('参数 / 流式 / Token 稳定性 / 补充场景 / 原生工具测试需要至少勾选一个基础格式测试（Chat / Responses / Anthropic）。')
+      if (needFormats && activeFormats.length === 0) errs.push('参数 / 流式 / Token 稳定性 / 补充场景 / 原生工具 / 规格用例需要至少勾选一个基础格式测试（Chat / Responses / Anthropic）。')
     }
     const activeFormats = (['chat', 'responses', 'anthropic'] as ProbeFormat[]).filter(f => selectedRef.current[`${f}-basic`])
     const keyProbe = ch && models.length ? await probeBuildCfgFromChannel(ch, models[0]) : null
@@ -2583,7 +2633,7 @@ function ModelProbeTool() {
     setProbeAnthropicCapField('max_tokens')
     setStatuses({})
 
-    const catalog = [...PROBE_TESTS, ...matchBuiltinToolCases(cfg.model).map(toNativeProbeTest)]
+    const catalog = [...PROBE_TESTS, ...probeModelTestsFor(cfg.model)]
     const selectedTests = catalog.filter(t => selectedRef.current[t.id] && t.kind !== 'score')
     const paramIds = selectedTests.filter(t => t.kind === 'parameter').map(t => t.id)
     const resultsObj: Record<string, ProbeResult> = {}
@@ -2652,7 +2702,7 @@ function ModelProbeTool() {
           }
           continue
         }
-        if (t.kind === 'stream' || t.kind === 'extra' || t.kind === 'native') {
+        if (t.kind === 'stream' || t.kind === 'extra' || t.kind === 'native' || t.kind === 'spec') {
           if (t.format && !activeFormats.includes(t.format)) {
             const key = probeKey(t.id, t.format)
             const out = probeResult('skipped', `对应协议格式未启用（未勾选 ${PROBE_FORMAT_LABELS[t.format]} 基础测试）`, { format: t.format })
@@ -2669,6 +2719,7 @@ function ModelProbeTool() {
             updateProgress(`${t.name}（${PROBE_FORMAT_LABELS[f]}）`)
             const out = t.kind === 'stream' ? await runProbeStream(t, f)
               : t.kind === 'native' ? await runProbeNative(t)
+              : t.kind === 'spec' ? await runProbeSpec(t)
               : await runProbeExtra(t.subtype!, f)
             commit(key, out)
             completed++
@@ -2815,6 +2866,7 @@ function ModelProbeTool() {
       } else if (test.kind === 'stream') out = await runProbeStream(test, cellFormat)
       else if (test.kind === 'extra') out = await runProbeExtra(test.subtype || '', cellFormat)
       else if (test.kind === 'native') out = await runProbeNative(test)
+      else if (test.kind === 'spec') out = await runProbeSpec(test)
       else if (test.kind === 'cache' && test.format) out = await runProbeCache(test.format)
       if (!out || out.status === 'skipped') return
       let gated = probeApplyUsageGate(out)

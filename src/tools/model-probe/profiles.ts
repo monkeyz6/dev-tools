@@ -57,11 +57,23 @@ export const claudeAcceptsThinkingBudget = (model: string): boolean => {
   return !!p && p.major === 4 && (p.minor === 5 || p.minor === 6)
 }
 
+/** Meta muse-wonder-1.0（含带日期快照）与 OpenRouter 的 meta/muse-wonder。Spark、Full 不算。 */
+/** Wonder Full 是另一个模型（Reasoning 页：max 不会切到 Wonder Full），id 里带 full 段一律不算。 */
+export const isMuseWonderModel = (model: string): boolean => {
+  const name = normalizeProbeFamilyName(model)
+  if (/(?:^|[-_.])full(?:$|[-_.])/.test(name)) return false
+  return name === 'muse-wonder' || /^muse-wonder-1\.0(?:$|[-.])/.test(name)
+}
+
+/** 推理关不掉的档位（Claude 5.x、Muse Wonder）把短输出额度提到 2048，免得思考链吃光额度。 */
+const probeNeedsLargeCap = (model: string): boolean =>
+  claudeTierFromName(model) === '5' || isMuseWonderModel(model)
+
 export const claudeProbeCap = (model: string, fallback = PROBE_DEFAULT_CAP): number =>
-  claudeTierFromName(model) === '5' ? PROBE_CLAUDE5_CAP : fallback
+  probeNeedsLargeCap(model) ? PROBE_CLAUDE5_CAP : fallback
 
 export const claudeSchemaCap = (model: string): number =>
-  claudeTierFromName(model) === '5' ? PROBE_CLAUDE5_CAP : PROBE_SCHEMA_CAP
+  probeNeedsLargeCap(model) ? PROBE_CLAUDE5_CAP : PROBE_SCHEMA_CAP
 
 export const claudeForcedToolChoiceMentioned = (err: string): boolean => {
   const e = probeErrorMessage(err).toLowerCase()
@@ -71,6 +83,20 @@ export const claudeForcedToolChoiceMentioned = (err: string): boolean => {
 /** 5.x 官方拒绝强制 tool_choice，不必再命中 thinking 词。 */
 export const claudeForcedToolChoiceBlocked = (err: string, model: string): boolean =>
   claudeTierFromName(model) === '5' && claudeForcedToolChoiceMentioned(err)
+
+/** Meta 官方：Chat / Responses 只接受 tool_choice=auto，其余 400「only "auto" is supported for `tool_choice`」。 */
+export const museForcedToolChoiceBlocked = (err: string, model: string): boolean => {
+  if (!isMuseWonderModel(model)) return false
+  const e = probeErrorMessage(err).toLowerCase()
+  // 官方原句：only "auto" is supported for `tool_choice`。auto 后面必须紧跟 is supported / allowed，近义句不认
+  return /tool[_ -]?choice/.test(e) && /\bonly\s+["'`]?auto["'`]?\s+(?:is\s+)?(?:supported|allowed)\b/.test(e)
+}
+
+/** 强制 tool_choice 被拒、改用 auto 后写进结论的前缀。 */
+export const probeToolChoiceFallbackNote = (model: string): string => {
+  if (isMuseWonderModel(model)) return 'Muse Wonder 官方只接受 tool_choice=auto，已用 auto 核验；'
+  return `${claudeTierFromName(model) === '5' ? 'Claude 5.x' : 'thinking 模式'}不支持强制 tool_choice，已用 auto 核验；`
+}
 
 /** 名单归类。带日期的快照与主 id 同一档；不在名单里的名字是 unknown，不套预期拒绝。 */
 export const profileFromName = (model: string): ProbeProfileId => {
@@ -134,6 +160,15 @@ export function decideFamily(signals: ProbeSignals): FamilyDecision {
     .filter((x): x is { name: string; kind: NameKind } => !!x.kind)
 
   const reasons = named.map(x => nameReason(x.name, x.kind))
+  // Muse Wonder 的 reasoning_tokens、reasoning.effort、stop_reason、只接受默认采样都是官方规格，
+  // 拿 GPT / Claude 的行为特征去套只会误判；只有响应里的模型名换成了 GPT / Claude 才算冲突。
+  if (isMuseWonderModel(signals.requestModel)) {
+    const museReason = `请求模型 ${normalizeProbeFamilyName(signals.requestModel)} 属于 Meta Muse Wonder；推理用量、reasoning.effort、stop_reason 是它的官方规格，不作为 GPT / Claude 证据`
+    if (named.length) {
+      return { family: 'unknown', variant: null, profile: 'unknown', label: '不确定', conflict: true, reasons: uniq([museReason, ...reasons, '响应里的模型名不是 Muse']) }
+    }
+    return { family: 'unknown', variant: null, profile: 'unknown', label: 'Muse Wonder', conflict: false, reasons: [museReason] }
+  }
   const kinds = new Set(named.map(x => x.kind))
   const errorKinds = new Set(signals.errors.map(gptReasoningErrorKind).filter((x): x is GptReasoningErrorKind => !!x))
 

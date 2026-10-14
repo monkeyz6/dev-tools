@@ -711,7 +711,19 @@ export const probeParamComboBody = (
   return body
 }
 
+/** Responses 官方写法是 reasoning.effort。顶层 reasoning_effort 挪进去，已有的 reasoning 对象保留其它字段。 */
+export const probeNestReasoningEffort = (body: Record<string, any>): Record<string, any> => {
+  if (body.reasoning_effort === undefined) return body
+  const prev = body.reasoning && typeof body.reasoning === 'object' && !Array.isArray(body.reasoning) ? body.reasoning : {}
+  const next: Record<string, any> = { ...body, reasoning: { ...prev, effort: body.reasoning_effort } }
+  delete next.reasoning_effort
+  return next
+}
+
 export const probeParamMatched = (id: string, err: string, format?: ProbeFormat): boolean => {
+  // reasoning.effort 只有 Responses 会发（muse 的 combo 改写）。其它协议仍只认 reasoning_effort，
+  // 免得 Anthropic 上的 reasoning.effort 报错同时归给 reasoning_effort 与 effort
+  if (id === 'reasoning_effort') return format === 'responses' ? /reasoning[._ ]?effort/.test(err) : err.includes('reasoning_effort')
   if (id === 'max_tokens') {
     if (format === 'chat') return false
     return /max[_ ]?(completion|output)?[_ ]?tokens/.test(err)
