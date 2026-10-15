@@ -1,4 +1,4 @@
-export type ProbeFormat = 'chat' | 'responses' | 'anthropic'
+export type ProbeFormat = 'chat' | 'responses' | 'anthropic' | 'gemini'
 
 export interface ProbeSseEvent { index: number; event: string; id: string; data: string; json: any }
 
@@ -22,6 +22,8 @@ export const PROBE_ENDPOINTS: Record<ProbeFormat, string> = {
   chat: '/v1/chat/completions',
   responses: '/v1/responses',
   anthropic: '/v1/messages',
+  // 真正的地址含模型名，由 geminiGenerateContentUrl 拼。这里只占住 Record 的键。
+  gemini: '/v1beta/models',
 }
 
 export const PROBE_JSON_SCHEMA = {
@@ -613,10 +615,268 @@ const anthropicProtocol: ProbeProtocol = {
   },
 }
 
+export const GEMINI_CAP = 2048
+
+/** 根上有 candidates 就用根；否则只拆一层 data.candidates。 */
+export function geminiUnwrap(data: unknown): Record<string, any> | null {
+  const o = asObj(data)
+  if (!o) return null
+  if (Array.isArray(o.candidates)) return o
+  const inner = asObj(o.data)
+  if (inner && Array.isArray(inner.candidates)) return inner
+  return o
+}
+
+const geminiUsageSrc = (data: unknown): Record<string, any> | null => {
+  const o = geminiUnwrap(data)
+  if (!o) return null
+  return asObj(o.usageMetadata) || asObj(o.usage_metadata) || asObj(o.usage)
+}
+
+/** promptTokenCount → input，candidatesTokenCount → output。思考 token 不计入 output。 */
+export function geminiReadUsage(data: unknown): ProbeUsage {
+  const u = probeEmptyUsage()
+  const src = geminiUsageSrc(data)
+  if (!src) return u
+  u.input = probeNum(src.promptTokenCount ?? src.prompt_token_count)
+  u.output = probeNum(src.candidatesTokenCount ?? src.candidates_token_count)
+  u.cacheRead = probeNum(
+    src.cachedContentTokenCount
+    ?? src.cached_content_token_count
+    ?? src.totalCachedTokens
+    ?? src.total_cached_tokens,
+  )
+  return u
+}
+
+export function geminiThoughtsTokenCount(data: unknown): number | null {
+  const src = geminiUsageSrc(data)
+  if (!src) return null
+  if (!('thoughtsTokenCount' in src) && !('thoughts_token_count' in src)) return null
+  return probeNum(src.thoughtsTokenCount ?? src.thoughts_token_count)
+}
+
+export function geminiModelVersion(data: unknown): string | null {
+  const o = geminiUnwrap(data)
+  const v = o?.modelVersion ?? o?.model_version
+  return typeof v === 'string' && v ? v : null
+}
+
+/** 模型回传的 content 原样返回，含 thought 与签名。没有 role 也不补。 */
+export function geminiModelContent(data: unknown): Record<string, any> | null {
+  const o = geminiUnwrap(data)
+  const cand = Array.isArray(o?.candidates) ? asObj(o.candidates[0]) : null
+  const content = asObj(cand?.content)
+  return content ? { ...content } : null
+}
+
+export function geminiFinishReason(data: unknown): string | null {
+  const o = geminiUnwrap(data)
+  const cand = Array.isArray(o?.candidates) ? asObj(o.candidates[0]) : null
+  const raw = cand?.finishReason ?? cand?.finish_reason ?? o?.finishReason ?? o?.finish_reason
+  return typeof raw === 'string' ? raw : null
+}
+
+const geminiPartsOf = (data: unknown): Record<string, any>[] => {
+  const o = geminiUnwrap(data)
+  const cands = Array.isArray(o?.candidates) ? o.candidates : []
+  const parts: Record<string, any>[] = []
+  for (const cand of cands) {
+    const raw = asObj(cand)?.content?.parts
+    if (!Array.isArray(raw)) continue
+    for (const part of raw) {
+      const p = asObj(part)
+      if (p) parts.push(p)
+    }
+  }
+  return parts
+}
+
+export function geminiVisibleText(data: unknown): string {
+  const parts = geminiPartsOf(data)
+  const visible: string[] = []
+  const all: string[] = []
+  for (const p of parts) {
+    if (typeof p.text !== 'string') continue
+    all.push(p.text)
+    if (p.thought === true) continue
+    visible.push(p.text)
+  }
+  return (visible.length ? visible : all).join('')
+}
+
+export function geminiFunctionCalls(data: unknown): ProbeToolCall[] {
+  const out: ProbeToolCall[] = []
+  for (const p of geminiPartsOf(data)) {
+    const call = asObj(p.functionCall) || asObj(p.function_call)
+    if (call && typeof call.name === 'string') out.push({ name: call.name, args: call.args ?? call.arguments })
+  }
+  return out
+}
+
+const geminiFilled = (v: unknown): boolean => {
+  if (typeof v === 'string') return v.trim().length > 0
+  if (Array.isArray(v)) return v.length > 0
+  if (v && typeof v === 'object') return Object.keys(v as object).length > 0
+  return false
+}
+
+/** groundingMetadata 里四类证据任一非空即可。认 camelCase 与 snake_case。 */
+export function geminiGrounded(data: unknown): boolean {
+  const o = geminiUnwrap(data)
+  const metas: Record<string, any>[] = []
+  const push = (v: unknown) => {
+    const m = asObj(v)
+    if (m) metas.push(m)
+  }
+  if (o) {
+    push(o.groundingMetadata)
+    push(o.grounding_metadata)
+    const cands = Array.isArray(o.candidates) ? o.candidates : []
+    for (const cand of cands) {
+      const c = asObj(cand)
+      push(c?.groundingMetadata)
+      push(c?.grounding_metadata)
+    }
+  }
+  const keys = ['webSearchQueries', 'web_search_queries', 'groundingChunks', 'grounding_chunks', 'groundingSupports', 'grounding_supports', 'searchEntryPoint', 'search_entry_point']
+  return metas.some(m => keys.some(k => geminiFilled(m[k])))
+}
+
+export function geminiSseHasBothUsage(events: ProbeSseEvent[]): boolean {
+  return events.some(ev => {
+    const u = geminiReadUsage(ev.json)
+    return typeof u.input === 'number' && typeof u.output === 'number'
+  })
+}
+
+/** 根上已有的 /v1beta，或贴进来的 /v1beta/models… 整段地址，先收回再拼一次。以 /v1 结尾的 OpenAI 根保留。 */
+function geminiApiRoot(root: string): string {
+  let base = root.trim().replace(/\/+$/, '')
+  const at = base.toLowerCase().search(/\/v1beta\/models(?=\/|:|$)/)
+  if (at >= 0) base = base.slice(0, at)
+  return base.replace(/\/+$/, '').replace(/(?:\/v1beta)+$/i, '')
+}
+
+export function geminiGenerateContentUrl(root: string, model: string): string {
+  const base = geminiApiRoot(root)
+  return `${base}/v1beta/models/${encodeURIComponent(model)}:generateContent`
+}
+
+export function geminiStreamUrl(root: string, model: string): string {
+  const base = geminiApiRoot(root)
+  return `${base}/v1beta/models/${encodeURIComponent(model)}:streamGenerateContent?alt=sse`
+}
+
+export function geminiRootFromGenerateUrl(url: string): string {
+  const mark = '/v1beta/models/'
+  const i = url.indexOf(mark)
+  return i > 0 ? url.slice(0, i) : url
+}
+
+const geminiProtocol: ProbeProtocol = {
+  id: 'gemini',
+  capabilities: { structuredOutput: true, streamPure: true },
+  headers(apiKey) {
+    return {
+      'Content-Type': 'application/json',
+      'x-goog-api-key': apiKey,
+    }
+  },
+  baseBody(_model, prompt) {
+    return { contents: [{ role: 'user', parts: [{ text: prompt }] }] }
+  },
+  applyMaxTokens(body, n) {
+    const prev = asObj(body.generationConfig) || {}
+    body.generationConfig = { ...prev, maxOutputTokens: n }
+  },
+  applyTools(body, tools, choice) {
+    body.tools = [{
+      functionDeclarations: tools.map(t => ({
+        name: t.name,
+        description: t.description,
+        parameters: t.parameters,
+      })),
+    }]
+    body.toolConfig = choice === 'auto'
+      ? { functionCallingConfig: { mode: 'AUTO' } }
+      : { functionCallingConfig: { mode: 'ANY', allowedFunctionNames: [choice.name] } }
+  },
+  applyStructuredOutput(body) {
+    const prev = asObj(body.generationConfig) || {}
+    body.generationConfig = {
+      ...prev,
+      responseMimeType: 'application/json',
+      responseSchema: {
+        type: 'OBJECT',
+        properties: { ok: { type: 'BOOLEAN' } },
+        required: ['ok'],
+      },
+    }
+  },
+  applySystem(body, system, user) {
+    body.systemInstruction = { parts: [{ text: system }] }
+    body.contents = [{ role: 'user', parts: [{ text: user }] }]
+  },
+  applyImage(body, pngBase64, prompt) {
+    body.contents = [{
+      role: 'user',
+      parts: [
+        { inline_data: { mime_type: 'image/png', data: pngBase64 } },
+        { text: prompt },
+      ],
+    }]
+  },
+  appendUser(body, text) {
+    if (!Array.isArray(body.contents)) body.contents = []
+    body.contents.push({ role: 'user', parts: [{ text }] })
+  },
+  appendAssistantFromResponse(body, data) {
+    const content = geminiModelContent(data)
+    if (!content) return false
+    if (!Array.isArray(body.contents)) body.contents = []
+    body.contents.push(content)
+    return true
+  },
+  paramFragment() {
+    return {}
+  },
+  usageOf(data) {
+    return geminiReadUsage(data)
+  },
+  usageFromSse(events) {
+    const u = probeEmptyUsage()
+    for (const ev of events) {
+      const one = geminiReadUsage(ev.json)
+      if (one.input != null) u.input = one.input
+      if (one.output != null) u.output = one.output
+      if (one.cacheRead != null) u.cacheRead = one.cacheRead
+      if (one.cacheWrite != null) u.cacheWrite = one.cacheWrite
+    }
+    return u
+  },
+  textOf(data) {
+    return geminiVisibleText(data)
+  },
+  stopOf(data) {
+    const raw = geminiFinishReason(data)
+    if (raw === 'MAX_TOKENS') return { kind: 'length', raw }
+    if (raw === 'STOP') return { kind: 'stop', raw }
+    return { kind: 'other', raw }
+  },
+  toolCallsOf(data) {
+    return geminiFunctionCalls(data)
+  },
+  streamFinished(_raw, events) {
+    return events.length > 0
+  },
+}
+
 const PROTOCOLS: Record<ProbeFormat, ProbeProtocol> = {
   chat: chatProtocol,
   responses: responsesProtocol,
   anthropic: anthropicProtocol,
+  gemini: geminiProtocol,
 }
 
 export const probeProtocolOf = (format: ProbeFormat): ProbeProtocol => PROTOCOLS[format]
@@ -684,6 +944,7 @@ export const probeParamComboBody = (
   cap = PROBE_DEFAULT_CAP,
 ): Record<string, any> => {
   const proto = probeProtocolOf(format)
+  if (format === 'gemini') return proto.baseBody(model, 'Reply with exactly: OK')
   const ids = pending instanceof Set ? pending : new Set(pending)
   const toolCalling = ids.has('tool_calling')
   const prompt = toolCalling ? PROBE_TOOL_CALL_PROMPT : PROBE_PARAM_COMBO_PROMPT

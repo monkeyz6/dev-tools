@@ -826,7 +826,7 @@ test.describe('模型探测', () => {
     await inputByLabel(page, '模型名称').fill('probe-model')
     await page.getByRole('button', { name: '测试连接' }).click()
 
-    await expect(page.locator('main')).toContainText('测试连接需要先勾选至少一个协议基础测试')
+    await expect(page.locator('main')).toContainText('测试连接需要先勾选至少一个协议基础测试（Chat Completions / Responses / Anthropic Messages / Gemini generateContent）')
     await expect(page.locator('[data-conn]')).toHaveCount(0)
     expect(chatCalls).toBe(0)
     expect(responsesCalls).toBe(0)

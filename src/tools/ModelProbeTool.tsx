@@ -19,7 +19,7 @@ import {
   PROBE_ENDPOINTS, PROBE_RED_PNG_B64, PROBE_TRUNCATION_PROMPT, PROBE_TRUNCATION_CAP, PROBE_DEFAULT_CAP,
   PROBE_SCHEMA_PROMPT, PROBE_TOOL_FORCE_PROMPT, PROBE_WEATHER_TOOL,
   PROBE_SYSTEM_INSTRUCTION, PROBE_SYSTEM_USER, PROBE_MULTITURN_TURN1, PROBE_MULTITURN_TURN2,
-  PROBE_IMAGE_PROMPT,
+  PROBE_IMAGE_PROMPT, geminiGenerateContentUrl, geminiRootFromGenerateUrl,
 } from './model-probe/protocol'
 import {
   type ProbeCheck,
@@ -47,12 +47,17 @@ import { decideOrigin, probeRefreshedOrigin, probeShownSource, signalsFromProbeL
 import { probeRequestIdFromHeaders, probeRequestIdFromRecord, probeRequestIdHeaders, probeShownRequestId } from './model-probe/request-id'
 import { probeKeptResponseBody, probeTopPRangeBody, scoreTopPRange } from './model-probe/negative'
 import { probeMatchRetryChannel, probeReplaceCellLogs } from './model-probe/cell'
+import {
+  GEMINI_BASIC_ID, GEMINI_MIXED_MESSAGE, GEMINI_PROBE_CASES,
+  fillProbeSelection, geminiAppendVersion, geminiBasicsMixed, runGeminiProbe, toggleProbeBasic,
+} from './model-probe/gemini-spec'
 
 // ─── Tool: 模型探测 ─────────────────────────────────────────────────────────────
 // 定位：API 渠道兼容性实验台 —— 三种协议格式 × 参数/流式/缓存/Token 计数稳定性，
 // 智能降级定位不支持的参数；HTTP 2xx 必须带回 input+output Token（否则失败）；
 // 参数 combo 只验接受；上限/工具/结构化输出在接受后再发语义请求；
 // System / 多轮核验指令；图片输入默认不勾选。
+// Gemini generateContent 与前三套互斥：勾上 gemini-basic 后只跑这一套。
 // 厂商内置工具（kind=native）按模型名命中后追加，默认不勾，单独发请求。
 // Muse Wonder 官方规格（kind=spec）同样按模型名追加、默认不勾；每条只跑自己的协议，被拒类只看状态码。
 // 「预期拒绝」（kind=score）默认不勾，不发请求，只决定要不要把本该拒绝的结果改判。
@@ -149,6 +154,7 @@ interface ProbeChannel {
   chatUrl: string        // 可选覆写，空串表示回退到 baseUrl
   responsesUrl: string
   anthropicUrl: string
+  geminiUrl: string
   apiKeyEnc: string
   keyMask: string
 }
@@ -162,9 +168,11 @@ const PROBE_ACTIVE_CH_KEY = 'modelprobe-active-channel'
 
 const PROBE_MONO = '"JetBrains Mono", "JetBrainsMono Nerd Font", "SF Mono", "Fira Code", "Fira Mono", "Roboto Mono", "Droid Sans Mono", "Cascadia Code", Consolas, "Courier New", monospace'
 const PROBE_FORMAT_LABELS: Record<ProbeFormat, string> = {
-  chat: 'Chat Completions', responses: 'Responses', anthropic: 'Anthropic Messages',
+  chat: 'Chat Completions', responses: 'Responses', anthropic: 'Anthropic Messages', gemini: 'Gemini generateContent',
 }
-const PROBE_FORMAT_SHORT: Record<ProbeFormat, string> = { chat: 'chat', responses: 'responses', anthropic: 'anthropic' }
+const PROBE_FORMAT_SHORT: Record<ProbeFormat, string> = {
+  chat: 'chat', responses: 'responses', anthropic: 'anthropic', gemini: 'gemini',
+}
 const PROBE_STATUS_LABELS: Record<ProbeStatus, string> = {
   passed: '通过', failed: '失败', abnormal: '异常', unsupported: '不支持', skipped: '已跳过', expected: '符合预期', untested: '未测',
 }
@@ -239,11 +247,17 @@ const toSpecProbeTest = (c: MuseSpecCase): ProbeTestDef => ({
 const PROBE_SPEC_TESTS: ProbeTestDef[] = MUSE_SPEC_CASES.map(toSpecProbeTest)
 /** 按模型名追加的用例（原生工具 + Muse 规格），默认不勾。 */
 const PROBE_MODEL_TESTS: ProbeTestDef[] = [...PROBE_BUILTIN_TESTS, ...PROBE_SPEC_TESTS]
+const GEMINI_UI: ProbeTestDef[] = GEMINI_PROBE_CASES.map(c => ({
+  id: c.id, group: c.group, name: c.name, desc: c.desc, explain: c.explain,
+  kind: c.id === GEMINI_BASIC_ID ? 'basic' : 'extra', format: 'gemini', defaultSelected: false,
+}))
+const GEMINI_BASIC_UI = GEMINI_UI[0]
+const PROBE_OTHER_IDS = [...PROBE_TESTS, ...PROBE_MODEL_TESTS].map(t => t.id)
 const probeModelTestsFor = (model: string): ProbeTestDef[] => [
   ...matchBuiltinToolCases(model).map(toNativeProbeTest),
   ...matchMuseSpecCases(model).map(toSpecProbeTest),
 ]
-const probeCatalog = (): ProbeTestDef[] => [...PROBE_TESTS, ...PROBE_MODEL_TESTS]
+const probeCatalog = (): ProbeTestDef[] => [...PROBE_TESTS, ...GEMINI_UI, ...PROBE_MODEL_TESTS]
 const probeTestById = (id: string): ProbeTestDef | undefined => probeCatalog().find(t => t.id === id)
 const probeKey = (id: string, format?: ProbeFormat): string => format ? `${id}@${format}` : id
 const probeFormatOfKey = (key: string): ProbeFormat | null => {
@@ -261,6 +275,24 @@ const probeJoinUrl = (base: string, path: string): string => {
   const clean = base.trim().replace(/\/+$/, '')
   return /\/v1$/i.test(clean) && path.startsWith('/v1/') ? clean + path.slice(3) : clean + path
 }
+const probeChannelText = (v: unknown): string => (typeof v === 'string' ? v : '')
+const normalizeProbeChannel = (c: ProbeChannel): ProbeChannel => ({
+  ...c,
+  chatUrl: probeChannelText(c.chatUrl),
+  responsesUrl: probeChannelText(c.responsesUrl),
+  anthropicUrl: probeChannelText(c.anthropicUrl),
+  geminiUrl: probeChannelText(c.geminiUrl),
+})
+const probeUrlOf = (
+  base: string,
+  overrides: { chat?: string | null; responses?: string | null; anthropic?: string | null; gemini?: string | null },
+  model: string,
+): Record<ProbeFormat, string> => ({
+  chat: probeJoinUrl((overrides.chat || '').trim() || base, PROBE_ENDPOINTS.chat),
+  responses: probeJoinUrl((overrides.responses || '').trim() || base, PROBE_ENDPOINTS.responses),
+  anthropic: probeJoinUrl((overrides.anthropic || '').trim() || base, PROBE_ENDPOINTS.anthropic),
+  gemini: geminiGenerateContentUrl((overrides.gemini || '').trim() || base, model),
+})
 const probeJsonPretty = (v: any): string => {
   try { return JSON.stringify(v, null, 2) } catch { return String(v) }
 }
@@ -426,6 +458,7 @@ function loadProbeChannelsRaw(): ProbeChannel[] {
     if (!Array.isArray(list)) return []
     return list.filter((c): c is ProbeChannel =>
       c && typeof c === 'object' && typeof c.id === 'string' && typeof c.name === 'string' && typeof c.baseUrl === 'string')
+      .map(c => normalizeProbeChannel(c))
   } catch { return [] }
 }
 function saveProbeChannels(list: ProbeChannel[]) {
@@ -453,6 +486,7 @@ function loadOrMigrateProbeChannels(): { channels: ProbeChannel[]; activeId: str
     chatUrl: legacy.chatUrl ?? '',
     responsesUrl: legacy.responsesUrl ?? '',
     anthropicUrl: legacy.anthropicUrl ?? '',
+    geminiUrl: probeChannelText(legacy.geminiUrl),
     apiKeyEnc: legacyKeyEnc,
     keyMask: legacyKeyEnc ? '（已加密，未展示）' : '',
   }
@@ -461,7 +495,7 @@ function loadOrMigrateProbeChannels(): { channels: ProbeChannel[]; activeId: str
   return { channels: [ch], activeId: ch.id }
 }
 
-// 把一个渠道（+ 全局的 model）组装成执行器实际使用的 ProbeCfg：解密 apiKey、按渠道各自的三种协议 URL
+// 把一个渠道（+ 全局的 model）组装成执行器实际使用的 ProbeCfg：解密 apiKey、按渠道各自的四条协议 URL
 // 覆写（留空回退到 baseUrl）拼出完整请求地址。testConnection/runProbe 共用，避免重复现场拼装。
 async function probeBuildCfgFromChannel(ch: ProbeChannel, model: string, timeoutCapMs?: number): Promise<ProbeCfg> {
   const apiKey = await decryptLlmApiKey(ch.apiKeyEnc)
@@ -469,11 +503,12 @@ async function probeBuildCfgFromChannel(ch: ProbeChannel, model: string, timeout
   return {
     baseUrl: ch.baseUrl, apiKey, model,
     timeoutMs: timeoutCapMs != null ? Math.min(rawMs, timeoutCapMs) : rawMs,
-    urlOf: {
-      chat: probeJoinUrl(ch.chatUrl.trim() || ch.baseUrl, PROBE_ENDPOINTS.chat),
-      responses: probeJoinUrl(ch.responsesUrl.trim() || ch.baseUrl, PROBE_ENDPOINTS.responses),
-      anthropic: probeJoinUrl(ch.anthropicUrl.trim() || ch.baseUrl, PROBE_ENDPOINTS.anthropic),
-    },
+    urlOf: probeUrlOf(ch.baseUrl, {
+      chat: ch.chatUrl,
+      responses: ch.responsesUrl,
+      anthropic: ch.anthropicUrl,
+      gemini: ch.geminiUrl,
+    }, model),
   }
 }
 
@@ -1272,7 +1307,8 @@ function ProbeFormatCard({ t, checked, disabled, status, onChange }: {
 // 探测运行期间 setStatuses/setProgress/setLogs 高频触发，左侧配置栏与渠道管理
 // 面板的 props 在运行中保持不变，memo 后整体跳过重渲染。
 
-type ProbeChFormState = { name: string; baseUrl: string; timeoutSec: string; chatUrl: string; responsesUrl: string; anthropicUrl: string; apiKey: string }
+type ProbeChFormState = { name: string; baseUrl: string; timeoutSec: string; chatUrl: string; responsesUrl: string; anthropicUrl: string; geminiUrl: string; apiKey: string }
+const emptyChForm = (): ProbeChFormState => ({ name: '', baseUrl: '', timeoutSec: '60', chatUrl: '', responsesUrl: '', anthropicUrl: '', geminiUrl: '', apiKey: '' })
 type ProbeConnResult = { ok: boolean; status: number | null; ms: number; err: string } | null
 
 function probePortal(node: React.ReactNode) {
@@ -1353,7 +1389,7 @@ const ProbeConfigPane = React.memo(function ProbeConfigPane({
           </Btn>
         </div>
         <div className="space-y-1.5">
-          {(['chat', 'responses', 'anthropic'] as ProbeFormat[]).map(f => {
+          {(['chat', 'responses', 'anthropic', 'gemini'] as ProbeFormat[]).map(f => {
             const r = connResults[f]
             if (!r) return null
             const color = r.ok ? 'var(--ok)' : 'var(--err)'
@@ -1422,9 +1458,9 @@ const ProbeChannelsPane = React.memo(function ProbeChannelsPane({
               <div className="text-sm font-bold pr-16 truncate" style={{ color: 'var(--text)' }}>{c.name}</div>
               <div className="text-xs break-all mt-1" style={{ color: 'var(--t3)' }}>{c.baseUrl}</div>
               <div className="text-[11px] mt-0.5" style={{ color: 'var(--t3)' }}>超时 {c.timeoutSec}s</div>
-              {(c.chatUrl || c.responsesUrl || c.anthropicUrl) && (
+              {(c.chatUrl || c.responsesUrl || c.anthropicUrl || c.geminiUrl) && (
                 <div className="text-[11px] mt-0.5" style={{ color: 'var(--t3)' }}>
-                  已独立配置：{[c.chatUrl && 'Chat', c.responsesUrl && 'Responses', c.anthropicUrl && 'Anthropic'].filter(Boolean).join(' / ')}
+                  已独立配置：{[c.chatUrl && 'Chat', c.responsesUrl && 'Responses', c.anthropicUrl && 'Anthropic', c.geminiUrl && 'Gemini'].filter(Boolean).join(' / ')}
                 </div>
               )}
               <div className="text-[11px] font-mono mt-1" style={{ color: 'var(--t3)' }}>{c.keyMask || '（未设置）'}</div>
@@ -1459,11 +1495,12 @@ const ProbeChannelsPane = React.memo(function ProbeChannelsPane({
           </div>
         </div>
         <div className="mt-3">
-          <Label className="block mb-1.5">三种协议独立接入地址（可选，留空则回退默认）</Label>
-          <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+          <Label className="block mb-1.5">协议独立接入地址（可选，留空则回退 Base URL）</Label>
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
             <CustomInput value={chForm.chatUrl} onChange={v => onChFormChange(f => ({ ...f, chatUrl: v }))} placeholder={`${PROBE_FORMAT_LABELS.chat} Base URL`} mono />
             <CustomInput value={chForm.responsesUrl} onChange={v => onChFormChange(f => ({ ...f, responsesUrl: v }))} placeholder={`${PROBE_FORMAT_LABELS.responses} Base URL`} mono />
             <CustomInput value={chForm.anthropicUrl} onChange={v => onChFormChange(f => ({ ...f, anthropicUrl: v }))} placeholder={`${PROBE_FORMAT_LABELS.anthropic} Base URL`} mono />
+            <CustomInput value={chForm.geminiUrl} onChange={v => onChFormChange(f => ({ ...f, geminiUrl: v }))} placeholder={`${PROBE_FORMAT_LABELS.gemini} Base URL`} mono />
           </div>
         </div>
         <div className="flex items-center gap-3 mt-4 flex-wrap">
@@ -1485,10 +1522,10 @@ function ModelProbeTool() {
   const includeStreamUsageRef = useRef(includeStreamUsage)
   useEffect(() => { includeStreamUsageRef.current = includeStreamUsage }, [includeStreamUsage])
 
-  // 渠道（探测目标）：baseUrl/apiKey/超时/三种协议 URL 覆写都收在渠道对象里，可保存多个、选一个当前使用
+  // 渠道（探测目标）：baseUrl/apiKey/超时/四条协议 URL 覆写都收在渠道对象里，可保存多个、选一个当前使用
   const [channels, setChannels] = useState<ProbeChannel[]>(() => loadOrMigrateProbeChannels().channels)
   const [activeChId, setActiveChId] = useState<string | null>(() => loadOrMigrateProbeChannels().activeId)
-  const [chForm, setChForm] = useState({ name: '', baseUrl: '', timeoutSec: '60', chatUrl: '', responsesUrl: '', anthropicUrl: '', apiKey: '' })
+  const [chForm, setChForm] = useState(emptyChForm)
   const [editingChId, setEditingChId] = useState<string | null>(null)
   const [chNotice, setChNotice] = useState('')
   const activeChannel = channels.find(c => c.id === activeChId) ?? null
@@ -1496,6 +1533,7 @@ function ModelProbeTool() {
   const [selected, setSelected] = useState<Record<string, boolean>>(() => {
     const all: Record<string, boolean> = {}
     PROBE_TESTS.forEach(t => { all[t.id] = cfg0.selected?.[t.id] ?? (t.defaultSelected !== false) })
+    for (const t of GEMINI_UI) all[t.id] = cfg0.selected?.[t.id] ?? false
     for (const t of PROBE_MODEL_TESTS) {
       if (cfg0.selected?.[t.id] !== undefined) all[t.id] = !!cfg0.selected[t.id]
     }
@@ -1508,7 +1546,11 @@ function ModelProbeTool() {
     ...probeUnionBuiltinCases(parsedModels).map(toNativeProbeTest),
     ...probeUnionMuseSpecCases(parsedModels).map(toSpecProbeTest),
   ], [parsedModels])
-  const visibleTests = useMemo(() => [...PROBE_TESTS, ...modelTests], [modelTests])
+  const geminiOn = !!selected[GEMINI_BASIC_ID]
+  const visibleTests = useMemo(
+    () => (geminiOn ? GEMINI_UI : [...PROBE_TESTS, GEMINI_BASIC_UI, ...modelTests]),
+    [geminiOn, modelTests],
+  )
   useEffect(() => {
     const visibleIds = new Set(modelTests.map(t => t.id))
     setSelected(prev => {
@@ -1564,26 +1606,26 @@ function ModelProbeTool() {
     if (editingChId) {
       const target = channels.find(c => c.id === editingChId)
       if (!target) return
-      const nc: ProbeChannel = { ...target, name, baseUrl: base, timeoutSec: timeoutSecVal, chatUrl: chForm.chatUrl.trim(), responsesUrl: chForm.responsesUrl.trim(), anthropicUrl: chForm.anthropicUrl.trim() }
+      const nc: ProbeChannel = { ...target, name, baseUrl: base, timeoutSec: timeoutSecVal, chatUrl: chForm.chatUrl.trim(), responsesUrl: chForm.responsesUrl.trim(), anthropicUrl: chForm.anthropicUrl.trim(), geminiUrl: chForm.geminiUrl.trim() }
       if (apiKeyEnc) { nc.apiKeyEnc = apiKeyEnc; nc.keyMask = keyMask }
       setChannels(channels.map(c => c.id === editingChId ? nc : c))
     } else {
       if (!apiKeyEnc) { chToast('请填写 apiKey'); return }
       const nc: ProbeChannel = {
         id: 'ch' + Date.now().toString(36) + Math.random().toString(36).slice(2, 7), name, baseUrl: base, timeoutSec: timeoutSecVal,
-        chatUrl: chForm.chatUrl.trim(), responsesUrl: chForm.responsesUrl.trim(), anthropicUrl: chForm.anthropicUrl.trim(), apiKeyEnc, keyMask,
+        chatUrl: chForm.chatUrl.trim(), responsesUrl: chForm.responsesUrl.trim(), anthropicUrl: chForm.anthropicUrl.trim(), geminiUrl: chForm.geminiUrl.trim(), apiKeyEnc, keyMask,
       }
       setChannels([...channels, nc])
       if (!activeChId) setActiveChId(nc.id)
     }
-    setChForm({ name: '', baseUrl: '', timeoutSec: '60', chatUrl: '', responsesUrl: '', anthropicUrl: '', apiKey: '' })
+    setChForm(emptyChForm())
     setEditingChId(null)
     chToast('已保存')
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [chForm, editingChId, channels, activeChId])
 
   const editChannel = useCallback((c: ProbeChannel) => {
-    setChForm({ name: c.name, baseUrl: c.baseUrl, timeoutSec: c.timeoutSec, chatUrl: c.chatUrl, responsesUrl: c.responsesUrl, anthropicUrl: c.anthropicUrl, apiKey: '' })
+    setChForm({ name: c.name, baseUrl: c.baseUrl, timeoutSec: c.timeoutSec, chatUrl: c.chatUrl, responsesUrl: c.responsesUrl, anthropicUrl: c.anthropicUrl, geminiUrl: c.geminiUrl, apiKey: '' })
     setEditingChId(c.id)
   }, [])
 
@@ -1602,7 +1644,7 @@ function ModelProbeTool() {
   }, [])
 
   const clearChForm = useCallback(() => {
-    setChForm({ name: '', baseUrl: '', timeoutSec: '60', chatUrl: '', responsesUrl: '', anthropicUrl: '', apiKey: '' })
+    setChForm(emptyChForm())
     setEditingChId(null)
   }, [])
 
@@ -1631,7 +1673,7 @@ function ModelProbeTool() {
   const [progress, setProgress] = useState<{ done: number; total: number; label: string }>({ done: 0, total: 0, label: '' })
   const [startErr, setStartErr] = useState('')
   const [connRunning, setConnRunning] = useState(false)
-  const [connResults, setConnResults] = useState<Record<ProbeFormat, { ok: boolean; status: number | null; ms: number; err: string } | null>>({ chat: null, responses: null, anthropic: null })
+  const [connResults, setConnResults] = useState<Record<ProbeFormat, { ok: boolean; status: number | null; ms: number; err: string } | null>>({ chat: null, responses: null, anthropic: null, gemini: null })
 
   const logsRef = useRef<ProbeLog[]>([])
   const logsEpochRef = useRef(0)
@@ -2502,6 +2544,66 @@ function ModelProbeTool() {
   const onTestConnection = useCallback(() => testConnectionRef.current(), [])
   const regenRandom = useCallback(() => setRandomString(probeMakeRandom()), [])
 
+  const runGeminiOutcome = async (t: ProbeTestDef): Promise<ProbeResult> => {
+    const cfg = cfgRef.current!
+    const root = geminiRootFromGenerateUrl(cfg.urlOf.gemini) || cfg.baseUrl
+    const key = t.kind === 'basic' ? t.id : probeKey(t.id, 'gemini')
+    const caseLogs: ProbeLog[] = []
+    const outcome = await runGeminiProbe(t.id, {
+      model: cfg.model,
+      root,
+      rounds: Math.max(2, Math.min(10, Number(tokenRuns) || 3)),
+      nonce: probeMakeRandom(),
+      stopped: () => stopRef.current,
+      send: async req => {
+        const log = probeNewLog(key, req.label, 'gemini', req.url)
+        caseLogs.push(log)
+        if (stopRef.current) {
+          return { transport: 'stopped' as const, status: null, data: null, text: '', usage: probeEmptyUsage(), events: [], duration: 0, errorText: '' }
+        }
+        try {
+          const r = await probeRequest(log, 'gemini', req.body, { stream: req.stream, retryOn429: req.retryOn429 })
+          return {
+            transport: 'http' as const,
+            status: r.status,
+            data: r.data,
+            text: '',
+            usage: r.log.usage,
+            events: r.log.sse,
+            duration: r.log.duration,
+            errorText: r.ok ? '' : probeExtractError(r.data),
+          }
+        } catch (e: any) {
+          const stopped = stopRef.current || e?.message === PROBE_STOP_DETAIL
+          const timedOut = e?.name === 'TimeoutError' || /请求超时/.test(String(e?.message || ''))
+          return {
+            transport: stopped ? 'stopped' as const : timedOut ? 'timeout' as const : 'network' as const,
+            status: typeof log.status === 'number' && log.status > 0 ? log.status : null,
+            data: log.responseBody,
+            text: '',
+            usage: log.usage,
+            events: log.sse,
+            duration: log.duration,
+            errorText: String(e?.message || e),
+          }
+        }
+      },
+    })
+    const log = caseLogs.find(item => item.responseBody === outcome.data && (outcome.httpStatus == null || item.status === outcome.httpStatus))
+      ?? caseLogs[caseLogs.length - 1]
+    const raw = probeResult(outcome.status, outcome.detail, {
+      format: 'gemini',
+      duration: outcome.duration,
+      usage: outcome.usage,
+      checks: outcome.checks,
+      cache: outcome.cache,
+      tokenValues: outcome.tokenValues,
+      repro: log ? probeReproOf(log) : null,
+    })
+    const gated = probeApplyUsageGate(raw)
+    return { ...gated, detail: geminiAppendVersion(gated.detail, outcome.data, outcome.httpStatus) }
+  }
+
   const testConnection = async () => {
     const ch = activeChannel
     const firstModel = probeSplitModels(model)[0]
@@ -2514,14 +2616,21 @@ function ModelProbeTool() {
       setStartErr('渠道 API Key 解密失败，请重新编辑渠道并保存。')
       return
     }
-    const formats = (['chat', 'responses', 'anthropic'] as ProbeFormat[]).filter(f => selectedRef.current[`${f}-basic`])
+    if (geminiBasicsMixed(selectedRef.current)) {
+      setStartErr(GEMINI_MIXED_MESSAGE)
+      return
+    }
+    const geminiMode = !!selectedRef.current[GEMINI_BASIC_ID]
+    const formats = geminiMode
+      ? (['gemini'] as ProbeFormat[])
+      : (['chat', 'responses', 'anthropic'] as ProbeFormat[]).filter(f => selectedRef.current[`${f}-basic`])
     if (formats.length === 0) {
-      setStartErr('测试连接需要先勾选至少一个协议基础测试（Chat Completions / Responses / Anthropic Messages）。')
+      setStartErr('测试连接需要先勾选至少一个协议基础测试（Chat Completions / Responses / Anthropic Messages / Gemini generateContent）。')
       return
     }
     setStartErr('')
     setConnRunning(true)
-    setConnResults({ chat: null, responses: null, anthropic: null })
+    setConnResults({ chat: null, responses: null, anthropic: null, gemini: null })
     await Promise.all(formats.map(async f => {
       const started = performance.now()
       const controller = new AbortController()
@@ -2530,8 +2639,11 @@ function ModelProbeTool() {
       headers.Accept = 'application/json'
       let res: { ok: boolean; status: number | null; ms: number; err: string }
       try {
+        const body = f === 'gemini'
+          ? probeProtocolOf('gemini').baseBody(cfg.model, 'Reply with exactly: OK')
+          : probeBaseBody(cfg, f, 'Reply OK.')
         const r = await fetch(cfg.urlOf[f], {
-          method: 'POST', headers, body: JSON.stringify(probeBaseBody(cfg, f, 'Reply OK.')), signal: controller.signal,
+          method: 'POST', headers, body: JSON.stringify(body), signal: controller.signal,
         })
         const ms = Math.round(performance.now() - started)
         let err = ''
@@ -2564,19 +2676,27 @@ function ModelProbeTool() {
     const errs: string[] = []
     if (!ch) errs.push('请先在「渠道管理」添加并选择一个渠道。')
     if (!models.length) errs.push('模型名称不能为空。')
+    else if (geminiBasicsMixed(selectedRef.current)) errs.push(GEMINI_MIXED_MESSAGE)
     else {
+      const geminiMode = !!selectedRef.current[GEMINI_BASIC_ID]
       const selectedAcross = new Map<string, ProbeTestDef>()
       for (const modelName of models) {
-        for (const t of [...PROBE_TESTS, ...probeModelTestsFor(modelName)]) {
+        const list = geminiMode ? GEMINI_UI : [...PROBE_TESTS, ...probeModelTestsFor(modelName)]
+        for (const t of list) {
           if (selectedRef.current[t.id] && t.kind !== 'score') selectedAcross.set(t.id, t)
         }
       }
       if (!selectedAcross.size) errs.push('请至少勾选一个测试项。')
       const needFormats = [...selectedAcross.values()].some(t => probeMultiFormatKinds.includes(t.kind))
-      const activeFormats = (['chat', 'responses', 'anthropic'] as ProbeFormat[]).filter(f => selectedRef.current[`${f}-basic`])
-      if (needFormats && activeFormats.length === 0) errs.push('参数 / 流式 / Token 稳定性 / 补充场景 / 原生工具 / 规格用例需要至少勾选一个基础格式测试（Chat / Responses / Anthropic）。')
+      const activeNow = geminiMode
+        ? (['gemini'] as ProbeFormat[])
+        : (['chat', 'responses', 'anthropic'] as ProbeFormat[]).filter(f => selectedRef.current[`${f}-basic`])
+      if (needFormats && activeNow.length === 0) errs.push('参数 / 流式 / Token 稳定性 / 补充场景 / 原生工具 / 规格用例需要至少勾选一个基础格式测试（Chat / Responses / Anthropic）。')
     }
-    const activeFormats = (['chat', 'responses', 'anthropic'] as ProbeFormat[]).filter(f => selectedRef.current[`${f}-basic`])
+    const geminiMode = !!selectedRef.current[GEMINI_BASIC_ID] && !geminiBasicsMixed(selectedRef.current)
+    const activeFormats: ProbeFormat[] = geminiMode
+      ? ['gemini']
+      : (['chat', 'responses', 'anthropic'] as ProbeFormat[]).filter(f => selectedRef.current[`${f}-basic`])
     const keyProbe = ch && models.length ? await probeBuildCfgFromChannel(ch, models[0]) : null
     if (ch && models.length && !keyProbe?.apiKey.trim()) errs.push('渠道 API Key 解密失败，请重新编辑渠道并保存。')
     if (errs.length) { setStartErr(errs.join('\n')); return }
@@ -2633,7 +2753,7 @@ function ModelProbeTool() {
     setProbeAnthropicCapField('max_tokens')
     setStatuses({})
 
-    const catalog = [...PROBE_TESTS, ...probeModelTestsFor(cfg.model)]
+    const catalog = geminiMode ? GEMINI_UI : [...PROBE_TESTS, ...probeModelTestsFor(cfg.model)]
     const selectedTests = catalog.filter(t => selectedRef.current[t.id] && t.kind !== 'score')
     const paramIds = selectedTests.filter(t => t.kind === 'parameter').map(t => t.id)
     const resultsObj: Record<string, ProbeResult> = {}
@@ -2669,6 +2789,16 @@ function ModelProbeTool() {
         if (stopRef.current) break
         if (!selectedRef.current[t.id]) continue
         if (t.kind === 'score') continue
+        if (t.format === 'gemini') {
+          const key = t.kind === 'basic' ? t.id : probeKey(t.id, 'gemini')
+          setTestStatus(key, 'running')
+          updateProgress(`${t.name}（${PROBE_FORMAT_LABELS.gemini}）`)
+          const out = await runGeminiOutcome(t)
+          commit(key, out)
+          completed++
+          updateProgress()
+          continue
+        }
         if (t.kind === 'parameter') {
           if (parametersDone) continue
           parametersDone = true
@@ -2766,6 +2896,7 @@ function ModelProbeTool() {
       const origin = decideOrigin(signals)
       if (selectedRef.current['expect-reject']) {
         for (const [key, result] of Object.entries(resultsObj)) {
+          if (result.format === 'gemini' || key === GEMINI_BASIC_ID || key.endsWith('@gemini')) continue
           const next = reclassifyExpected(key, result, family, origin, cfg.model)
           if (!next) continue
           resultsObj[key] = { ...result, status: next.status, detail: next.detail }
@@ -2782,7 +2913,7 @@ function ModelProbeTool() {
         name: reportName, startedAt, completedAt: new Date().toISOString(), durationMs: Date.now() - startMs,
         target: {
           baseUrl: cfg.baseUrl, model: cfg.model, channelName: ch?.name,
-          overrides: { chat: ch?.chatUrl.trim() || null, responses: ch?.responsesUrl.trim() || null, anthropic: ch?.anthropicUrl.trim() || null },
+          overrides: { chat: ch?.chatUrl.trim() || null, responses: ch?.responsesUrl.trim() || null, anthropic: ch?.anthropicUrl.trim() || null, gemini: ch?.geminiUrl.trim() || null },
         },
         results: resultsObj, summary: probeEmptySummary(), logs: modelLogs, verdict,
       })
@@ -2843,22 +2974,24 @@ function ModelProbeTool() {
       })()
       const timeoutMs = (Number(matched.channel.timeoutSec) || 60) * 1000
       const base = source.target.baseUrl
-      const overrides = source.target.overrides || { chat: null, responses: null, anthropic: null }
+      const overrides = source.target.overrides
       cfgRef.current = {
         baseUrl: base,
         apiKey,
         model: source.target.model,
         timeoutMs,
-        urlOf: {
-          chat: probeJoinUrl((overrides.chat || '').trim() || base, PROBE_ENDPOINTS.chat),
-          responses: probeJoinUrl((overrides.responses || '').trim() || base, PROBE_ENDPOINTS.responses),
-          anthropic: probeJoinUrl((overrides.anthropic || '').trim() || base, PROBE_ENDPOINTS.anthropic),
-        },
+        urlOf: probeUrlOf(base, {
+          chat: overrides?.chat,
+          responses: overrides?.responses,
+          anthropic: overrides?.anthropic,
+          gemini: overrides?.gemini,
+        }, source.target.model),
       }
       const beforeIds = new Set(logsRef.current.map(item => item.id))
       const started = Date.now()
       let out: ProbeResult | null = null
-      if (test.kind === 'basic') out = await runProbeBasic(test)
+      if (test.format === 'gemini') out = await runGeminiOutcome(test)
+      else if (test.kind === 'basic') out = await runProbeBasic(test)
       else if (test.kind === 'parameter') out = (await runProbeParamSuite(cellFormat, [test.id]))[key] ?? null
       else if (test.kind === 'token') {
         const count = Math.max(2, Math.min(10, Number(tokenRuns) || 3))
@@ -2881,7 +3014,7 @@ function ModelProbeTool() {
         logs: hadLogs ? probeOriginInput(replaced.reportLogs) : [],
       })
       const family = decideFamily(signals)
-      if (selectedRef.current['expect-reject']) {
+      if (selectedRef.current['expect-reject'] && gated.format !== 'gemini' && !key.endsWith('@gemini') && key !== GEMINI_BASIC_ID) {
         const origin = hadLogs
           ? decideOrigin(signals)
           : { access: { id: 'uncertain', label: '不确定', reasons: [] } }
@@ -2994,6 +3127,7 @@ function ModelProbeTool() {
       setChForm({
         name: '', baseUrl: rep.target.baseUrl, timeoutSec: '60',
         chatUrl: rep.target.overrides.chat ?? '', responsesUrl: rep.target.overrides.responses ?? '', anthropicUrl: rep.target.overrides.anthropic ?? '',
+        geminiUrl: rep.target.overrides.gemini ?? '',
         apiKey: '',
       })
       setEditingChId(null)
@@ -3049,6 +3183,7 @@ function ModelProbeTool() {
     if (r.target.overrides.chat) md += `- Chat Base URL: ${r.target.overrides.chat}\n`
     if (r.target.overrides.responses) md += `- Responses Base URL: ${r.target.overrides.responses}\n`
     if (r.target.overrides.anthropic) md += `- Anthropic Base URL: ${r.target.overrides.anthropic}\n`
+    if (r.target.overrides.gemini) md += `- Gemini Base URL: ${r.target.overrides.gemini}\n`
     md += `- 模型: ${r.target.model}\n`
     md += `- 通过: ${r.summary.passed} · 失败: ${r.summary.failed} · 异常: ${r.summary.abnormal || 0} · 不支持: ${r.summary.unsupported} · 符合预期: ${r.summary.expected} · 未测: ${r.summary.untested} · 跳过: ${r.summary.skipped}\n`
     if (r.verdict?.upstream) {
@@ -3111,7 +3246,11 @@ function ModelProbeTool() {
   const matrixOpen = pane === 'report' && !!matrixReports && matrixReports.length > 1
 
   const groups = [...new Set(visibleTests.map(t => t.group))]
-  const uiActiveFormats = useMemo(() => (['chat', 'responses', 'anthropic'] as ProbeFormat[]).filter(f => selected[`${f}-basic`]), [selected])
+  const uiActiveFormats = useMemo(() => (
+    selected[GEMINI_BASIC_ID]
+      ? (['gemini'] as ProbeFormat[])
+      : (['chat', 'responses', 'anthropic'] as ProbeFormat[]).filter(f => selected[`${f}-basic`])
+  ), [selected])
 
   return (
     <div className="flex flex-col h-full">
@@ -3157,12 +3296,14 @@ function ModelProbeTool() {
                 <div className="flex flex-col gap-2 px-6 pt-4 pb-3 flex-shrink-0 lg:flex-row lg:items-start lg:justify-between">
                   <div className="min-w-0 lg:flex lg:items-start lg:gap-3">
                     <h3 className="text-sm font-bold shrink-0" style={{ color: 'var(--text)' }}>测试用例</h3>
-                    <p className="text-xs mt-1 leading-5 lg:mt-0.5" style={{ color: 'var(--t3)' }}>参数、流式、缓存与补充场景只对已勾选的基础格式执行；「纯流式」仅 Chat；「预期拒绝」「图片输入」与「原生工具调用」默认不勾选。原生工具可能单独计费，没执行却返回成功时记为异常</p>
+                    <p className="text-xs mt-1 leading-5 lg:mt-0.5" style={{ color: 'var(--t3)' }}>{geminiOn
+                      ? 'Gemini 与其它协议互斥，勾选后只跑 generateContent。思考档位只看接受或文档写明的拒绝；高档、图片和 Google 搜索默认不勾。'
+                      : '参数、流式、缓存与补充场景只对已勾选的基础格式执行；「纯流式」仅 Chat；「预期拒绝」「图片输入」与「原生工具调用」默认不勾选。原生工具可能单独计费，没执行却返回成功时记为异常'}</p>
                   </div>
                   <div className="flex items-center gap-3 text-xs flex-shrink-0">
-                    <button onClick={() => { setSelected(prev => ({ ...prev, ...Object.fromEntries(visibleTests.map(t => [t.id, true])) })) }} disabled={busy} className="cursor-pointer border-0 outline-none font-semibold" style={{ background: 'transparent', color: 'var(--accent)', fontFamily: 'inherit' }}>全选</button>
+                    <button onClick={() => { setSelected(prev => fillProbeSelection(prev, visibleTests.map(t => t.id), true, geminiOn)) }} disabled={busy} className="cursor-pointer border-0 outline-none font-semibold" style={{ background: 'transparent', color: 'var(--accent)', fontFamily: 'inherit' }}>全选</button>
                     <span style={{ color: 'var(--borderHard)' }}>|</span>
-                    <button onClick={() => { setSelected(prev => ({ ...prev, ...Object.fromEntries(visibleTests.map(t => [t.id, false])) })) }} disabled={busy} className="cursor-pointer border-0 outline-none font-semibold" style={{ background: 'transparent', color: 'var(--t2)', fontFamily: 'inherit' }}>全不选</button>
+                    <button onClick={() => { setSelected(prev => fillProbeSelection(prev, visibleTests.map(t => t.id), false, geminiOn)) }} disabled={busy} className="cursor-pointer border-0 outline-none font-semibold" style={{ background: 'transparent', color: 'var(--t2)', fontFamily: 'inherit' }}>全不选</button>
                   </div>
                 </div>
 
@@ -3191,11 +3332,14 @@ function ModelProbeTool() {
                               checked={!!selected[t.id]}
                               disabled={busy}
                               status={statusOf(t)}
-                              onChange={() => setSelected(prev => ({ ...prev, [t.id]: !prev[t.id] }))}
+                              onChange={() => setSelected(prev => toggleProbeBasic(prev, t.id, PROBE_OTHER_IDS))}
                             />
                           ))}
                         </div>
-                        {!busy && uiActiveFormats.length === 0 && (
+                        {!busy && geminiBasicsMixed(selected) && (
+                          <p className="px-6 pb-3 text-xs" style={{ color: 'var(--warn)' }}>{GEMINI_MIXED_MESSAGE}</p>
+                        )}
+                        {!busy && !geminiOn && uiActiveFormats.length === 0 && (
                           <p className="px-6 pb-3 text-xs" style={{ color: 'var(--warn)' }}>至少勾选一个协议基础测试，才能运行测试或测试连接。</p>
                         )}
                       </div>

@@ -1,4 +1,4 @@
-const PROBE_CELL_FORMATS = new Set(['chat', 'responses', 'anthropic'])
+const PROBE_CELL_FORMATS = new Set(['chat', 'responses', 'anthropic', 'gemini'])
 
 export function probeLogBelongsToCell(
   log: { resultKey: string; format?: string | null },

@@ -87,6 +87,7 @@ export const MUSE_USAGE_FIELDS: Record<ProbeFormat, string[]> = {
   chat: ['completion_tokens_details.reasoning_tokens', 'prompt_tokens_details.cached_tokens'],
   responses: ['output_tokens_details.reasoning_tokens', 'input_tokens_details.cached_tokens'],
   anthropic: ['output_tokens_details.thinking_tokens', 'cache_read_input_tokens'],
+  gemini: [],
 }
 
 const pick = (o: Record<string, any> | null, path: string): unknown =>
