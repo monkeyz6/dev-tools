@@ -57,4 +57,28 @@ test.describe('Seedance 计费', () => {
     await expect(page.getByPlaceholder('不含视频', { exact: true })).not.toBeVisible()
     await expect(page.getByText('$10.7', { exact: false }).first()).toBeVisible()
   })
+
+  test('2.5 的 1080p 按官方分档计价，且没有 4K', async ({ page }) => {
+    await goto(page, /Seedance 计费/)
+    await selectOption(page, '模型变体', 'doubao-seedance-2.5')
+    await selectByLabel(page, '输出分辨率').click()
+    await expect(page.getByRole('button', { name: '1080p', exact: true })).toBeVisible()
+    await expect(page.getByRole('button', { name: '4K', exact: true })).not.toBeVisible()
+    await page.keyboard.press('Escape')
+
+    await selectOption(page, '输出分辨率', '1080p')
+    await inputByLabel(page, 'Token 数量').fill('1000000')
+    // 不含视频 77 元/百万 Token；100 万 Token 整段也是 ¥77
+    await expect(page.getByText('单价').locator('xpath=..')).toContainText('¥77')
+    await selectOption(page, '输入是否包含视频', '是')
+    await expect(page.getByText('单价').locator('xpath=..')).toContainText('¥46')
+
+    await page.getByRole('button', { name: '海外', exact: true }).click()
+    await selectOption(page, '模型变体', 'dreamina-seedance-2-5-260628')
+    await selectOption(page, '输出分辨率', '1080p')
+    await selectOption(page, '输入是否包含视频', '否')
+    await expect(page.getByText('单价').locator('xpath=..')).toContainText('$11.7')
+    await selectOption(page, '输入是否包含视频', '是')
+    await expect(page.getByText('单价').locator('xpath=..')).toContainText('$7')
+  })
 })

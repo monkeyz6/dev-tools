@@ -5,7 +5,8 @@ import { IconChevron } from '../shared/icons'
 
 // ─── Seedance Pricing（每百万 Token 计费） ────────────────────────────────────
 // 国内：火山方舟官方定价（元/百万Token）。海外：BytePlus ModelArk 官方美元定价
-// （美元/百万Token）。海外 2.5 于 2026-08 官方公布：不含视频 $10.70、含视频 $6.40。
+// （美元/百万Token）。2.5 的 1080p 于 2026-10 查阅价目：国内不含视频 77、含视频 46；
+// 海外不含视频 $11.70、含视频 $7.00。480p/720p 仍是国内 70/42、海外 $10.70/$6.40。
 
 type RegionKey = 'cn' | 'us'
 
@@ -43,8 +44,11 @@ const SEEDANCE_PRICING: Record<RegionKey, Record<string, ModelDef>> = {
     },
     'doubao-seedance-2.5': {
       name: 'doubao-seedance-2.5',
-      desc: '2026-07-31 官方公布。当前最高支持 720p 输出。',
-      tiers: [{ id: 'flat', label: '480p/720p', resolutions: ['480p', '720p'], price: { no: 70, yes: 42 } }],
+      desc: '价格根据输出分辨率及输入是否包含视频而定。最高 1080p，无 4K。',
+      tiers: [
+        { id: 'hd',  label: 'HD · 480p/720p', resolutions: ['480p', '720p'], price: { no: 70, yes: 42 } },
+        { id: 'fhd', label: 'FHD · 1080p',    resolutions: ['1080p'],         price: { no: 77, yes: 46 } },
+      ],
     },
   },
   us: {
@@ -69,8 +73,11 @@ const SEEDANCE_PRICING: Record<RegionKey, Record<string, ModelDef>> = {
     },
     [INTL_25_KEY]: {
       name: INTL_25_KEY,
-      desc: '2026-08 官方公布。当前最高支持 720p 输出，1080p/4K 暂未开放。',
-      tiers: [{ id: 'flat', label: '480p/720p', resolutions: ['480p', '720p'], price: { no: 10.7, yes: 6.4 } }],
+      desc: '价格根据输出分辨率及输入是否包含视频而定。最高 1080p，无 4K。',
+      tiers: [
+        { id: 'hd',  label: 'HD · 480p/720p', resolutions: ['480p', '720p'], price: { no: 10.7, yes: 6.4 } },
+        { id: 'fhd', label: 'FHD · 1080p',    resolutions: ['1080p'],         price: { no: 11.7, yes: 7.0 } },
+      ],
     },
   },
 }

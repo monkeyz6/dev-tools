@@ -49,8 +49,8 @@ export interface ProductDef {
 
 /* ==========================================================================
  * SEEDANCE（视频）— token 计费，国内 元/百万token & 海外 $/百万token
- * 数据与「Seedance 计费」工具（SeedanceTool.tsx）对齐（2026-07-31 起官方
- * 已公布 2.5 定价）：国内 2.0 / 2.0-fast / 2.0-mini / 2.5，
+ * 数据与「Seedance 计费」工具（SeedanceTool.tsx）对齐（2.5 含 1080p：
+ * 国内 77/46、海外 $11.70/$7.00，无 4K）：国内 2.0 / 2.0-fast / 2.0-mini / 2.5，
  * 海外 dreamina 2-0 / 2-0-fast / 2-0-mini / 2.5。
  * 来源：火山方舟 https://www.volcengine.com/docs/82379/1587798
  * ==========================================================================
@@ -91,8 +91,11 @@ const SEEDANCE: ProductDef = {
         {
           id: "doubao-seedance-2-5",
           label: "doubao-seedance-2.5",
-          desc: "2026-07-31 官方公布。当前最高支持 720p 输出。",
-          tiers: [{ id: "flat", label: "480p/720p", priceNo: 70, priceYes: 42 }],
+          desc: "价格根据输出分辨率及输入是否包含视频而定。最高 1080p，无 4K。",
+          tiers: [
+            { id: "hd", label: "HD · 480p/720p", priceNo: 70, priceYes: 42 },
+            { id: "fhd", label: "FHD · 1080p", priceNo: 77, priceYes: 46 },
+          ],
         },
       ],
     },
@@ -126,8 +129,11 @@ const SEEDANCE: ProductDef = {
         {
           id: "dreamina-seedance-2-5-260628",
           label: "dreamina-seedance-2-5-260628",
-          desc: "2026-08 官方公布。当前最高支持 720p 输出，1080p/4K 暂未开放。",
-          tiers: [{ id: "flat", label: "480p/720p", priceNo: 10.7, priceYes: 6.4 }],
+          desc: "价格根据输出分辨率及输入是否包含视频而定。最高 1080p，无 4K。",
+          tiers: [
+            { id: "hd", label: "HD · 480p/720p", priceNo: 10.7, priceYes: 6.4 },
+            { id: "fhd", label: "FHD · 1080p", priceNo: 11.7, priceYes: 7.0 },
+          ],
         },
       ],
     },
