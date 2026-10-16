@@ -50,6 +50,8 @@ const files = [
   'src/tools/video-report/google-omni.test.ts',
   'src/tools/video-report/seedance-features.ts',
   'src/tools/video-report/seedance-features.test.ts',
+  'src/tools/video-report/minimax.ts',
+  'src/tools/video-report/minimax.test.ts',
   'src/shared/video-meta.ts',
   'src/shared/video-meta.test.ts',
   'src/tools/img-report/carrier.ts',
@@ -79,7 +81,11 @@ for (const rel of files) {
     },
     fileName: rel,
   })
-  outputText = outputText.replace(/from ['"]\.\/([^'"]+?)(?:\.ts)?['"]/g, "from './$1.js'")
+  // 同目录与上级相对路径的 .ts 都改成 .js。只改 ./ 时，../../shared/video-meta.ts 在 Node 里找不到。
+  outputText = outputText.replace(/from (['"])((?:\.\.?\/)+[^'"]+?)(?:\.ts)?\1/g, (_m, q, spec) => {
+    const base = String(spec).replace(/\.js$/, '')
+    return `from ${q}${base}.js${q}`
+  })
   const dest = join(outDir, rel.replace(/\.ts$/, '.js'))
   mkdirSync(dirname(dest), { recursive: true })
   writeFileSync(dest, outputText)
@@ -109,6 +115,7 @@ const r = spawnSync(
     join(outDir, 'src/tools/video-report/seedance-url.test.js'),
     join(outDir, 'src/tools/video-report/google-omni.test.js'),
     join(outDir, 'src/tools/video-report/seedance-features.test.js'),
+    join(outDir, 'src/tools/video-report/minimax.test.js'),
     join(outDir, 'src/shared/video-meta.test.js'),
     join(outDir, 'src/tools/img-report/carrier.test.js'),
     join(outDir, 'src/tools/img-report/summary.test.js'),

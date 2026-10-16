@@ -42,7 +42,7 @@ function videoCapabilityKey(rawName: string): string | null {
   if (rawName === '时长' || rawName === '回显时长') return 'duration'
   if (rawName === '宽高比') return 'ratio'
   if (rawName === '音轨') return 'audio'
-  if (rawName.endsWith(' 回显')) return 'echo'
+  if (rawName.endsWith('回显')) return 'echo'
   if (rawName.startsWith('尾帧')) return 'lastFrame'
   if (rawName.startsWith('样片复用')) return 'draft'
   if (rawName === '预期拒绝' || rawName === '预期不支持') return 'reject'

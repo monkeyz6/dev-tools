@@ -97,6 +97,7 @@ describe('videoExpectedErrorFamily / videoShouldCheckErrorBody', () => {
     assert.equal(videoShouldCheckErrorBody({ status: 400, taskStatus: '', kind: 'material-assets' }), false)
     assert.equal(videoShouldCheckErrorBody({ status: 400, taskStatus: '', kind: 't2v' }), true)
     assert.equal(videoShouldCheckErrorBody({ status: 400, taskStatus: 'failed', apiType: 'google-omni' }), false)
+    assert.equal(videoShouldCheckErrorBody({ status: 400, taskStatus: 'failed', apiType: 'minimax' }), false)
   })
 
   it('读 Google error.message / status', () => {

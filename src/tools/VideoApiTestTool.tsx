@@ -19,6 +19,13 @@ import {
 import { formatVideoTaskError, parseVideoTaskError, videoBuildErrorBodyChecks, videoShouldCheckErrorBody } from './video-report/errors'
 import { videoOfficialLink, videoOfficialUrlVerdict } from './video-report/official-url'
 import { VIDEO_TASK_ENDPOINT, videoAssetEndpoint, videoSeedancePath, videoSeedanceUrl } from './video-report/seedance-url'
+import {
+  MINIMAX_DEFAULT_MODEL, MINIMAX_MODEL_OPTIONS,
+  minimaxBuildChecks, minimaxBuildPlan, minimaxCapabilityHint, minimaxCaseDefsFor, minimaxExpect, minimaxRefImageCounts,
+  minimaxExtractEcho, minimaxExtractStatus, minimaxExtractTaskId, minimaxExtractUsage, minimaxExtractVideoUrl,
+  minimaxFormatTaskError, minimaxQueryEndpoint, minimaxTaskErrorDetail,
+  videoIsMinimaxPreset, videoLooksLikeMinimaxModel, videoMinimaxPath, videoMinimaxUrl,
+} from './video-report/minimax'
 import { videoClassify, videoVerdict } from './video-report/summary'
 import { videoCanReprobe, videoCanRequery, videoHasUsableProbe, videoReprobeSrc, videoRetryAction, videoRetrySort, videoRetryTargets } from './video-report/retry'
 import { videoGroupBatches, videoTrimByBatch } from './video-report/batches'
@@ -54,6 +61,12 @@ const VIDEO_MODEL_OPTIONS = [
   'dreamina-seedance-2-0-mini',
   'dreamina-seedance-2-5',
 ].map(m => ({ value: m, label: m }))
+
+function videoDefaultModelFor(apiType: VideoApiType): string {
+  if (apiType === 'google-omni') return OMNI_DEFAULT_MODEL
+  if (apiType === 'minimax') return MINIMAX_DEFAULT_MODEL
+  return VIDEO_DEFAULT_MODEL
+}
 
 /**
  * 默认素材用火山方舟官方文档里的示例文件（`ark-project.tos-cn-beijing.volces.com`）：网关是服务端拉取，
@@ -471,6 +484,11 @@ function videoBuildChecks(rec: VideoRecord): VideoCheck[] {
     checks.push({ name: '预期不支持', target: `能力表：${videoCapabilityHint(rec)}`, actual: '任务成功并出片 · 能力表可能过期，请核对', pass: true, info: true })
   }
 
+  if (videoApiTypeOf(rec.apiType) === 'minimax') {
+    checks.push(...minimaxBuildChecks(rec))
+    return checks
+  }
+
   checks.push({ name: rec.kind.startsWith('material') ? 'OpenAPI 请求成功' : '请求成功', target: 'HTTP 2xx', actual: rec.status ? `HTTP ${rec.status}` : '无响应', pass: httpOk })
 
   if (!negative && videoShouldCheckErrorBody(rec)) {
@@ -588,6 +606,7 @@ function videoBuildChecks(rec: VideoRecord): VideoCheck[] {
 }
 
 function videoCapabilityHint(rec: Pick<VideoRecord, 'model' | 'apiType' | 'caseId'>): string {
+  if (videoApiTypeOf(rec.apiType) === 'minimax') return minimaxCapabilityHint(rec.model)
   if (videoApiTypeOf(rec.apiType) === 'google-omni' && omniIs720OnlyModel(rec.model)) return '仅 720p'
   const req = VIDEO_CASE_DEFS.find(d => d.id === rec.caseId)?.requires
   if (req && !videoModelMeetsRequirement(rec.model, req)) return VIDEO_REQUIREMENT_LABEL[req]
@@ -600,16 +619,19 @@ function videoExpectFor(def: VideoCaseDef, model: string, apiType: VideoApiType 
   if (apiType === 'google-omni') {
     return omniSupportsResolution(model, def.params.resolution) ? 'success' : 'unsupported'
   }
+  if (apiType === 'minimax') return minimaxExpect(def, model)
   if (!videoModelMeetsRequirement(model, def.requires)) return 'unsupported'
   const h = def.params.resolution ? VIDEO_RESOLUTION_HEIGHT[def.params.resolution.toLowerCase()] : undefined
   if (h && h > videoModelMaxResolution(model)) return 'unsupported'
   return 'success'
 }
 
-function videoBuildCases(testMaterials: boolean, apiType: VideoApiType = 'seedance'): VideoCase[] {
+function videoBuildCases(testMaterials: boolean, apiType: VideoApiType = 'seedance', model = ''): VideoCase[] {
   const defs = apiType === 'google-omni'
     ? OMNI_CASE_DEFS
-    : (testMaterials ? [...VIDEO_MATERIAL_DEFS, ...VIDEO_CASE_DEFS] : VIDEO_CASE_DEFS)
+    : apiType === 'minimax'
+      ? minimaxCaseDefsFor(model || MINIMAX_DEFAULT_MODEL)
+      : (testMaterials ? [...VIDEO_MATERIAL_DEFS, ...VIDEO_CASE_DEFS] : VIDEO_CASE_DEFS)
   return defs.map(d => ({
     id: d.id,
     def: d,
@@ -758,7 +780,9 @@ const VideoChannelsPane = React.memo(function VideoChannelsPane({
           <span className="text-[11px]" style={{ color: 'var(--t3)' }}>{
             apiType === 'google-omni'
               ? 'baseUrl 填网关根，工具会拼 /v1beta/interactions。apiKey 经 AES-GCM 加密。'
-              : 'baseUrl 填网关根。含 oinone 或 ainowork 时拼 /byteplus/api/v3/... 与 /byteplus/?Action=…，否则不加 /byteplus。末尾已是 /byteplus 不会再加一次。apiKey 经 AES-GCM 加密。'
+              : apiType === 'minimax'
+                ? 'baseUrl 填网关根或官方根。含 oinone 或 ainowork（如 hk.ainowork.ai、api.ainowork.ai）时拼一次 /minimax/v2/...；路径里已有 /minimax 不再加。官方 api.minimax.io / api.minimax.cn 不加 /minimax。apiKey 经 AES-GCM 加密。'
+                : 'baseUrl 填网关根。含 oinone 或 ainowork 时拼 /byteplus/api/v3/... 与 /byteplus/?Action=…，否则不加 /byteplus。末尾已是 /byteplus 不会再加一次。apiKey 经 AES-GCM 加密。'
           }</span>
         </div>
       </Card>
@@ -896,7 +920,7 @@ function VideoApiTestTool() {
   const [channels, setChannels] = useState<VideoChannel[]>(() => videoLoadChannels())
   const [activeChId, setActiveChId] = useState<string | null>(() => (typeof window === 'undefined' ? null : kvGet(VIDEO_ACTIVE_KEY)))
   const [apiType, setApiType] = useState<VideoApiType>(ui0ApiType)
-  const [model, setModel] = useState(ui0.model ?? (ui0ApiType === 'google-omni' ? OMNI_DEFAULT_MODEL : VIDEO_DEFAULT_MODEL))
+  const [model, setModel] = useState(ui0.model ?? videoDefaultModelFor(ui0ApiType))
   const [prompt, setPrompt] = useState(ui0.prompt ?? VIDEO_DEFAULT_PROMPT)
   const [testMaterials, setTestMaterials] = useState(ui0ApiType === 'seedance' && !!ui0.testMaterials)
   const [urls, setUrls] = useState<VideoMediaUrls>(() => {
@@ -913,7 +937,7 @@ function VideoApiTestTool() {
   const [history, setHistory] = useState<VideoRecord[]>([])
   const [chForm, setChForm] = useState({ name: '', baseUrl: '', apiKey: '' })
   const [editingChId, setEditingChId] = useState<string | null>(null)
-  const [cases, setCases] = useState<VideoCase[]>(() => videoBuildCases(ui0ApiType === 'seedance' && !!ui0.testMaterials, ui0ApiType))
+  const [cases, setCases] = useState<VideoCase[]>(() => videoBuildCases(ui0ApiType === 'seedance' && !!ui0.testMaterials, ui0ApiType, ui0.model ?? videoDefaultModelFor(ui0ApiType)))
   const [running, setRunning] = useState(false)
   const [toast, setToast] = useState('')
   const [detailRec, setDetailRec] = useState<VideoRecord | null>(null)
@@ -984,6 +1008,14 @@ function VideoApiTestTool() {
     if (apiType !== 'seedance') return
     setCases(prev => videoMergeCases(prev, videoBuildCases(testMaterials, 'seedance')))
   }, [testMaterials, apiType])
+
+  // 只在张数档变化时重建。模型框每敲一字都 onChange，中间态不能把 5/6 张换成 1/2/3。
+  const minimaxImageKey = apiType === 'minimax' ? minimaxRefImageCounts(model).join(',') : ''
+  useEffect(() => {
+    if (apiType !== 'minimax') return
+    setCases(prev => videoMergeCases(prev, videoBuildCases(false, 'minimax', model)))
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [apiType, minimaxImageKey])
 
   useEffect(() => {
     if (!exportJob) return
@@ -1198,14 +1230,19 @@ function VideoApiTestTool() {
     currentRunIdRef.current = null
     setRestoredFrom(null)
     setApiType(t)
+    let nextModel = model
     if (t === 'google-omni') {
       setTestMaterials(false)
-      if (omniLooksLikeModel(model) === false) setModel(OMNI_DEFAULT_MODEL)
-    } else if (omniLooksLikeModel(model)) {
-      setModel(VIDEO_DEFAULT_MODEL)
+      if (omniLooksLikeModel(model) === false) nextModel = OMNI_DEFAULT_MODEL
+    } else if (t === 'minimax') {
+      setTestMaterials(false)
+      if (!videoIsMinimaxPreset(model)) nextModel = MINIMAX_DEFAULT_MODEL
+    } else if (omniLooksLikeModel(model) || videoLooksLikeMinimaxModel(model)) {
+      nextModel = VIDEO_DEFAULT_MODEL
     }
+    if (nextModel !== model) setModel(nextModel)
     setUrls(prev => applyProtocolDefaultUrls(t, prev))
-    setCases(videoBuildCases(t === 'seedance' && testMaterials, t))
+    setCases(videoBuildCases(t === 'seedance' && testMaterials, t, nextModel))
   }
 
   const persistRecord = async (rec: VideoRecord) => {
@@ -1505,6 +1542,118 @@ function VideoApiTestTool() {
     rec.checks = videoBuildChecks(rec)
   }
 
+  const pollMinimax = async (
+    rec: VideoRecord, ch: VideoChannel, apiKey: string, initialJson: any,
+    shouldStop: () => boolean, immediate = false,
+  ): Promise<{ lastJson: any; stopped: boolean }> => {
+    const pollUrl = videoMinimaxUrl(ch.baseUrl, minimaxQueryEndpoint(rec.taskId || ''))
+    const t0 = Date.now()
+    let lastJson: any = initialJson
+    let first = immediate
+    while (Date.now() - t0 < VIDEO_POLL_MAX_MS) {
+      if (shouldStop()) return { lastJson, stopped: true }
+      const st = minimaxExtractStatus(lastJson)
+      if (!first && (videoTaskSucceeded(st) || videoTaskFailed(st))) break
+      if (!first) {
+        await sleep(VIDEO_POLL_MS)
+        if (shouldStop()) return { lastJson, stopped: true }
+      }
+      first = false
+      rec.pollCount += 1
+      const q = await videoFetch(pollUrl, VIDEO_REQUEST_TIMEOUT_MS, { headers: { Authorization: `Bearer ${apiKey}` } })
+      const qt = await q.text()
+      rec.status = q.status
+      rec.respHeaders = Object.fromEntries(q.headers.entries())
+      rec.reqId = rec.reqId || rec.respHeaders['x-oneapi-request-id'] || rec.respHeaders['x-request-id'] || ''
+      rec.rawSnippet = videoFormatBody(qt)
+      lastJson = videoParseJson(qt)
+      rec.taskStatus = minimaxExtractStatus(lastJson) || rec.taskStatus
+      rec.pollLog.push({ at: Date.now(), status: rec.taskStatus || '' })
+      if (q.status >= 400) break
+    }
+    return { lastJson, stopped: false }
+  }
+
+  const finalizeMinimax = async (rec: VideoRecord, lastJson: any) => {
+    rec.taskStatus = minimaxExtractStatus(lastJson) || rec.taskStatus
+    const remote = minimaxExtractVideoUrl(lastJson)
+    rec.videoUrl = remote
+    if (remote) rec.targets.outputUri = remote
+    const echo = minimaxExtractEcho(lastJson)
+    if (echo.ratio) rec.targets.echoRatio = echo.ratio
+    if (echo.duration != null && !Number.isNaN(echo.duration)) rec.targets.echoDuration = echo.duration
+    if (echo.resolution) rec.targets.echoResolution = echo.resolution
+    const usage = minimaxExtractUsage(lastJson)
+    if (usage) rec.usage = usage
+    const taskErr = minimaxFormatTaskError(lastJson)
+    const detail = minimaxTaskErrorDetail(lastJson)
+    if (detail) rec.errorDetail = detail
+    const failed = videoTaskFailed(rec.taskStatus || '')
+    const succeeded = videoTaskSucceeded(rec.taskStatus || '')
+    if (failed || !succeeded || !rec.videoUrl) {
+      rec.ok = false
+      rec.error = taskErr || videoOpenApiError(lastJson, rec.status, rec.rawSnippet) || (failed ? '任务失败' : succeeded ? '未返回 task.content.url' : `轮询超时（${VIDEO_POLL_MAX_MS / 60000} 分钟）任务仍未结束，可稍后「重试查询」`)
+      rec.checks = videoBuildChecks(rec)
+      return
+    }
+    try {
+      const meta = await probeVideoMeta(rec.videoUrl, 20000)
+      adoptProbedVideo(rec, rec.videoUrl, meta)
+    } catch (e: any) {
+      rec.ok = true
+      rec.probe = null
+      rec.error = e?.message || '成片元数据不可读'
+    }
+    rec.checks = videoBuildChecks(rec)
+  }
+
+  const runMinimax = async (c: VideoCase, ch: VideoChannel, apiKey: string, rec: VideoRecord) => {
+    const built = minimaxBuildPlan(c.def, model.trim() || MINIMAX_DEFAULT_MODEL, prompt, urlsRef.current)
+    if (built.missing) {
+      rec.ok = false
+      rec.error = built.missing
+      rec.skippedRoles = built.skipped
+      rec.checks = videoBuildChecks(rec)
+      return
+    }
+    let plan: VideoPlan = built.plan
+    rec.targets = { ...built.targets }
+    rec.skippedRoles = built.skipped
+    if (c.editedPreview != null) plan = videoParseEditedPreview(plan, c.editedPreview)
+    rec.sentPreview = JSON.stringify(plan.body, null, 2)
+
+    const resp = await videoFetch(videoMinimaxUrl(ch.baseUrl, plan.endpoint), VIDEO_SUBMIT_TIMEOUT_MS, {
+      method: 'POST', headers: videoHeaders(apiKey), body: JSON.stringify(plan.body),
+    })
+    const text = await resp.text()
+    rec.status = resp.status
+    rec.respHeaders = Object.fromEntries(resp.headers.entries())
+    rec.reqId = rec.respHeaders['x-oneapi-request-id'] || rec.respHeaders['x-request-id'] || ''
+    rec.rawSnippet = videoFormatBody(text)
+    const json = videoParseJson(text)
+    const taskDetail = minimaxTaskErrorDetail(json)
+    rec.errorDetail = taskDetail || parseVideoTaskError(json).detail
+    const taskId = minimaxExtractTaskId(json)
+    if (resp.status >= 400 || !taskId) {
+      rec.ok = false
+      rec.error = minimaxFormatTaskError(json) || videoOpenApiError(json, resp.status, text) || '未返回任务 id'
+      rec.checks = videoBuildChecks(rec)
+      return
+    }
+    rec.taskId = taskId
+    rec.taskStatus = minimaxExtractStatus(json) || 'queued'
+    rec.pollLog.push({ at: Date.now(), status: rec.taskStatus })
+
+    const polled = await pollMinimax(rec, ch, apiKey, json, () => stopRef.current)
+    if (polled.stopped) {
+      rec.ok = false
+      rec.error = '已停止轮询'
+      rec.checks = videoBuildChecks(rec)
+      return
+    }
+    await finalizeMinimax(rec, polled.lastJson)
+  }
+
   const applyOmniOutput = async (rec: VideoRecord, video: { uri?: string; data?: string; mime: string } | null, ch: VideoChannel, apiKey: string) => {
     if (video?.uri) rec.targets.outputUri = video.uri
     let playUrl: string | null = null
@@ -1677,6 +1826,16 @@ function VideoApiTestTool() {
           next.taskStatus = polled.parsed.status
           await applyOmniOutput(next, polled.parsed.video, ch, apiKey)
         }
+      } else if (videoApiTypeOf(rec.apiType) === 'minimax') {
+        const polled = await pollMinimax(next, ch, apiKey, null, () => requeryCancelRef.current.has(rec.id), true)
+        if (polled.stopped) {
+          cancelled = true
+          next.ok = false
+          next.error = '已停止查询'
+          next.checks = videoBuildChecks(next)
+        } else {
+          await finalizeMinimax(next, polled.lastJson)
+        }
       } else {
         const polled = await pollTask(next, ch, apiKey, null, () => requeryCancelRef.current.has(rec.id), true)
         if (polled.stopped) {
@@ -1820,7 +1979,7 @@ function VideoApiTestTool() {
     if (running && c.status !== 'running') { toastShow('正在批量运行中'); return }
     const ch = channelsRef.current.find(x => x.id === activeChId)
     if (!ch) { toastShow('请先在「渠道管理」添加并选择渠道'); return }
-    const m = model.trim() || (apiType === 'google-omni' ? OMNI_DEFAULT_MODEL : VIDEO_DEFAULT_MODEL)
+    const m = model.trim() || videoDefaultModelFor(apiType)
     const apiKey = await decryptLlmApiKey(ch.apiKeyEnc)
     if (!apiKey) { toastShow('渠道 API Key 无效，请重新编辑保存'); return }
     if (!currentRunIdRef.current) currentRunIdRef.current = videoUid()
@@ -1841,6 +2000,7 @@ function VideoApiTestTool() {
     }
     try {
       if (apiType === 'google-omni') await runOmni(c, ch, apiKey, rec)
+      else if (apiType === 'minimax') await runMinimax(c, ch, apiKey, rec)
       else if (c.kind === 'material-group' || c.kind === 'material-assets') await runOpenApi(c, ch, apiKey, rec)
       else await runTask(c, ch, apiKey, rec)
     } catch (e: any) {
@@ -2062,10 +2222,12 @@ function VideoApiTestTool() {
   )
 
   const renderCaseRow = (c: VideoCase, i: number) => {
-    const m = model.trim() || (apiType === 'google-omni' ? OMNI_DEFAULT_MODEL : VIDEO_DEFAULT_MODEL)
+    const m = model.trim() || videoDefaultModelFor(apiType)
     const built = apiType === 'google-omni'
       ? omniBuildPlan(c.def, m, prompt, urls, omniSessionRef.current.lastInteractionId)
-      : videoBuildPlan(c.def, m, prompt, urls, testMaterials, assetsRef.current, seedanceSessionRef.current.draft)
+      : apiType === 'minimax'
+        ? minimaxBuildPlan(c.def, m, prompt, urls)
+        : videoBuildPlan(c.def, m, prompt, urls, testMaterials, assetsRef.current, seedanceSessionRef.current.draft)
     const preview = !c.expanded && apiType === 'google-omni'
       ? ''
       : (c.editedPreview != null ? c.editedPreview : (apiType === 'google-omni' ? omniPreviewBody(built.plan.body) : videoPlanPreview(built.plan)))
@@ -2098,6 +2260,11 @@ function VideoApiTestTool() {
                 {built.skipped.join('；')}
               </div>
             )}
+            {apiType === 'minimax' && built.missing && (
+              <div className="rounded-xl px-3 py-2 text-xs" style={{ background: 'var(--accentSub)', color: 'var(--t2)' }}>
+                {built.missing}
+              </div>
+            )}
             <div>
               <div className="flex items-center justify-between mb-1.5">
                 <span className="text-xs font-semibold" style={{ color: 'var(--t3)', letterSpacing: '0.05em' }}>请求预览（可编辑）</span>
@@ -2106,7 +2273,7 @@ function VideoApiTestTool() {
                   <Btn small variant="accent" disabled={c.status === 'running'} onClick={() => { c.expanded = true; runCase(c) }}>▶ 运行此用例</Btn>
                 </div>
               </div>
-              <div className="text-[11px] font-mono mb-1.5" style={{ color: 'var(--t3)' }}>{built.plan.method} {apiType === 'google-omni' ? built.plan.endpoint : videoSeedancePath(channels.find(x => x.id === activeChId)?.baseUrl ?? '', built.plan.endpoint)}</div>
+              <div className="text-[11px] font-mono mb-1.5" style={{ color: 'var(--t3)' }}>{built.plan.method} {apiType === 'google-omni' ? built.plan.endpoint : apiType === 'minimax' ? videoMinimaxPath(channels.find(x => x.id === activeChId)?.baseUrl ?? '', built.plan.endpoint) : videoSeedancePath(channels.find(x => x.id === activeChId)?.baseUrl ?? '', built.plan.endpoint)}</div>
               <CustomTextarea value={preview} mono rows={Math.min(16, preview.split('\n').length + 1)}
                 onChange={v => { c.editedPreview = v; setCases([...cases]) }} />
             </div>
@@ -2130,11 +2297,11 @@ function VideoApiTestTool() {
         .sort((a, b) => a.time - b.time)
         .at(-1)
       if (last?.taskId) omniSessionRef.current.lastInteractionId = last.taskId
-    } else {
+    } else if (batchApi === 'seedance') {
       const draft = [...batch.records].filter(r => r.caseId === 'draft-480p').sort((a, b) => a.time - b.time).at(-1)
       if (draft) rememberSeedanceDraft(draft)
     }
-    const nextCases = videoBuildCases(batchApi === 'seedance' && batch.records.some(r => r.testMaterials), batchApi)
+    const nextCases = videoBuildCases(batchApi === 'seedance' && batch.records.some(r => r.testMaterials), batchApi, batch.models[0] || '')
     const byName = new Map(batch.records.map(r => [r.caseName, r]))
     const byId = new Map(batch.records.filter(r => r.caseId).map(r => [r.caseId!, r]))
     let restored = 0
@@ -2193,11 +2360,12 @@ function VideoApiTestTool() {
             <CustomSelect value={apiType} onChange={v => switchApiType(v as VideoApiType)} options={[
               { value: 'seedance', label: 'Seedance 火山原生' },
               { value: 'google-omni', label: 'Google Omni' },
+              { value: 'minimax', label: 'MiniMax-H3' },
             ]} />
           </div>
           <div>
             <Label className="block mb-1.5">模型编码</Label>
-            <EditableSelect value={model} onChange={setModel} options={apiType === 'google-omni' ? OMNI_MODEL_OPTIONS : VIDEO_MODEL_OPTIONS} placeholder={apiType === 'google-omni' ? OMNI_DEFAULT_MODEL : 'doubao-seedance-2-0'} />
+            <EditableSelect value={model} onChange={setModel} options={apiType === 'google-omni' ? OMNI_MODEL_OPTIONS : apiType === 'minimax' ? MINIMAX_MODEL_OPTIONS : VIDEO_MODEL_OPTIONS} placeholder={videoDefaultModelFor(apiType)} />
           </div>
           <div>
             <Label className="block mb-1.5">提示词</Label>
@@ -2216,7 +2384,9 @@ function VideoApiTestTool() {
         <p className="text-[11px] mb-3 -mt-1.5" style={{ color: 'var(--t3)' }}>
           {apiType === 'google-omni'
             ? 'Omni 由浏览器 fetch 成 base64 再发送，链接必须允许 CORS。默认用 picsum / MDN。名人照仍是 Wikimedia，读失败记请求异常。'
-            : '默认是火山方舟官方文档的示例素材。链接由网关服务端拉取：需公网可匿名访问（Wikimedia 等对非浏览器 UA / 数据中心 IP 会 403、429），图片宽高 ≥300px、宽高比 0.4~2.5。'}
+            : apiType === 'minimax'
+              ? '默认仍是火山方舟官方文档的示例素材。链接由网关或 MiniMax 服务端拉取，需公网可匿名访问。参考图张数用例只重复左栏参考图；图+视频+音频那条三个都要有。缺了不发送。'
+              : '默认是火山方舟官方文档的示例素材。链接由网关服务端拉取：需公网可匿名访问（Wikimedia 等对非浏览器 UA / 数据中心 IP 会 403、429），图片宽高 ≥300px、宽高比 0.4~2.5。'}
         </p>
         <div className="flex flex-col gap-3">
           <div data-testid="videotest-first-frame">
@@ -2248,17 +2418,19 @@ function VideoApiTestTool() {
                 onError={e => { void recoverPlayableVideo(e.currentTarget, urls.refVideo.trim()) }} />
             )}
           </div>
-          {apiType === 'seedance' && (
+          {(apiType === 'seedance' || apiType === 'minimax') && (
           <div data-testid="videotest-ref-audio">
             <Label className="block mb-1.5">参考音频</Label>
             <CustomInput value={urls.refAudio} onChange={v => setUrls(u => ({ ...u, refAudio: v }))} placeholder="https://…" />
           </div>
           )}
+          {apiType !== 'minimax' && (
           <div data-testid="videotest-sensitive-face" className="pt-3" style={{ borderTop: '1px solid var(--border)' }}>
             <Label className="block mb-1.5">敏感人像</Label>
             <CustomInput value={urls.sensitiveFace} onChange={v => setUrls(u => ({ ...u, sensitiveFace: v }))} placeholder="https://…（名人 / 真人正脸）" />
             <p className="text-[11px] mt-1.5" style={{ color: 'var(--t3)' }}>{apiType === 'google-omni' ? '只给「Omni · 拒绝名人图」用。默认 Wikimedia 对 fetch 常无 CORS，读失败记请求异常、不算已拒绝，可换成能被页面 fetch 的链接。' : '只给「拒绝 · 名人首帧」用，始终 https 直链、不登记进素材库；默认是 Wikimedia 上的赵丽颖发布会照。'}</p>
           </div>
+          )}
         </div>
       </Card>
     </div>

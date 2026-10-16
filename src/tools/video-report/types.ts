@@ -1,12 +1,15 @@
-export type VideoApiType = 'seedance' | 'google-omni'
+export type VideoApiType = 'seedance' | 'google-omni' | 'minimax'
 
 export const VIDEO_API_TYPE_LABEL: Record<VideoApiType, string> = {
   seedance: 'Seedance 火山原生',
   'google-omni': 'Google Omni',
+  minimax: 'MiniMax-H3',
 }
 
 export function videoApiTypeOf(v: string | null | undefined): VideoApiType {
-  return v === 'google-omni' ? 'google-omni' : 'seedance'
+  if (v === 'google-omni') return 'google-omni'
+  if (v === 'minimax') return 'minimax'
+  return 'seedance'
 }
 
 export type VideoCaseKind =
@@ -16,6 +19,7 @@ export type VideoCaseKind =
   | 'i2v'
   | 'i2v-frames'
   | 'ref-omni'
+  | 'ref-images'
   | 'ref-image-audio'
   | 'ref-video-edit'
   | 'ref-video-extend'
@@ -60,6 +64,8 @@ export interface VideoCaseDef {
   /** 用例自带提示词，覆盖左栏（编辑 / 延长靠提示词关键词判定任务类型） */
   prompt?: string
   requires?: VideoCaseRequirement
+  /** MiniMax 参考图张数。同一左栏 URL 重复这么多次，不写进 Seedance 的 params。 */
+  refImageCount?: number
 }
 
 export const VIDEO_MATERIAL_DEFS: VideoCaseDef[] = [
