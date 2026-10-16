@@ -798,6 +798,9 @@ textarea:focus-visible { outline: none; }
 .probe-status-text.is-abnormal { color: color-mix(in srgb, var(--err) 55%, var(--warn)); }
 .probe-status-text.is-unsupported { color: var(--warn); }
 .probe-status-text.is-expected { color: var(--accent); }
+/* 依据不足：文档冲突或写法靠推断，不计通过也不计失败 */
+.probe-status-text.is-inconclusive { color: var(--t2); }
+.probe-status-text.is-inconclusive::before { background: transparent; box-shadow: inset 0 0 0 1.5px currentColor; }
 .probe-status-text.is-untested,
 .probe-status-text.is-skipped { color: var(--t3); }
 
@@ -929,6 +932,8 @@ textarea:focus-visible { outline: none; }
 }
 .probe-matrix-status.is-passed { --c: var(--ok); }
 .probe-matrix-status.is-expected { --c: var(--accent); }
+.probe-matrix-status.is-inconclusive { --c: var(--t2); color: var(--t2); }
+.probe-matrix-status.is-inconclusive::before { background: transparent; box-shadow: inset 0 0 0 1.5px var(--t2); }
 .probe-matrix-status.is-failed { --c: var(--err); color: var(--err); }
 .probe-matrix-status.is-abnormal { --c: color-mix(in srgb, var(--err) 55%, var(--warn)); color: var(--c); }
 .probe-matrix-status.is-unsupported { --c: var(--warn); color: var(--warn); }

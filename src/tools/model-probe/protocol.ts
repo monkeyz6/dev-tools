@@ -115,6 +115,13 @@ export const probeParseSseBlock = (block: string, index: number): ProbeSseEvent 
 const asObj = (v: unknown): Record<string, any> | null =>
   v && typeof v === 'object' && !Array.isArray(v) ? v as Record<string, any> : null
 
+/** 事件名。OpenRouter 等只发 data: 行、不发 event: 行，这时取 data 里 JSON 的 type。 */
+export const probeSseType = (ev: ProbeSseEvent): string => {
+  if (ev.event && ev.event !== 'message') return ev.event
+  const t = asObj(ev.json)?.type
+  return typeof t === 'string' && t ? t : ev.event
+}
+
 /** 部分网关把 Responses 对象再包一层 { response: {...} } */
 const unwrapResponse = (data: unknown): Record<string, any> | null => {
   const o = asObj(data)
@@ -418,7 +425,8 @@ const responsesProtocol: ProbeProtocol = {
   usageFromSse(events) {
     const u = probeEmptyUsage()
     for (const ev of events) {
-      if (ev.event !== 'response.completed' && ev.event !== 'response.incomplete') continue
+      const type = probeSseType(ev)
+      if (type !== 'response.completed' && type !== 'response.incomplete') continue
       const j = ev.json
       if (!j || typeof j !== 'object') continue
       probeMergeUsage(u, j.response?.usage)
@@ -471,7 +479,10 @@ const responsesProtocol: ProbeProtocol = {
     return out
   },
   streamFinished(_raw, events) {
-    return events.some(e => e.event === 'response.completed' || e.event === 'response.incomplete')
+    return events.some(e => {
+      const type = probeSseType(e)
+      return type === 'response.completed' || type === 'response.incomplete'
+    })
   },
 }
 
@@ -578,12 +589,13 @@ const anthropicProtocol: ProbeProtocol = {
     for (const ev of events) {
       const j = ev.json
       if (!j || typeof j !== 'object') continue
-      if (ev.event === 'message_start' && j.message?.usage) {
+      const type = probeSseType(ev)
+      if (type === 'message_start' && j.message?.usage) {
         const src = j.message.usage
         u.input = probeNum(src.input_tokens) ?? u.input
         u.cacheRead = probeNum(src.cache_read_input_tokens) ?? u.cacheRead
         u.cacheWrite = probeNum(src.cache_creation_input_tokens) ?? u.cacheWrite
-      } else if (ev.event === 'message_delta' && j.usage) {
+      } else if (type === 'message_delta' && j.usage) {
         probeMergeUsage(u, j.usage)
       }
     }
@@ -611,7 +623,7 @@ const anthropicProtocol: ProbeProtocol = {
     return out
   },
   streamFinished(_raw, events) {
-    return events.some(e => e.event === 'message_stop')
+    return events.some(e => probeSseType(e) === 'message_stop')
   },
 }
 
@@ -906,16 +918,31 @@ export const probeChatMaxTokenBlame = (err: string): ChatMaxTokenKey | 'conflict
   return null
 }
 
-/** pretty JSON 只取 message。sibling 字段（如 model=xxx-thinking）不能当判定。 */
+/** OpenRouter 把上游原始报错放在 metadata.raw（JSON 字符串），外层只有 Provider returned error。 */
+const upstreamRawMessage = (o: Record<string, any> | null): string | null => {
+  const raw = asObj(o?.metadata)?.raw
+  if (typeof raw !== 'string' || !raw.trim()) return null
+  try {
+    const parsed = asObj(JSON.parse(raw))
+    const msg = asObj(parsed?.error)?.message ?? parsed?.message
+    return typeof msg === 'string' && msg ? msg : null
+  } catch {
+    return raw.trim()
+  }
+}
+
+/** pretty JSON 只取 message。sibling 字段（如 model=xxx-thinking）不能当判定。上游原文（metadata.raw）优先于网关外层。 */
 export const probeErrorMessage = (err: string): string => {
   const t = String(err || '').trim()
   if (!t.startsWith('{')) return err
   try {
     const o = JSON.parse(t)
     if (o && typeof o === 'object' && !Array.isArray(o)) {
+      const inner = asObj(o.error)
+      const raw = upstreamRawMessage(o) ?? upstreamRawMessage(inner)
+      if (raw) return raw
       if (typeof o.message === 'string' && o.message) return o.message
-      const inner = o.error
-      if (inner && typeof inner === 'object' && typeof inner.message === 'string' && inner.message) return inner.message
+      if (inner && typeof inner.message === 'string' && inner.message) return inner.message
     }
   } catch { /* 保持原文 */ }
   return err

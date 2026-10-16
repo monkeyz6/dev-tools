@@ -367,8 +367,8 @@ const metaCases: BuiltinProbeCase[] = [
     vendor: 'meta',
     tool: 'web_search',
     name: 'Muse 联网搜索（Messages）',
-    desc: 'Messages 适配层 web_search，tool_choice=auto',
-    explain: `Meta Messages 适配层支持内置 web_search，但文档没给 type 字符串，这里按 {type:web_search} 发，属于推断。证据取 server_tool_use、web_search_tool_result、web_search_call 或 url_citation。${PAID}`,
+    desc: 'Messages web_search，tool_choice=auto',
+    explain: `依据 https://dev.meta.ai/docs/search-grounding：Messages 写 {type:"web_search"}，搜索以 server_tool_use 块返回。证据取 server_tool_use、web_search_tool_result、web_search_call 或 url_citation。server_tool_use 的名字带 xxx: 前缀（如 openrouter:web_search）说明是中间层插件代搜，不是 Meta 原生，记失败。${PAID}`,
     format: 'anthropic',
     prompt: 'What is a major news headline from today? You must search the live web before answering and cite your source.',
     apply: { tools: [{ type: 'web_search' }], tool_choice: { type: 'auto' } },
@@ -518,7 +518,18 @@ export function applyBuiltinTool(body: Record<string, any>, spec: BuiltinProbeCa
   if (spec.apply.extra) Object.assign(body, spec.apply.extra)
 }
 
+/** server_tool_use 的名字带 xxx: 前缀且没有原名，说明是中间层插件代为执行（如 openrouter:web_search）。只查 Meta。 */
+export function nativeToolProxyName(data: unknown, spec: BuiltinProbeCase): string | null {
+  if (spec.vendor !== 'meta' || spec.format !== 'anthropic') return null
+  const content = (data && typeof data === 'object' && Array.isArray((data as any).content)) ? (data as any).content as any[] : []
+  const names = content.filter(b => b && typeof b === 'object' && b.type === 'server_tool_use').map(b => String(b.name || ''))
+  if (names.includes(spec.tool)) return null
+  return names.find(n => /^[^:]+:/.test(n)) ?? null
+}
+
 export function oracleNativeToolEvidence(data: unknown, spec: BuiltinProbeCase): ProbeCheck {
+  const proxy = nativeToolProxyName(data, spec)
+  if (proxy) return probeCheck('native_tool_proxy', false, `搜索由中间层插件 ${proxy} 执行，不是 Meta 原生 ${spec.tool}`)
   const blob = JSON.stringify(data ?? '').toLowerCase()
   // 必须是 JSON 键/字符串值（"web_search"），避免正文或 prompt 回声里的 web_search 误判通过
   const hit = spec.evidence.find(token => blob.includes(`"${token.toLowerCase()}"`))

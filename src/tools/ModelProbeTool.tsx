@@ -36,12 +36,12 @@ import {
   type ProbeProfileId,
   aggregateProbeStatus, anthropicBaseBlocked, anthropicCapAction, anthropicMaxTokensConclusion,
   basicProtocolGate, claudeForcedToolChoiceBlocked, claudeProbeCap, claudeSchemaCap, claudeTierFromName,
-  decideFamily, museForcedToolChoiceBlocked, nameSuggestsGpt, probeToolChoiceFallbackNote,
+  decideFamily, isMuseWonderModel, museForcedToolChoiceBlocked, nameSuggestsGpt, probeToolChoiceFallbackNote,
   profileFromName, reclassifyExpected, scoreProtocolGate,
 } from './model-probe/profiles'
 import {
-  type MuseSpecCase,
-  MUSE_SPEC_CASES, matchMuseSpecCases, museAdaptComboBody, museSpecCaseById, museSpecContext, probeUnionMuseSpecCases, scoreMuseSpecReject, scoreMuseSpecReply,
+  type MuseSpecCase, type MuseSpecOutcome, type MuseSpecReply,
+  MUSE_SPEC_CASES, matchMuseSpecCases, museAdaptComboBody, museSpecCaseById, museSpecContext, probeUnionMuseSpecCases, runMuseSpecCase,
 } from './model-probe/muse-spec'
 import { decideOrigin, probeRefreshedOrigin, probeShownSource, signalsFromProbeLogs } from './model-probe/origin'
 import { probeRequestIdFromHeaders, probeRequestIdFromRecord, probeRequestIdHeaders, probeShownRequestId } from './model-probe/request-id'
@@ -59,11 +59,11 @@ import {
 // System / 多轮核验指令；图片输入默认不勾选。
 // Gemini generateContent 与前三套互斥：勾上 gemini-basic 后只跑这一套。
 // 厂商内置工具（kind=native）按模型名命中后追加，默认不勾，单独发请求。
-// Muse Wonder 官方规格（kind=spec）同样按模型名追加、默认不勾；每条只跑自己的协议，被拒类只看状态码。
+// Muse Wonder 官方规格（kind=spec）同样按模型名追加、默认不勾；每条只跑自己的协议，判定口径见 model-probe/muse-spec.ts。
 // 「预期拒绝」（kind=score）默认不勾，不发请求，只决定要不要把本该拒绝的结果改判。
 // 「top_p 越界」在基础请求上带 top_p=2，只按状态码判定。报告里每一格可以单独重试，并覆盖这一格的结论。
 
-type ProbeStatus = 'passed' | 'failed' | 'abnormal' | 'unsupported' | 'skipped' | 'expected' | 'untested'
+type ProbeStatus = 'passed' | 'failed' | 'abnormal' | 'unsupported' | 'skipped' | 'expected' | 'untested' | 'inconclusive'
 
 interface ProbeTestDef {
   id: string
@@ -109,8 +109,12 @@ interface ProbeResult {
   cache?: { hits: number; total: number; reads: number[] }
   tokenValues?: number[]
   checks?: ProbeCheck[]
+  /** 这一格的决定性请求不产生 Token（取回 / 删除 / 取消 / 计数接口），用量闸门不适用 */
+  usageExempt?: boolean
   repro: {
     url: string
+    /** 只在不是 POST 时写（GET / DELETE） */
+    method?: string
     headers: Record<string, string>
     body: any
     status: number | null
@@ -174,11 +178,11 @@ const PROBE_FORMAT_SHORT: Record<ProbeFormat, string> = {
   chat: 'chat', responses: 'responses', anthropic: 'anthropic', gemini: 'gemini',
 }
 const PROBE_STATUS_LABELS: Record<ProbeStatus, string> = {
-  passed: '通过', failed: '失败', abnormal: '异常', unsupported: '不支持', skipped: '已跳过', expected: '符合预期', untested: '未测',
+  passed: '通过', failed: '失败', abnormal: '异常', unsupported: '不支持', skipped: '已跳过', expected: '符合预期', untested: '未测', inconclusive: '依据不足',
 }
-const PROBE_STATUS_ORDER: ProbeStatus[] = ['passed', 'failed', 'abnormal', 'unsupported', 'expected', 'untested', 'skipped']
+const PROBE_STATUS_ORDER: ProbeStatus[] = ['passed', 'failed', 'abnormal', 'unsupported', 'expected', 'inconclusive', 'untested', 'skipped']
 const probeEmptySummary = (): Record<ProbeStatus, number> => ({
-  passed: 0, failed: 0, abnormal: 0, unsupported: 0, skipped: 0, expected: 0, untested: 0,
+  passed: 0, failed: 0, abnormal: 0, unsupported: 0, skipped: 0, expected: 0, untested: 0, inconclusive: 0,
 })
 const probeStatusColor = (status: string): string => (
   status === 'failed' ? 'var(--err)'
@@ -186,13 +190,16 @@ const probeStatusColor = (status: string): string => (
     : status === 'passed' ? 'var(--ok)'
       : status === 'unsupported' ? 'var(--warn)'
         : status === 'expected' ? 'var(--accent)'
+          : status === 'inconclusive' ? 'var(--t2)'
           : status === 'running' ? 'var(--accent)'
             : 'var(--t3)'
 )
 const probeSummaryLine = (summary: Record<ProbeStatus, number>): string => {
   const abnormal = summary.abnormal || 0
   const abnormalPart = abnormal > 0 ? ` · 异常 ${abnormal}` : ''
-  return `通过 ${summary.passed || 0} · 失败 ${summary.failed || 0}${abnormalPart} · 不支持 ${summary.unsupported || 0} · 符合预期 ${summary.expected || 0} · 未测 ${summary.untested || 0}`
+  const inconclusive = summary.inconclusive || 0
+  const inconclusivePart = inconclusive > 0 ? ` · 依据不足 ${inconclusive}` : ''
+  return `通过 ${summary.passed || 0} · 失败 ${summary.failed || 0}${abnormalPart} · 不支持 ${summary.unsupported || 0} · 符合预期 ${summary.expected || 0}${inconclusivePart} · 未测 ${summary.untested || 0}`
 }
 const probeFormatMark = (status: string): string => (
   status === 'passed' ? '✓'
@@ -200,6 +207,7 @@ const probeFormatMark = (status: string): string => (
       : status === 'abnormal' ? '!'
       : status === 'unsupported' ? '△'
         : status === 'expected' ? '○'
+          : status === 'inconclusive' ? '?'
           : status === 'untested' ? '·'
             : status === 'skipped' ? '−'
               : '…'
@@ -220,14 +228,14 @@ const PROBE_TESTS: ProbeTestDef[] = [
   { id: 'thinking-budget', group: '参数与特性', name: 'thinking budget', desc: 'Anthropic thinking.budget_tokens', explain: '只跑 Anthropic。发送 thinking: {type:enabled, budget_tokens:1024}，max_tokens ≥ 2048。4.5 与 4.6 应接受；4.7 起与 5.x 官方 400。默认不勾，会消耗思考 token。', kind: 'parameter', format: 'anthropic', defaultSelected: false },
   { id: 'max_tokens', group: '参数与特性', name: 'Token 上限参数', desc: 'Chat 同时试 max_tokens 与 max_completion_tokens，并核验截断原因', explain: 'Chat Completions 在同一发里带 max_tokens 与 max_completion_tokens；其中一个被拒就丢掉该字段再试，互斥则拆开各测一次。Responses 用 max_output_tokens，Anthropic 默认用 max_tokens。推理模型若被要求改用 max_completion_tokens，会改字段再测；勾选「预期拒绝」时这一次拒绝记为符合预期。接受后再发长输出 + 很小 cap 核验截断原因。finish_reason=length 记通过；请求若返回 400，且正文是 Could not finish the message because max_tokens or model output limit was reached，也记通过，组合里的上限字段算接受。每次语义重试都单独看这句，命中就停止。其它状态码仍记失败。', kind: 'parameter' },
   { id: 'structured_output', group: '参数与特性', name: '结构化输出', desc: '接受 Schema 约束并校验返回 JSON', explain: 'combo 先验证 json_schema / text.format / output_config 是否被接受。接受后再发充足 cap 的 Schema 请求，解析 JSON 并校验 ok 为布尔值。Anthropic 走 output_config.format。Claude 5.x 默认 cap 提到 2048，避免思考链吃掉额度。', kind: 'parameter' },
-  { id: 'tool_calling', group: '参数与特性', name: '工具调用', desc: '接受 tools，并强制调用 get_weather', explain: 'combo 用双工具 + tool_choice=auto 验证请求被接受。接受后再发强制指定 get_weather，核验响应里真有该调用。thinking 模式拒绝 required/object 的 tool_choice 时降级为 auto 再核验。Claude 5.x 官方拒绝强制 tool_choice，只要错误点名 tool_choice 就降级。无调用但 HTTP 成功记失败。', kind: 'parameter' },
+  { id: 'tool_calling', group: '参数与特性', name: '工具调用', desc: '接受 tools，并强制调用 get_weather', explain: 'combo 用双工具 + tool_choice=auto 验证请求被接受。接受后再发强制指定 get_weather，核验响应里真有该调用。thinking 模式拒绝 required/object 的 tool_choice 时降级为 auto 再核验。Claude 5.x 官方拒绝强制 tool_choice，只要错误点名 tool_choice 就降级。Muse Wonder 官方只接受 auto，直接用 auto 加强制提示核验，不先发强制写法。无调用但 HTTP 成功记失败。', kind: 'parameter' },
   { id: 'stream-false', group: '传输与稳定性', name: '非流式响应', desc: '验证 stream=false 的完整 JSON 响应与 usage', explain: '非流式是计费与解析最简单的路径。HTTP 成功时必须带回 input 与 output Token，否则视为计费无法落地。', kind: 'stream' },
   { id: 'stream-true', group: '传输与稳定性', name: 'SSE 流式响应', desc: '验证 stream=true、SSE 格式与带 Token 上限时的 usage', explain: '流式响应按 SSE 分块返回。Chat 带 max_completion_tokens、Responses 带 max_output_tokens、Anthropic 带 max_tokens。通过条件：SSE 可解析且能读到 input + output Token。结束标记（[DONE] / response.completed / message_stop）写入说明，不作为通过条件。', kind: 'stream' },
   { id: 'stream-pure', group: '传输与稳定性', name: '纯流式（无 Token 上限）', desc: 'Chat 最小体：model + messages + stream，提示「讲个笑话」', explain: '不带 max_tokens / max_completion_tokens。用于检出「加上限才回 usage、不加就不回」的渠道。只跑 Chat Completions；Anthropic 强制要 max_tokens，无法做此对照。通过条件：SSE 可解析且能读到 input + output Token。', kind: 'stream', format: 'chat' },
   { id: 'token-stability', group: '传输与稳定性', name: 'Token 计算稳定性', desc: '对固定短输入重复计数并比较波动', explain: '同一输入多次请求的输入 Token 应恒定；混入固定随机串可暴露计数不一致（如后端换编码）。HTTP 成功时必须同时带回 input 与 output Token。', kind: 'token' },
-  { id: 'cache-chat', group: '缓存能力', name: 'Chat 自动前缀缓存', desc: '重复长前缀并读取 cached_tokens', explain: 'OpenAI 系自动前缀缓存无需显式声明。cached_tokens > 0 为通过；只看到 cache_write_tokens 记为符合预期；读写字段都没有才是不支持。GPT 请求带稳定的 prompt_cache_key。最多 3 次。', kind: 'cache', format: 'chat' },
-  { id: 'cache-responses', group: '缓存能力', name: 'Responses 自动前缀缓存', desc: '重复长前缀并读取 cached_tokens', explain: 'Responses 命中时 input_tokens_details.cached_tokens > 0。只写入、三次未读到命中记为符合预期。GPT 请求带稳定的 prompt_cache_key。最多 3 次。', kind: 'cache', format: 'responses' },
-  { id: 'cache-anthropic', group: '缓存能力', name: 'Anthropic 显式缓存', desc: '使用 cache_control 并读取 cache_read_input_tokens', explain: 'Anthropic 需在 content block 显式声明 cache_control，命中时 cache_read_input_tokens > 0。最多 3 次，首次命中即停。此处仅快速判定是否支持，详细命中率、覆盖率与节省测算请用「缓存命中率」工具。', kind: 'cache', format: 'anthropic' },
+  { id: 'cache-chat', group: '缓存能力', name: 'Chat 自动前缀缓存', desc: '重复长前缀并读取 cached_tokens', explain: 'OpenAI 系自动前缀缓存无需显式声明。cached_tokens > 0 为通过；只看到 cache_write_tokens 记为符合预期；读写字段都没有才是不支持。GPT 与 Muse Wonder 请求带稳定的 prompt_cache_key。最多 5 次，首次命中即停。', kind: 'cache', format: 'chat' },
+  { id: 'cache-responses', group: '缓存能力', name: 'Responses 自动前缀缓存', desc: '重复长前缀并读取 cached_tokens', explain: 'Responses 命中时 input_tokens_details.cached_tokens > 0。只写入、5 次内未读到命中记为符合预期。GPT 与 Muse Wonder 请求带稳定的 prompt_cache_key。最多 5 次，首次命中即停。', kind: 'cache', format: 'responses' },
+  { id: 'cache-anthropic', group: '缓存能力', name: 'Anthropic 显式缓存', desc: '使用 cache_control 并读取 cache_read_input_tokens', explain: 'Anthropic 需在 content block 显式声明 cache_control，命中时 cache_read_input_tokens > 0。最多 5 次，首次命中即停。此处仅快速判定是否支持，详细命中率、覆盖率与节省测算请用「缓存命中率」工具。', kind: 'cache', format: 'anthropic' },
   { id: 'system-prompt', group: '补充场景', name: 'System 提示词', desc: '检查系统指令是否被正确遵循', explain: '发出 Always reply exactly SYSTEM_OK。通过条件：HTTP 成功、有 usage，且回复文本含 SYSTEM_OK。', kind: 'extra', subtype: 'system' },
   { id: 'multi-turn', group: '补充场景', name: '多轮对话', desc: '两跳口令：先记住再回传真实回复', explain: '第一跳让模型记住口令 ORBIT 并短确认；第二跳只回传角色和文本，去掉服务端 item id。通过条件：第二跳回复含 ORBIT。Responses 若带回 resp_ id，会另发一发 previous_response_id，只用来判断上游是否跨资源，不改变这条用例的结论。', kind: 'extra', subtype: 'multiturn' },
   { id: 'image-input', group: '补充场景', name: '图片输入', desc: '内嵌纯红 PNG，识别主色', explain: '三种协议各自原生图片字段（Chat image_url / Responses input_image 字符串 data URL / Anthropic base64 image block）。问主色，期望 red。4xx 且错误像不支持视觉则记不支持。默认不勾选。', kind: 'extra', subtype: 'image', defaultSelected: false },
@@ -320,6 +328,7 @@ const probeUsageFailDetail = (u?: ProbeUsage | null): string =>
   `响应成功但缺少输入/输出 Token，计费无法落地（${probeIoText(u)}）`
 const probeApplyUsageGate = (result: ProbeResult): ProbeResult => {
   if (result.status !== 'passed' && result.status !== 'unsupported') return result
+  if (result.usageExempt) return result
   const http = result.repro?.status
   if (http == null || http < 200 || http >= 300) return result
   if (probeUsageComplete(result.usage)) return result
@@ -358,7 +367,8 @@ const probeOriginInput = (rows: ProbeLog[]) => rows.map(log => ({
 const probeReproOf = (log: ProbeLog): ProbeResult['repro'] => {
   const responseHeaders = probeRequestIdHeaders(log.responseHeaders)
   const repro: NonNullable<ProbeResult['repro']> = {
-    url: log.url, headers: log.requestHeaders, body: log.requestBody, status: log.status,
+    url: log.url, ...(log.method && log.method !== 'POST' ? { method: log.method } : {}),
+    headers: log.requestHeaders, body: log.requestBody, status: log.status,
     requestId: probeRequestIdFromRecord(responseHeaders) ?? log.requestId,
     ...(Object.keys(responseHeaders).length ? { responseHeaders } : {}),
   }
@@ -370,6 +380,8 @@ const probeMultiFormatKinds: ProbeTestDef['kind'][] = ['parameter', 'token', 'st
 const PROBE_STREAM_MAX_TOKENS = PROBE_DEFAULT_CAP
 const PROBE_PURE_STREAM_PROMPT = '讲个笑话'
 const PROBE_429_RETRY_MAX = 2
+/** 缓存类用例最多发几次，首次命中即停 */
+const PROBE_CACHE_ATTEMPTS = 5
 const PROBE_429_RETRY_WAIT_MS = 6000
 const PROBE_STOP_DETAIL = '测试被用户中止'
 
@@ -755,6 +767,7 @@ function ProbeStatusBadge({ status }: { status: ProbeStatus }) {
     : status === 'abnormal' ? { background: 'color-mix(in srgb, var(--err) 14%, transparent)', color: 'color-mix(in srgb, var(--err) 55%, var(--warn))' }
     : status === 'unsupported' ? { background: 'var(--warnBg)', color: 'var(--warn)' }
     : status === 'expected' ? { background: 'var(--accentSub)', color: 'var(--accent)' }
+    : status === 'inconclusive' ? { background: 'var(--s2)', color: 'var(--t2)' }
     : { background: 'var(--s2)', color: 'var(--t3)' }
   return (
     <span className="inline-flex items-center px-2 py-0.5 rounded-full text-[11px] font-semibold whitespace-nowrap" style={s}>
@@ -846,7 +859,7 @@ function ProbeResultDialog({ detail, onClose, onRetry, retrying, retryDisabled }
         {detail.result.repro ? (
           <div className="mt-4">
             <div className="flex flex-wrap items-center gap-2 mb-3">
-              <span className="font-mono text-[11px] px-1.5 py-0.5 rounded" style={{ background: 'var(--s2)', color: 'var(--text)', fontFamily: PROBE_MONO }}>POST {detail.result.repro.url}</span>
+              <span className="font-mono text-[11px] px-1.5 py-0.5 rounded" style={{ background: 'var(--s2)', color: 'var(--text)', fontFamily: PROBE_MONO }}>{detail.result.repro.method || 'POST'} {detail.result.repro.url}</span>
               <span className="font-mono text-[11px] px-1.5 py-0.5 rounded" style={{ background: 'var(--s2)', color: 'var(--text)', fontFamily: PROBE_MONO }}>HTTP {detail.result.repro.status ?? '—'}</span>
               {requestId && (
                 <span className="inline-flex items-center gap-1">
@@ -1095,7 +1108,7 @@ function ProbeMatrixDialog({ detail, onClose }: {
         {repro ? (
           <div className="mt-4">
             <div className="flex flex-wrap items-center gap-2">
-              <span className="rounded-md px-2 py-0.5 font-mono text-[11.5px]" style={{ background: 'color-mix(in srgb, var(--text) 5%, transparent)', color: 'var(--t2)', fontFamily: PROBE_MONO }}>POST {repro.url}</span>
+              <span className="rounded-md px-2 py-0.5 font-mono text-[11.5px]" style={{ background: 'color-mix(in srgb, var(--text) 5%, transparent)', color: 'var(--t2)', fontFamily: PROBE_MONO }}>{repro.method || 'POST'} {repro.url}</span>
               <span className="rounded-md px-2 py-0.5 font-mono text-[11.5px]" style={{ background: 'color-mix(in srgb, var(--text) 5%, transparent)', color: 'var(--t2)', fontFamily: PROBE_MONO }}>HTTP {repro.status ?? '—'}</span>
               {requestId && (
                 <span className="inline-flex items-center gap-1">
@@ -1738,11 +1751,15 @@ function ModelProbeTool() {
     return probeResult('failed', failDetail ?? (e?.message || String(e)), { format, repro: probeReproOf(log) })
   }
 
-  const probeRequest = async (log: ProbeLog, format: ProbeFormat, body: any, opts: { stream?: boolean; retryOn429?: boolean } = {}): Promise<{ ok: boolean; status: number; data: any; raw: string | null; log: ProbeLog }> => {
+  const probeRequest = async (log: ProbeLog, format: ProbeFormat, body: any, opts: { stream?: boolean; retryOn429?: boolean; method?: 'POST' | 'GET' | 'DELETE' } = {}): Promise<{ ok: boolean; status: number; data: any; raw: string | null; log: ProbeLog }> => {
     const cfg = cfgRef.current
     if (!cfg) throw new Error('测试配置缺失')
+    const method = opts.method ?? 'POST'
+    log.method = method
     const headers = probeProtocolOf(format).headers(cfg.apiKey)
     headers.Accept = 'application/json, text/event-stream'
+    // GET / DELETE 不带正文，也就不声明 Content-Type
+    if (method !== 'POST') delete headers['Content-Type']
     let payload = body
     if (opts.stream && format === 'chat' && includeStreamUsageRef.current) {
       const prev = (body && typeof body === 'object' && body.stream_options && typeof body.stream_options === 'object')
@@ -1759,10 +1776,12 @@ function ModelProbeTool() {
       const timer = setTimeout(() => controller.abort(new DOMException('请求超时', 'TimeoutError')), cfg.timeoutMs)
       const started = performance.now()
       log.requestHeaders = probeMaskHeaders(headers)
-      log.requestBody = payload
+      log.requestBody = method === 'POST' ? payload : null
       try {
         if (stopRef.current) throw new DOMException(PROBE_STOP_DETAIL, 'AbortError')
-        const res = await fetch(log.url, { method: 'POST', headers, body: JSON.stringify(payload), signal: controller.signal })
+        const res = await fetch(log.url, method === 'POST'
+          ? { method, headers, body: JSON.stringify(payload), signal: controller.signal }
+          : { method, headers, signal: controller.signal })
         log.status = res.status
         log.statusText = res.statusText
         log.responseHeaders = probeHeadersObject(res.headers)
@@ -1950,10 +1969,12 @@ function ModelProbeTool() {
     const log = probeNewLog(probeKey(id, format), `${probeParamLabel(id)} 语义（${PROBE_FORMAT_LABELS[format]}）`, format)
     setProgress(prev => ({ ...prev, label: `${probeParamLabel(id)} 语义（${PROBE_FORMAT_LABELS[format]}）` }))
     const chatKeys = format === 'chat' && extra?.chatMaxKeys?.length ? extra.chatMaxKeys : undefined
+    const museAutoTools = id === 'tool_calling' && isMuseWonderModel(cfg.model)
     const body: Record<string, any> = proto.baseBody(cfg.model, id === 'max_tokens' ? PROBE_TRUNCATION_PROMPT : id === 'tool_calling' ? PROBE_TOOL_FORCE_PROMPT : PROBE_SCHEMA_PROMPT)
     if (id === 'max_tokens') proto.applyMaxTokens(body, PROBE_TRUNCATION_CAP, chatKeys)
     else if (id === 'tool_calling') {
-      proto.applyTools(body, [PROBE_WEATHER_TOOL], { name: 'get_weather' })
+      // Muse 官方只接受 tool_choice=auto：强制写法必然 400，直接用 auto + 强制提示核验
+      proto.applyTools(body, [PROBE_WEATHER_TOOL], museAutoTools ? 'auto' : { name: 'get_weather' })
       const cap = claudeProbeCap(cfg.model)
       if (cap !== PROBE_DEFAULT_CAP) proto.applyMaxTokens(body, cap, chatKeys)
     } else {
@@ -1999,8 +2020,8 @@ function ModelProbeTool() {
           if (r.ok) break
         }
       }
-      let toolChoiceFallback = false
-      if (!r.ok && id === 'tool_calling' && probeToolChoiceShouldFallback(probeExtractError(r.data), cfg.model)) {
+      let toolChoiceFallback = museAutoTools
+      if (!r.ok && !museAutoTools && id === 'tool_calling' && probeToolChoiceShouldFallback(probeExtractError(r.data), cfg.model)) {
         if (stopRef.current) return probeResult('skipped', PROBE_STOP_DETAIL, { format, repro: accepted.repro })
         const retryBody = proto.baseBody(cfg.model, PROBE_TOOL_FORCE_PROMPT)
         proto.applyTools(retryBody, [PROBE_WEATHER_TOOL], 'auto')
@@ -2283,14 +2304,15 @@ function ModelProbeTool() {
     const body: Record<string, any> = probeBaseBody(cfgRef.current!, format, prefix + '\nReply OK.')
     if (format === 'anthropic') {
       body.messages = [{ role: 'user', content: [{ type: 'text', text: prefix, cache_control: { type: 'ephemeral' } }, { type: 'text', text: 'Reply OK.' }] }]
-    } else if (nameSuggestsGpt(cfgRef.current!.model)) {
+    } else if (nameSuggestsGpt(cfgRef.current!.model) || isMuseWonderModel(cfgRef.current!.model)) {
+      // Muse 官方缓存页：prompt_cache_key 让同 key 的请求路由到同一后端，更容易命中
       body.prompt_cache_key = 'modelprobe-cache'
     }
     const reads: number[] = []
     const durations: number[] = []
     let lastLog: ProbeLog | null = null
     let maxWrite = 0
-    for (let i = 0; i < 3; i++) {
+    for (let i = 0; i < PROBE_CACHE_ATTEMPTS; i++) {
       const log = probeNewLog(t.id, t.name, format)
       lastLog = log
       let r: { ok: boolean; status: number; data: any; raw: string | null; log: ProbeLog }
@@ -2309,11 +2331,11 @@ function ModelProbeTool() {
         return probeResult('passed', `第 ${i + 1} 次请求命中缓存，读取 Token: ${read}`, { format, duration: Math.round(durations.reduce((a, b) => a + b, 0) / durations.length), usage: r.log.usage, cache: { hits: 1, total: i + 1, reads }, repro: probeReproOf(r.log) })
       }
     }
-    const cacheSummary = { format, duration: durations.length ? Math.round(durations.reduce((a, b) => a + b, 0) / durations.length) : null, usage: lastLog?.usage, cache: { hits: 0, total: 3, reads }, repro: lastLog ? probeReproOf(lastLog) : null }
+    const cacheSummary = { format, duration: durations.length ? Math.round(durations.reduce((a, b) => a + b, 0) / durations.length) : null, usage: lastLog?.usage, cache: { hits: 0, total: reads.length, reads }, repro: lastLog ? probeReproOf(lastLog) : null }
     if (maxWrite > 0) {
-      return probeResult('expected', `符合预期：已报告缓存写入 ${maxWrite} Token，3 次内未读到命中`, cacheSummary)
+      return probeResult('expected', `符合预期：已报告缓存写入 ${maxWrite} Token，${PROBE_CACHE_ATTEMPTS} 次内未读到命中`, cacheSummary)
     }
-    return probeResult('unsupported', '连续 3 次请求均未报告缓存命中，已停止重试', cacheSummary)
+    return probeResult('unsupported', `连续 ${PROBE_CACHE_ATTEMPTS} 次请求均未报告缓存命中，已停止重试`, cacheSummary)
   }
 
   const runProbeExtra = async (subtype: string, format: ProbeFormat): Promise<ProbeResult> => {
@@ -2379,7 +2401,7 @@ function ModelProbeTool() {
     }
     if (subtype === 'image') {
       const proto = probeProtocolOf(format)
-      const body = proto.baseBody(cfgRef.current!.model, PROBE_IMAGE_PROMPT)
+      const body = probeBaseBody(cfgRef.current!, format, PROBE_IMAGE_PROMPT)
       proto.applyImage(body, PROBE_RED_PNG_B64, PROBE_IMAGE_PROMPT)
       const log = probeNewLog('image-input', '图片输入', format)
       try {
@@ -2399,7 +2421,7 @@ function ModelProbeTool() {
     }
     if (subtype === 'system') {
       const proto = probeProtocolOf(format)
-      const body = proto.baseBody(cfgRef.current!.model, PROBE_SYSTEM_USER)
+      const body = probeBaseBody(cfgRef.current!, format, PROBE_SYSTEM_USER)
       proto.applySystem(body, PROBE_SYSTEM_INSTRUCTION, PROBE_SYSTEM_USER)
       const log = probeNewLog('system-prompt', 'System 提示词', format)
       try {
@@ -2414,7 +2436,7 @@ function ModelProbeTool() {
       }
     }
     const proto = probeProtocolOf(format)
-    const turn1 = proto.baseBody(cfgRef.current!.model, PROBE_MULTITURN_TURN1)
+    const turn1 = probeBaseBody(cfgRef.current!, format, PROBE_MULTITURN_TURN1)
     const log1 = probeNewLog('multi-turn', '多轮对话', format)
     let lastLog = log1
     try {
@@ -2492,6 +2514,11 @@ function ModelProbeTool() {
       const noted = toolChoiceFallback
         ? { ...check, detail: `${probeToolChoiceFallbackNote(cfg.model)}${check.detail}` }
         : check
+      if (!noted.passed && noted.id === 'native_tool_proxy') {
+        return probeResult('failed', noted.detail, {
+          format, duration: r.log.duration, usage: r.log.usage, repro: probeReproOf(r.log), checks: [noted],
+        })
+      }
       if (!noted.passed) {
         if (!probeUsageComplete(r.log.usage)) {
           return probeResult('failed', `${noted.detail}；${probeUsageFailDetail(r.log.usage)}`, {
@@ -2510,33 +2537,68 @@ function ModelProbeTool() {
     }
   }
 
-  // Muse Wonder 规格：每条只跑自己的协议。被拒类只看状态码；接受类非 2xx 记失败，2xx 再核对用量字段 / 口令。
+  // Muse Wonder 规格：每条只跑自己的协议，可能多发（对照、档位、取回 / 删除 / 轮询）。判定在 muse-spec.ts，这里只负责发请求与记日志。
   const runProbeSpec = async (t: ProbeTestDef): Promise<ProbeResult> => {
     const spec = museSpecCaseById(t.id)
     const format = t.format
     if (!spec || !format) return probeResult('failed', '未找到规格用例定义')
     const blocked = untestedBecauseBlocked(format)
     if (blocked) return blocked
-    const proto = probeProtocolOf(format)
-    const ctx = museSpecContext()
-    const body = spec.build(cfgRef.current!.model, ctx)
-    const log = probeNewLog(probeKey(t.id, format), `${t.name}（${PROBE_FORMAT_LABELS[format]}）`, format)
-    try {
-      const r = await probeRequest(log, format, body)
-      const extra = { format, duration: r.log.duration, usage: r.log.usage, repro: probeReproOf(r.log) }
-      const scored = scoreMuseSpecReply({ ...spec, name: t.name }, {
-        status: r.status, ok: r.ok, data: r.data,
-        text: r.ok ? proto.textOf(r.data) : '', errorText: r.ok ? undefined : probeExtractError(r.data),
-      }, ctx)
-      return probeResult(scored.status, scored.detail, scored.checks ? { ...extra, checks: scored.checks } : extra)
-    } catch (e: any) {
-      if (spec.expect === 'reject') {
-        if (stopRef.current) return probeResult('skipped', PROBE_STOP_DETAIL, { format, repro: probeReproOf(log) })
-        const scored = scoreMuseSpecReject({ status: log.status, transport: e?.name === 'TimeoutError' ? 'timeout' : 'network' }, spec.what || t.name)
-        return probeResult(scored.status, scored.detail, { format, duration: log.duration, repro: probeReproOf(log) })
-      }
-      return probeCatchResult(e, format, log)
+    const cfg = cfgRef.current!
+    const key = probeKey(t.id, format)
+    const sent: ProbeLog[] = []
+    const started = performance.now()
+    const outcome = await runMuseSpecCase(spec, {
+      model: cfg.model,
+      ctx: museSpecContext(),
+      stopped: () => stopRef.current,
+      sleep: ms => probeDelay(ms),
+      send: async req => {
+        const f = req.format
+        const url = req.path ? `${cfg.urlOf[f]}${req.path}` : undefined
+        const log = probeNewLog(key, `${t.name}${req.label ? ` · ${req.label}` : ''}（${PROBE_FORMAT_LABELS[f]}）`, f, url)
+        let reply: MuseSpecReply
+        if (stopRef.current) {
+          reply = { transport: 'stopped', status: null, ok: false, data: null, text: '', usage: probeEmptyUsage() }
+        } else {
+          try {
+            const r = await probeRequest(log, f, req.body ?? null, { method: req.method })
+            reply = {
+              transport: 'http', status: r.status, ok: r.ok, data: r.data,
+              text: r.ok ? probeProtocolOf(f).textOf(r.data) : '',
+              errorText: r.ok ? undefined : probeExtractError(r.data),
+              usage: r.log.usage,
+            }
+          } catch (e: any) {
+            const stopped = stopRef.current || e?.message === PROBE_STOP_DETAIL
+            const timedOut = e?.name === 'TimeoutError' || /请求超时/.test(String(e?.message || ''))
+            reply = {
+              transport: stopped ? 'stopped' : timedOut ? 'timeout' : 'network',
+              status: typeof log.status === 'number' && log.status > 0 ? log.status : null,
+              ok: false, data: log.responseBody, text: '', errorText: String(e?.message || e), usage: log.usage,
+            }
+          }
+        }
+        sent.push(log)
+        return reply
+      },
+    }).catch((e: any): MuseSpecOutcome => (stopRef.current || e?.message === PROBE_STOP_DETAIL
+      ? { status: 'skipped', detail: PROBE_STOP_DETAIL }
+      : { status: 'failed', detail: String(e?.message || e) }))
+    const at = (i: number | undefined) => (sent.length ? sent[Math.min(Math.max(i ?? sent.length - 1, 0), sent.length - 1)] : null)
+    const decisive = at(outcome.decisive)
+    const usageSrc = outcome.usageFrom != null ? at(outcome.usageFrom) : decisive
+    if (outcome.status === 'skipped') {
+      return probeResult('skipped', PROBE_STOP_DETAIL, { format, repro: decisive ? probeReproOf(decisive) : null })
     }
+    return probeResult(outcome.status, outcome.detail, {
+      format,
+      duration: sent.length ? Math.round(performance.now() - started) : null,
+      usage: usageSrc?.usage,
+      repro: decisive ? probeReproOf(decisive) : null,
+      ...(outcome.checks?.length ? { checks: outcome.checks } : {}),
+      ...(outcome.usageExempt ? { usageExempt: true } : {}),
+    })
   }
 
   // memo 子组件需要稳定的回调引用：latest-ref 包装，避免给复杂闭包逐一维护依赖数组
@@ -3185,7 +3247,7 @@ function ModelProbeTool() {
     if (r.target.overrides.anthropic) md += `- Anthropic Base URL: ${r.target.overrides.anthropic}\n`
     if (r.target.overrides.gemini) md += `- Gemini Base URL: ${r.target.overrides.gemini}\n`
     md += `- 模型: ${r.target.model}\n`
-    md += `- 通过: ${r.summary.passed} · 失败: ${r.summary.failed} · 异常: ${r.summary.abnormal || 0} · 不支持: ${r.summary.unsupported} · 符合预期: ${r.summary.expected} · 未测: ${r.summary.untested} · 跳过: ${r.summary.skipped}\n`
+    md += `- 通过: ${r.summary.passed} · 失败: ${r.summary.failed} · 异常: ${r.summary.abnormal || 0} · 不支持: ${r.summary.unsupported} · 符合预期: ${r.summary.expected} · 依据不足: ${r.summary.inconclusive || 0} · 未测: ${r.summary.untested} · 跳过: ${r.summary.skipped}\n`
     if (r.verdict?.upstream) {
       const layer = r.verdict.upstream
       md += `- 渠道判断: ${layer.label}${layer.reasons.length ? `（${layer.reasons.join('；')}）` : ''}\n`
@@ -3207,7 +3269,7 @@ function ModelProbeTool() {
         if (x.cache) md += `- 缓存: 命中 ${x.cache.hits}/${x.cache.total} 次 · 读取值 ${x.cache.reads.join(', ')}\n`
         if (x.tokenValues) md += `- 每次输入 Token: ${x.tokenValues.join(', ')}\n`
         if (x.repro) {
-          md += `\n复现步骤：\n\n\`\`\`\nPOST ${x.repro.url}\n`
+          md += `\n复现步骤：\n\n\`\`\`\n${x.repro.method || 'POST'} ${x.repro.url}\n`
           const requestId = probeShownRequestId(x.repro)
           if (requestId) md += `Request ID: ${requestId}\n`
           md += `HTTP: ${x.repro.status ?? '—'}\n`
@@ -3411,7 +3473,7 @@ function ModelProbeTool() {
                       </div>
                     </div>
                     {report.verdict && <ProbeVerdictBlock verdict={report.verdict} />}
-                    <div className="mt-5 grid grid-cols-3 min-[1180px]:grid-cols-7 gap-x-3 gap-y-3">
+                    <div className="mt-5 grid grid-cols-4 min-[1180px]:grid-cols-8 gap-x-3 gap-y-3">
                       {PROBE_STATUS_ORDER.map(s => (
                         <div key={s} className="min-w-0">
                           <div className="text-xs leading-4 whitespace-nowrap" style={{ color: 'var(--t3)' }}>{PROBE_STATUS_LABELS[s]} </div>

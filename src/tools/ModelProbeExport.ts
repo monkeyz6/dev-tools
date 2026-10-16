@@ -4,7 +4,7 @@ import { matrixFormatSubtitle, matrixTokenValues, presentMatrixNote, probeMatrix
 import { probeShownSource } from './model-probe/origin'
 import { probeShownRequestId } from './model-probe/request-id'
 
-export type ProbeHtmlStatus = 'passed' | 'failed' | 'abnormal' | 'unsupported' | 'skipped' | 'expected' | 'untested'
+export type ProbeHtmlStatus = 'passed' | 'failed' | 'abnormal' | 'unsupported' | 'skipped' | 'expected' | 'untested' | 'inconclusive'
 
 export interface ProbeHtmlVerdictLayer { label: string; reasons: string[] }
 export interface ProbeHtmlVerdict {
@@ -24,6 +24,8 @@ export interface ProbeHtmlResult {
   checks?: { id: string; passed: boolean; detail: string }[]
   repro: {
     url: string
+    /** 只在不是 POST 时写（GET / DELETE） */
+    method?: string
     headers: Record<string, string>
     body: unknown
     status: number | null
@@ -73,6 +75,7 @@ interface ProbeHtmlItem {
   tokenValues?: number[]
   checks?: { id: string; passed: boolean; detail: string }[]
   url: string
+  method?: string
   http: number | null
   requestId: string | null
   body: unknown
@@ -82,7 +85,7 @@ interface ProbeHtmlItem {
 interface ProbeHtmlGroup { title: string; items: ProbeHtmlItem[] }
 
 const STATUS_LABEL: Record<Exclude<ProbeHtmlStatus, 'skipped'>, string> = {
-  passed: '通过', failed: '失败', abnormal: '异常', unsupported: '不支持', expected: '符合预期', untested: '未测',
+  passed: '通过', failed: '失败', abnormal: '异常', unsupported: '不支持', expected: '符合预期', untested: '未测', inconclusive: '依据不足',
 }
 const MATRIX_STATUS: Record<ProbeHtmlStatus, string> = { ...STATUS_LABEL, skipped: '已跳过' }
 
@@ -214,7 +217,7 @@ h1{margin:10px 0 0;font-size:26px;font-weight:700;letter-spacing:-.021em;line-he
 .origin-r li{font-size:12px;line-height:1.5;color:var(--t2);overflow-wrap:anywhere}
 .stats{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:12px}
 @media (min-width:720px){.stats{grid-template-columns:repeat(4,minmax(0,1fr))}}
-@media (min-width:1040px){.stats{grid-template-columns:repeat(7,minmax(0,1fr))}}
+@media (min-width:1040px){.stats{grid-template-columns:repeat(8,minmax(0,1fr))}}
 .stat{padding:14px 12px;border-radius:18px}
 .stat .k{font-size:11px;font-weight:600;color:var(--t3);letter-spacing:.04em;white-space:nowrap}
 .stat .v{margin-top:6px;font-size:28px;font-weight:700;letter-spacing:-.025em;line-height:1.1;color:var(--text)}
@@ -224,6 +227,7 @@ h1{margin:10px 0 0;font-size:26px;font-weight:700;letter-spacing:-.021em;line-he
 .stat .v.abn{color:color-mix(in srgb, var(--err) 55%, var(--warn))}
 .stat .v.warn{color:var(--warn)}
 .stat .v.info{color:var(--accent)}
+.stat .v.neutral{color:var(--t2)}
 .bar{display:flex;height:6px;border-radius:999px;overflow:hidden;background:var(--s2)}
 .bar i{display:block;height:100%}
 .bar .ok{background:var(--ok)}
@@ -231,6 +235,7 @@ h1{margin:10px 0 0;font-size:26px;font-weight:700;letter-spacing:-.021em;line-he
 .bar .err{background:var(--err)}
 .bar .abn{background:color-mix(in srgb, var(--err) 55%, var(--warn))}
 .bar .warn{background:var(--warn)}
+.bar .neutral{background:var(--t2);opacity:.6}
 .bar .mute{background:var(--t3);opacity:.45}
 .section-title{
   margin:6px 2px 10px;font-size:12px;font-weight:700;color:var(--t3);
@@ -266,6 +271,8 @@ h1{margin:10px 0 0;font-size:26px;font-weight:700;letter-spacing:-.021em;line-he
 .dot-st.abnormal{color:color-mix(in srgb, var(--err) 55%, var(--warn))}
 .dot-st.unsupported{color:var(--warn)}
 .dot-st.expected{color:var(--accent)}
+.dot-st.inconclusive{color:var(--t2)}
+.dot-st.inconclusive::before{background:transparent;box-shadow:inset 0 0 0 1.5px currentColor}
 .dot-st.untested{color:var(--t3)}
 .pill{display:inline-flex;align-items:center;border-radius:999px;padding:3px 9px;font-size:11px;font-weight:600;flex-shrink:0}
 .pill.passed{background:var(--okBg);color:var(--ok)}
@@ -273,6 +280,7 @@ h1{margin:10px 0 0;font-size:26px;font-weight:700;letter-spacing:-.021em;line-he
 .pill.abnormal{background:color-mix(in srgb, var(--err) 14%, transparent);color:color-mix(in srgb, var(--err) 55%, var(--warn))}
 .pill.unsupported{background:var(--warnBg);color:var(--warn)}
 .pill.expected{background:var(--accentSub);color:var(--accent)}
+.pill.inconclusive{background:var(--s2);color:var(--t2)}
 .pill.untested{background:var(--s2);color:var(--t3)}
 .footer{font-size:12px;color:var(--t3);line-height:1.7;padding:4px 4px 0}
 .overlay{
@@ -391,7 +399,7 @@ function sanitizeHtmlReport(report: ProbeHtmlReport): ProbeHtmlReport {
     if (!isHiddenResult(k, v)) results[k] = v
   }
   const summary: Record<ProbeHtmlStatus, number> = {
-    passed: 0, failed: 0, abnormal: 0, unsupported: 0, skipped: 0, expected: 0, untested: 0,
+    passed: 0, failed: 0, abnormal: 0, unsupported: 0, skipped: 0, expected: 0, untested: 0, inconclusive: 0,
   }
   for (const r of Object.values(results)) {
     if (summary[r.status] != null) summary[r.status]++
@@ -425,6 +433,7 @@ function buildGroups(report: ProbeHtmlReport, tests: ProbeHtmlTestMeta[], format
         tokenValues: r.tokenValues,
         checks: r.checks,
         url: r.repro?.url || '',
+        method: r.repro?.method,
         http: r.repro?.status ?? null,
         requestId: probeShownRequestId(r.repro),
         body: r.repro ? r.repro.body : null,
@@ -435,7 +444,7 @@ function buildGroups(report: ProbeHtmlReport, tests: ProbeHtmlTestMeta[], format
   return groups
 }
 
-function statClass(kind: 'ok' | 'err' | 'abn' | 'warn' | 'info', n: number): string {
+function statClass(kind: 'ok' | 'err' | 'abn' | 'warn' | 'info' | 'neutral', n: number): string {
   return n > 0 ? kind : 'zero'
 }
 
@@ -506,7 +515,8 @@ export function buildProbeReportHtml(
   }).join('')
 
   const s = report.summary
-  const scored = s.passed + s.failed + s.abnormal + s.unsupported + s.expected + s.untested
+  const inconclusive = s.inconclusive || 0
+  const scored = s.passed + s.failed + s.abnormal + s.unsupported + s.expected + inconclusive + s.untested
   const totalSeg = Math.max(1, scored)
   const overrides = Object.entries(report.target.overrides || {}).filter(([, v]) => !!v)
   const overrideHtml = overrides.length
@@ -529,6 +539,7 @@ export function buildProbeReportHtml(
     tokenValues: item.tokenValues || null,
     checks: item.checks || null,
     url: item.url,
+    method: item.method || 'POST',
     http: item.http,
     requestId: item.requestId,
     body: item.body,
@@ -586,6 +597,7 @@ export function buildProbeReportHtml(
     <div class="stat"><div class="k">异常</div><div class="v ${statClass('abn', s.abnormal)}">${s.abnormal}</div></div>
     <div class="stat"><div class="k">不支持</div><div class="v ${statClass('warn', s.unsupported)}">${s.unsupported}</div></div>
     <div class="stat"><div class="k">符合预期</div><div class="v ${statClass('info', s.expected)}">${s.expected}</div></div>
+    <div class="stat"><div class="k">依据不足</div><div class="v ${statClass('neutral', inconclusive)}">${inconclusive}</div></div>
     <div class="stat"><div class="k">未测</div><div class="v ${s.untested > 0 ? '' : 'zero'}">${s.untested}</div></div>
     <div class="stat"><div class="k">已跳过</div><div class="v ${s.skipped > 0 ? '' : 'zero'}">${s.skipped}</div></div>
   </section>
@@ -595,6 +607,7 @@ export function buildProbeReportHtml(
     <i class="err" style="width:${(s.failed / totalSeg) * 100}%"></i>
     <i class="abn" style="width:${(s.abnormal / totalSeg) * 100}%"></i>
     <i class="warn" style="width:${(s.unsupported / totalSeg) * 100}%"></i>
+    <i class="neutral" style="width:${(inconclusive / totalSeg) * 100}%"></i>
     <i class="mute" style="width:${(s.untested / totalSeg) * 100}%"></i>
   </div>
   ${skippedNote ? `<p class="footer">${esc(skippedNote)}</p>` : ''}
@@ -722,7 +735,7 @@ function probeSheetDocument(payload: string, clickSelector: string, originsPaylo
       s.textContent = text;
       meta.appendChild(s);
     }
-    if (item.url) addTag('POST ' + item.url);
+    if (item.url) addTag((item.method || 'POST') + ' ' + item.url);
     if (item.http != null) addTag('HTTP ' + item.http);
     if (item.requestId) addTag('Request ID ' + item.requestId);
     var wrap = document.getElementById('sheetBodyWrap');
@@ -906,6 +919,8 @@ table.matrix{
 .dot-st::before{content:"";width:6px;height:6px;border-radius:50%;background:var(--c,var(--t3));flex-shrink:0}
 .dot-st.passed{--c:var(--ok)}
 .dot-st.expected{--c:var(--accent)}
+.dot-st.inconclusive{--c:var(--t2);color:var(--t2)}
+.dot-st.inconclusive::before{background:transparent;box-shadow:inset 0 0 0 1.5px var(--t2)}
 .dot-st.failed{--c:var(--err);color:var(--err)}
 .dot-st.abnormal{--c:color-mix(in srgb,var(--err) 55%,var(--warn));color:var(--c)}
 .dot-st.unsupported{--c:var(--warn);color:var(--warn)}
@@ -917,6 +932,7 @@ table.matrix{
 .pill.abnormal{background:color-mix(in srgb,var(--err) 12%,transparent);color:color-mix(in srgb,var(--err) 55%,var(--warn))}
 .pill.unsupported{background:var(--warnBg);color:var(--warn)}
 .pill.expected{background:var(--accentSub);color:var(--accent)}
+.pill.inconclusive{background:var(--fill);color:var(--t2)}
 .pill.untested,.pill.skipped{background:var(--fill);color:var(--t3)}
 .overlay{
   position:fixed;inset:0;z-index:40;display:none;align-items:center;justify-content:center;
@@ -1049,7 +1065,7 @@ export function probeMatrixHasProblems(reports: { results?: Record<string, { sta
 }
 
 export function probeMatrixCellScored(status: string | null | undefined): boolean {
-  return status === 'passed' || status === 'failed' || status === 'abnormal' || status === 'unsupported' || status === 'expected'
+  return status === 'passed' || status === 'failed' || status === 'abnormal' || status === 'unsupported' || status === 'expected' || status === 'inconclusive'
 }
 
 interface MatrixSheetItem {
@@ -1066,6 +1082,7 @@ interface MatrixSheetItem {
   checks: ProbeHtmlResult['checks'] | null
   http: number | null
   url?: string
+  method?: string
   requestId?: string | null
   body?: unknown
   responseBody?: unknown
@@ -1091,6 +1108,7 @@ function matrixSheetItem(name: string, subtitle: string, result: ProbeHtmlResult
   if (requestId) item.requestId = requestId
   if (result.repro) {
     item.url = result.repro.url
+    if (result.repro.method) item.method = result.repro.method
     item.body = result.repro.body
     if ('responseBody' in result.repro) item.responseBody = result.repro.responseBody
   }
@@ -1246,7 +1264,7 @@ const MATRIX_SHEET_SCRIPT = `
     if (item.tokenValues && item.tokenValues.length) addFact(facts, '输入 Token', item.tokenValues.join(', '));
     facts.hidden = !facts.children.length;
     var meta = $('sheetMeta');
-    if (item.url) addTag(meta, 'POST ' + item.url);
+    if (item.url) addTag(meta, (item.method || 'POST') + ' ' + item.url);
     if (item.http != null) addTag(meta, 'HTTP ' + item.http);
     if (item.requestId) addTag(meta, 'Request ID ' + item.requestId);
     meta.hidden = !meta.children.length;

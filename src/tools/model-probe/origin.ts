@@ -1,4 +1,6 @@
 import { probeRequestIdFromRecord } from './request-id.ts'
+import { MUSE_FINGERPRINTS, museEncryptedPrefixHit } from './fingerprints.ts'
+import { isMuseWonderModel } from './profiles.ts'
 
 export type ProbeBasicState = 'ok' | 'fail' | 'absent'
 
@@ -16,6 +18,10 @@ export interface ProbeSignalFlags {
   systemFingerprint: string | null
   openaiChat: boolean
   openaiResponse: boolean
+  /** 加密推理块（Responses encrypted_content、Chat reasoning_details[].data） */
+  encryptedBlobs: string[]
+  /** 网关自报上游是 Meta 的字段，只作辅助依据 */
+  metaSelfReports: string[]
 }
 
 export interface ProbeSignals {
@@ -74,7 +80,16 @@ const emptyFlags = (): ProbeSignalFlags => ({
   systemFingerprint: null,
   openaiChat: false,
   openaiResponse: false,
+  encryptedBlobs: [],
+  metaSelfReports: [],
 })
+
+/** OpenAI 的 system_fingerprint 是稳定的十六进制（fp_44709d6fcb）。网关每次随机生成的 base36（fp_ilzvclv5jz）不算证据。 */
+const OPENAI_FINGERPRINT_RE = /^fp_[0-9a-f]{6,}$/i
+
+const pushOnce = (list: string[], value: string, max = 50) => {
+  if (list.length < max && !list.includes(value)) list.push(value)
+}
 
 const hostOf = (url: string): string => {
   try { return new URL(url).host.toLowerCase() } catch { return '' }
@@ -105,7 +120,18 @@ const walk = (value: unknown, flags: ProbeSignalFlags, depth: number) => {
     if (key === 'cache_creation_input_tokens') flags.cacheCreation = true
     if (key === 'cache_read_input_tokens') flags.cacheReadField = true
     if (key === 'reasoning_tokens' && typeof child === 'number' && child > 0) flags.reasoningTokens = true
-    if (key === 'system_fingerprint' && typeof child === 'string' && child.trim()) flags.systemFingerprint = child.trim()
+    if (key === 'system_fingerprint' && typeof child === 'string' && OPENAI_FINGERPRINT_RE.test(child.trim())) flags.systemFingerprint = child.trim()
+    if (key === 'encrypted_content' && typeof child === 'string' && child) pushOnce(flags.encryptedBlobs, child)
+    if (key === 'reasoning_details' && Array.isArray(child)) {
+      for (const d of child) {
+        const o = d && typeof d === 'object' ? d as Record<string, unknown> : null
+        if (o?.type === 'reasoning.encrypted' && typeof o.data === 'string' && o.data) pushOnce(flags.encryptedBlobs, o.data)
+        if (o?.format === 'meta-responses-v1') pushOnce(flags.metaSelfReports, 'reasoning_details.format=meta-responses-v1')
+      }
+    }
+    if ((key === 'provider' || key === 'finalProvider') && typeof child === 'string' && /^meta$/i.test(child.trim())) {
+      pushOnce(flags.metaSelfReports, `网关自报 ${key}=${child.trim()}`)
+    }
     if (key === 'reasoning' && child && typeof child === 'object' && !Array.isArray(child)) {
       const effort = (child as Record<string, unknown>).effort
       if (typeof effort === 'string' && effort) flags.reasoningEffort = true
@@ -270,9 +296,18 @@ export function decideOrigin(signals: ProbeSignals): OriginDecision {
     if (headerValue(signals.headerHits, 'openai-version')) official.push('响应头 openai-version')
     if (signals.flags.systemFingerprint) official.push(`system_fingerprint 为 ${signals.flags.systemFingerprint}`)
   }
-  if (!azure.length) {
+  // Meta 的接口本身就是 OpenAI 兼容形状，请求 muse 时这两条不能当成 OpenAI 官方的证据
+  if (!azure.length && !isMuseWonderModel(signals.requestModel)) {
     if (signals.flags.openaiChat) official.push('响应是 Chat Completions（chatcmpl- / object=chat.completion）')
     if (signals.flags.openaiResponse) official.push('响应是 Responses（resp_ / object=response）')
+  }
+
+  // 只认命中：加密推理块全部带已确认的 Meta 前缀才成立；网关自报的 provider 只在命中时附上
+  const blobs = signals.flags.encryptedBlobs
+  const meta: string[] = []
+  if (blobs.length && blobs.every(museEncryptedPrefixHit)) {
+    meta.push(`${blobs.length} 个加密推理块都以 ${MUSE_FINGERPRINTS.encryptedPrefix.value} 开头`)
+    meta.push(...signals.flags.metaSelfReports)
   }
 
   const datedClaude = signals.responseModels.find(model => /^claude-.+-\d{8}$/i.test(model))
@@ -298,6 +333,7 @@ export function decideOrigin(signals: ProbeSignals): OriginDecision {
   const upstreamGroups = [
     { id: 'azure', label: 'Azure OpenAI', reasons: azure },
     { id: 'openai', label: 'OpenAI 官方', reasons: official },
+    { id: 'meta', label: 'Meta 官方', reasons: meta },
     { id: 'anthropic', label: 'Anthropic 官方', reasons: anthropic },
     { id: 'bedrock', label: 'Bedrock', reasons: bedrock },
     { id: 'vertex', label: 'Vertex', reasons: vertex },

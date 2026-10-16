@@ -142,7 +142,7 @@ export const GEMINI_PROBE_CASES: GeminiProbeCase[] = [
   {
     id: 'gemini-cache', group: '缓存能力', name: '隐式缓存',
     desc: '同一长前缀发两次，读缓存字段',
-    explain: '前缀按约 4 字符 / token 生成到至少 4096 token（16384 字符），开头另加本次 nonce。只发两次，不调用 cachedContents 创建接口。第二次 cachedContentTokenCount 或 totalCachedTokens 大于 0 记通过；字段在且为 0 记符合预期（官方不保证命中）；字段缺失记不支持。第一次失败则不再发第二次。',
+    explain: '前缀按约 4 字符 / token 生成到至少 4096 token（16384 字符），开头另加本次 nonce。最多发 5 次，不调用 cachedContents 创建接口。从第二次起任一次 cachedContentTokenCount 或 totalCachedTokens 大于 0 即通过并停止；都没命中时，有一次带了字段（值为 0）记符合预期（官方不保证命中），一次都没带记不支持。第一次失败则不再发后面的。',
     defaultOn: true,
   },
   {
@@ -520,13 +520,20 @@ export function scoreGeminiTokenValues(values: Array<number | null>): GeminiScor
   return { status: 'failed', detail: `失败：输入 Token 不一致（${values.join('、')}）` }
 }
 
-export function scoreGeminiCacheHit(round: GeminiRound): GeminiScore {
+/** 隐式缓存最多发几次（含第一次写入），从第二次起首次命中即停 */
+export const GEMINI_CACHE_ATTEMPTS = 5
+
+const NTH = ['', '第一次', '第二次', '第三次', '第四次', '第五次']
+const nthText = (n: number): string => NTH[n] ?? `第 ${n} 次`
+
+/** 单轮判定。nth 是这一轮的序号（从 1 起），只用于说明文字。 */
+export function scoreGeminiCacheHit(round: GeminiRound, nth = 2): GeminiScore {
   const bad = transportScore(round)
   if (bad) return bad
-  if (!is2xx(round.status)) return { status: 'failed', detail: `失败：第二次请求 HTTP ${round.status}` }
-  if (!usageReady(round.usage)) return { status: 'failed', detail: '失败：第二次响应缺少输入/输出 Token' }
+  if (!is2xx(round.status)) return { status: 'failed', detail: `失败：${nthText(nth)}请求 HTTP ${round.status}` }
+  if (!usageReady(round.usage)) return { status: 'failed', detail: `失败：${nthText(nth)}响应缺少输入/输出 Token` }
   if (round.usage.cacheRead == null) return { status: 'unsupported', detail: '不支持：响应没有 cachedContentTokenCount / totalCachedTokens' }
-  if (round.usage.cacheRead > 0) return { status: 'passed', detail: `通过：第二次读取缓存 ${round.usage.cacheRead} Token` }
+  if (round.usage.cacheRead > 0) return { status: 'passed', detail: `通过：${nthText(nth)}读取缓存 ${round.usage.cacheRead} Token` }
   return { status: 'expected', detail: '符合预期：缓存字段为 0。官方不保证隐式缓存一定命中。' }
 }
 
@@ -773,15 +780,34 @@ export async function runGeminiProbe(id: string, deps: GeminiProbeDeps): Promise
       )
       return pack(score, first, { cache: { hits: 0, total: 1, reads: [first.usage.cacheRead ?? 0] } })
     }
-    if (deps.stopped()) return stoppedOutcome(first)
-    const second = await send({ label: '隐式缓存', url: genUrl, body })
-    if (second.transport === 'stopped') return stoppedOutcome(second)
-    const score = scoreGeminiCacheHit(second)
-    const hit = typeof second.usage.cacheRead === 'number' && second.usage.cacheRead > 0
-    return pack(score, second, {
-      duration: Math.round((first.duration + second.duration) / 2),
-      cache: { hits: hit ? 1 : 0, total: 2, reads: [first.usage.cacheRead ?? 0, second.usage.cacheRead ?? 0] },
+    // 从第二次起最多再发 4 次：任一次读到缓存即通过；中途出错按这一轮判；
+    // 全部没命中时，有一轮带了缓存字段（值为 0）记符合预期，一轮都没带记不支持
+    const rounds: GeminiRound[] = [first]
+    const summary = () => ({
+      duration: Math.round(rounds.reduce((a, r) => a + r.duration, 0) / rounds.length),
+      cache: {
+        hits: rounds.filter(r => typeof r.usage.cacheRead === 'number' && r.usage.cacheRead > 0).length,
+        total: rounds.length,
+        reads: rounds.map(r => r.usage.cacheRead ?? 0),
+      },
     })
+    let last = first
+    let sawField = false
+    for (let nth = 2; nth <= GEMINI_CACHE_ATTEMPTS; nth++) {
+      if (deps.stopped()) return stoppedOutcome(last)
+      const round = await send({ label: '隐式缓存', url: genUrl, body })
+      if (round.transport === 'stopped') return stoppedOutcome(round)
+      rounds.push(round)
+      last = round
+      const score = scoreGeminiCacheHit(round, nth)
+      if (score.status === 'passed') return pack(score, round, summary())
+      if (score.status === 'expected') sawField = true
+      else if (score.status !== 'unsupported') return pack(score, round, summary())
+    }
+    const final: GeminiScore = sawField
+      ? { status: 'expected', detail: `符合预期：${GEMINI_CACHE_ATTEMPTS} 次内缓存字段都为 0。官方不保证隐式缓存一定命中。` }
+      : { status: 'unsupported', detail: `不支持：${GEMINI_CACHE_ATTEMPTS} 次响应都没有 cachedContentTokenCount / totalCachedTokens` }
+    return pack(final, last, summary())
   }
   if (id === 'gemini-system') {
     const round = await send({ label: 'System 提示词', url: genUrl, body: geminiSystemBody() })

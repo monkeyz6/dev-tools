@@ -522,6 +522,11 @@ describe('用例收口', () => {
     assert.equal(aggregateProbeStatus(['expected', 'expected']), 'expected')
     assert.equal(aggregateProbeStatus(['untested', 'passed']), 'passed')
     assert.equal(aggregateProbeStatus(['untested']), 'untested')
+    // 依据不足：盖不过通过与符合预期，但排在不支持、未测前面
+    assert.equal(aggregateProbeStatus(['inconclusive', 'passed']), 'passed')
+    assert.equal(aggregateProbeStatus(['inconclusive', 'expected']), 'expected')
+    assert.equal(aggregateProbeStatus(['inconclusive', 'unsupported', 'untested']), 'inconclusive')
+    assert.equal(aggregateProbeStatus(['inconclusive', 'failed']), 'failed')
     assert.equal(aggregateProbeStatus(['failed', 'expected']), 'failed')
     assert.equal(aggregateProbeStatus(['abnormal', 'passed']), 'abnormal')
     assert.equal(aggregateProbeStatus(['failed', 'abnormal']), 'failed')

@@ -6,7 +6,7 @@ import {
   geminiListedId, geminiMaxFirstBody, geminiMaxSecondBody, geminiMinimalPolicy, geminiBasicsMixed,
   geminiSearchBody, geminiStructuredBody, geminiSystemBody, geminiTemperatureBody, geminiThinkingBody,
   geminiToolBody, geminiTopPBody, geminiTurn1Body, geminiTurn2Body, geminiWithVersionNote, runGeminiProbe,
-  scoreGeminiCacheHit, scoreGeminiMustReject, toggleProbeBasic,
+  scoreGeminiCacheHit, scoreGeminiMustReject, toggleProbeBasic, GEMINI_CACHE_ATTEMPTS,
   type GeminiRound,
 } from './gemini-spec.ts'
 import {
@@ -703,6 +703,46 @@ describe('runGeminiProbe', () => {
     assert.equal(harness.sent.length, 2)
     assert.equal(out.status, 'passed')
     assert.match(out.detail, /12/)
+  })
+
+  it('隐式缓存最多发 5 次：第四次才命中仍通过，命中即停', async () => {
+    const harness = deps('gemini-3.8-flash', [
+      http(200, usage(20, 2)),
+      http(200, usage(20, 2)),
+      http(200, usage(20, 2, { cachedContentTokenCount: 0 })),
+      http(200, usage(20, 2, { cachedContentTokenCount: 9 })),
+    ])
+    const out = await harness.run('gemini-cache')
+    assert.equal(harness.sent.length, 4)
+    assert.equal(out.status, 'passed')
+    assert.match(out.detail, /第四次读取缓存 9/)
+    assert.deepEqual(out.cache, { hits: 1, total: 4, reads: [0, 0, 0, 9] })
+  })
+
+  it('隐式缓存 5 次都没命中：带过字段记符合预期，一次都没带记不支持', async () => {
+    const zero = deps('gemini-3.8-flash', [
+      http(200, usage(20, 2)),
+      ...[0, 0, 0, 0].map(() => http(200, usage(20, 2, { cachedContentTokenCount: 0 }))),
+    ])
+    const expected = await zero.run('gemini-cache')
+    assert.equal(zero.sent.length, GEMINI_CACHE_ATTEMPTS)
+    assert.equal(expected.status, 'expected')
+
+    const none = deps('gemini-3.8-flash', [1, 2, 3, 4, 5].map(() => http(200, usage(20, 2))))
+    const unsupported = await none.run('gemini-cache')
+    assert.equal(none.sent.length, GEMINI_CACHE_ATTEMPTS)
+    assert.equal(unsupported.status, 'unsupported')
+  })
+
+  it('隐式缓存中途出错按这一轮判，不再继续', async () => {
+    const harness = deps('gemini-3.8-flash', [
+      http(200, usage(20, 2)),
+      http(200, usage(20, 2, { cachedContentTokenCount: 0 })),
+      http(500, { error: { message: 'unavailable', status: 'UNAVAILABLE' } }),
+    ])
+    const out = await harness.run('gemini-cache')
+    assert.equal(harness.sent.length, 3)
+    assert.equal(out.status, 'abnormal')
   })
 })
 

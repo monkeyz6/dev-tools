@@ -45,7 +45,7 @@ function report(over: Partial<ProbeHtmlReport> & Pick<ProbeHtmlReport, 'target' 
     name: '报告',
     startedAt: '2026-09-29T01:00:00.000Z',
     durationMs: 1000,
-    summary: { passed: 0, failed: 0, abnormal: 0, unsupported: 0, skipped: 0, expected: 0, untested: 0 },
+    summary: { passed: 0, failed: 0, abnormal: 0, unsupported: 0, skipped: 0, expected: 0, untested: 0, inconclusive: 0 },
     ...over,
   }
 }

@@ -15,7 +15,7 @@ export interface FamilyDecision {
   reasons: string[]
 }
 
-export type ProbeRunStatus = 'passed' | 'failed' | 'abnormal' | 'unsupported' | 'skipped' | 'expected' | 'untested'
+export type ProbeRunStatus = 'passed' | 'failed' | 'abnormal' | 'unsupported' | 'skipped' | 'expected' | 'untested' | 'inconclusive'
 /** 4.6 桶含 4.6–4.8；budget_tokens 是否接受另看 claudeAcceptsThinkingBudget。 */
 export type ClaudeTier = '4.5' | '4.6' | '5' | null
 
@@ -84,12 +84,13 @@ export const claudeForcedToolChoiceMentioned = (err: string): boolean => {
 export const claudeForcedToolChoiceBlocked = (err: string, model: string): boolean =>
   claudeTierFromName(model) === '5' && claudeForcedToolChoiceMentioned(err)
 
-/** Meta 官方：Chat / Responses 只接受 tool_choice=auto，其余 400「only "auto" is supported for `tool_choice`」。 */
+/** Meta 官方：Chat / Responses 只接受 tool_choice=auto，其余 400「only `"auto"` is supported for `tool_choice`」。 */
 export const museForcedToolChoiceBlocked = (err: string, model: string): boolean => {
   if (!isMuseWonderModel(model)) return false
   const e = probeErrorMessage(err).toLowerCase()
-  // 官方原句：only "auto" is supported for `tool_choice`。auto 后面必须紧跟 is supported / allowed，近义句不认
-  return /tool[_ -]?choice/.test(e) && /\bonly\s+["'`]?auto["'`]?\s+(?:is\s+)?(?:supported|allowed)\b/.test(e)
+  // 官方原句：only `"auto"` is supported for `tool_choice`（auto 外面包着反引号加双引号）。
+  // auto 后面必须紧跟 is supported / allowed，近义句不认
+  return /tool[_ -]?choice/.test(e) && /\bonly\s+["'`]*auto["'`]*\s+(?:is\s+)?(?:supported|allowed)\b/.test(e)
 }
 
 /** 强制 tool_choice 被拒、改用 auto 后写进结论的前缀。 */
@@ -382,13 +383,14 @@ export function reclassifyExpected(
   return null
 }
 
-/** 父行：失败优先，其次异常；通过盖过符合预期和未测；未测单独不会变成失败。 */
+/** 父行：失败优先，其次异常；通过盖过符合预期、依据不足和未测；未测单独不会变成失败。 */
 export function aggregateProbeStatus(statuses: string[]): ProbeRunStatus {
   if (!statuses.length) return 'skipped'
   if (statuses.includes('failed')) return 'failed'
   if (statuses.includes('abnormal')) return 'abnormal'
   if (statuses.includes('passed')) return 'passed'
   if (statuses.includes('expected')) return 'expected'
+  if (statuses.includes('inconclusive')) return 'inconclusive'
   if (statuses.includes('unsupported')) return 'unsupported'
   if (statuses.includes('untested')) return 'untested'
   return 'skipped'

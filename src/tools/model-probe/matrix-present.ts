@@ -5,8 +5,8 @@ export interface MatrixNote {
   errBody: string
 }
 
-const STATUS_PREFIX = /^(符合预期|异常|失败|通过|不支持|未测|已跳过)[：:]\s*/
-const STATUS_WORD = new Set(['通过', '失败', '异常', '不支持', '未测', '已跳过', '符合预期'])
+const STATUS_PREFIX = /^(符合预期|依据不足|异常|失败|通过|不支持|未测|已跳过)[：:]\s*/
+const STATUS_WORD = new Set(['通过', '失败', '异常', '不支持', '未测', '已跳过', '符合预期', '依据不足'])
 const BOILERPLATE = new Set([
   '基础请求返回成功',
   '用户未勾选',
