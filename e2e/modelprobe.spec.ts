@@ -3147,7 +3147,7 @@ test.describe('模型探测 · Muse Wonder 规格', () => {
       ? { input_tokens: 12, output_tokens: 16 }
       : { input_tokens: 12, output_tokens: 16, output_tokens_details: { reasoning_tokens: 5 }, input_tokens_details: { cached_tokens: 0 } },
   })
-  const SPEC_IDS = ['spec-muse-chat-effort-levels', 'spec-muse-anthropic-top-k', 'spec-muse-responses-video', 'spec-muse-responses-store-chain', 'spec-muse-identity-encrypted', 'native-meta-web_search', 'native-meta-web_search-messages']
+  const SPEC_IDS = ['spec-muse-chat-effort-levels', 'spec-muse-responses-parallel-tools', 'spec-muse-responses-video', 'spec-muse-responses-encrypted-replay', 'spec-muse-identity-encrypted', 'native-meta-web_search', 'native-meta-web_search-messages']
 
   async function start(page: import('@playwright/test').Page, name: string) {
     await addChannel(page, { apiKey: 'sk-test-probe' })
@@ -3164,7 +3164,7 @@ test.describe('模型探测 · Muse Wonder 规格', () => {
       await expect(page.locator(`input[data-id="${id}"]`)).toBeVisible()
       await expect(page.locator(`input[data-id="${id}"]`)).not.toBeChecked()
     }
-    for (const group of ['推理', '工具', '搜索', '多模态', '缓存与状态', '官方接口', '官方约束', '身份证据']) {
+    for (const group of ['推理', '工具', '多模态', '身份证据']) {
       await expect(page.locator('div.uppercase.tracking-wide', { hasText: `Muse Wonder · ${group}` })).toBeVisible()
     }
     // 「全选」要连规格分组与 Meta 原生工具一起勾上
@@ -3187,44 +3187,6 @@ test.describe('模型探测 · Muse Wonder 规格', () => {
     await expect(page.locator('input[data-id="spec-muse-chat-effort-levels"]')).toHaveCount(0)
     await expect(page.locator('input[data-id="native-meta-web_search"]')).toHaveCount(0)
     await expect(page.locator('input[data-id="native-meta-web_search-messages"]')).toHaveCount(0)
-  })
-
-  test('官方约束：400 记通过；被接受但被丢弃记失败；参数真的生效记异常', async ({ page }) => {
-    const chatBodies: any[] = []
-    await page.route('**/v1/chat/completions', async route => {
-      const body = route.request().postDataJSON()
-      chatBodies.push(body)
-      if (body.stop !== undefined) {
-        await route.fulfill({ status: 400, contentType: 'application/json', body: JSON.stringify({ error: { message: "Unsupported parameter: 'stop'", type: 'invalid_request_error' } }) })
-        return
-      }
-      // n=2 真的回了两条：参数生效，与 Muse 规格矛盾
-      if (body.n === 2) { await route.fulfill({ status: 200, contentType: 'application/json', body: MUSE_CHAT({ choices: 2 }) }); return }
-      // logprobs 被丢弃：照常回答、没有 logprobs
-      await route.fulfill({ status: 200, contentType: 'application/json', body: MUSE_CHAT() })
-    })
-
-    await goto(page, /模型探测/)
-    await inputByLabel(page, '模型名称').fill('muse-wonder-1.0')
-    await page.getByRole('button', { name: '全不选' }).click()
-    await check(page, 'chat-basic')
-    await check(page, 'spec-muse-chat-stop')
-    await check(page, 'spec-muse-chat-n2')
-    await check(page, 'spec-muse-chat-logprobs')
-    await start(page, 'e2e-muse-约束')
-
-    const stopTile = tileOf(page, 'spec-muse-chat-stop@chat')
-    await expect(stopTile.locator('.probe-status-text')).toHaveText('通过', { timeout: 10000 })
-    await expect(stopTile).toContainText('stop 返回 HTTP 400')
-    const nTile = tileOf(page, 'spec-muse-chat-n2@chat')
-    await expect(nTile.locator('.probe-status-text')).toHaveText('异常')
-    await expect(nTile).toContainText('n=2 生效了（返回了 2 个 choices）')
-    const lpTile = tileOf(page, 'spec-muse-chat-logprobs@chat')
-    await expect(lpTile.locator('.probe-status-text')).toHaveText('失败')
-    await expect(lpTile).toContainText('静默丢弃')
-    const stopBody = chatBodies.find(b => b.stop !== undefined)
-    expect(stopBody.stop).toEqual(['5'])
-    expect(extractPrompt(stopBody)).toContain('1 to 9')
   })
 
   test('推理全档位：官方支持的 max 被 400 拒绝记失败并停在这一档；none 被 400 拒绝记通过', async ({ page }) => {
@@ -3256,32 +3218,6 @@ test.describe('模型探测 · Muse Wonder 规格', () => {
     expect(levels.filter(l => l !== 'none').slice(-7)).toEqual([undefined, 'minimal', 'low', 'medium', 'high', 'xhigh', 'max'])
   })
 
-  test('官方约束：400 正文是额度用尽时说明参数已被接受，记失败', async ({ page }) => {
-    await page.route('**/v1/chat/completions', async route => {
-      const body = route.request().postDataJSON()
-      if (body.logprobs === true) {
-        await route.fulfill({
-          status: 400, contentType: 'application/json',
-          body: JSON.stringify({ error: { message: 'Could not finish the message because max_tokens or model output limit was reached.', type: 'invalid_request_error' } }),
-        })
-        return
-      }
-      await route.fulfill({ status: 200, contentType: 'application/json', body: CHAT_OK(12) })
-    })
-
-    await goto(page, /模型探测/)
-    await inputByLabel(page, '模型名称').fill('muse-wonder-1.0')
-    await page.getByRole('button', { name: '全不选' }).click()
-    await check(page, 'chat-basic')
-    await check(page, 'spec-muse-chat-logprobs')
-    await start(page, 'e2e-muse-额度用尽')
-
-    const tile = tileOf(page, 'spec-muse-chat-logprobs@chat')
-    await expect(tile.locator('.probe-status-text')).toHaveText('失败', { timeout: 10000 })
-    await expect(tile).toContainText('logprobs=true 已被接受，HTTP 400 是输出额度用尽')
-    await expect(tile).not.toContainText('返回 HTTP 400：')
-  })
-
   test('通用用例适配：工具调用直接用 auto 不先发强制写法；Responses 推理字段写成 reasoning.effort', async ({ page }) => {
     const responsesBodies: any[] = []
     const chatBodies: any[] = []
@@ -3291,6 +3227,14 @@ test.describe('模型探测 · Muse Wonder 规格', () => {
       chatBodies.push(body)
       if (isForcedWeather(body)) { await route.fulfill(onlyAuto); return }
       const forcePrompt = extractPrompt(body).includes('You must call the get_weather tool')
+      // 组合请求用 OK 提示，两个上限字段可以同在；语义请求带强制提示时 Muse 会报互斥
+      if (forcePrompt && body.max_tokens != null && body.max_completion_tokens != null) {
+        await route.fulfill({
+          status: 400, contentType: 'application/json',
+          body: JSON.stringify({ error: { message: 'max_tokens and max_completion_tokens are mutually exclusive', type: 'invalid_request_error' } }),
+        })
+        return
+      }
       await route.fulfill({ status: 200, contentType: 'application/json', body: forcePrompt ? CHAT_OK(12, 0, { toolName: 'get_weather' }) : smartChat(body) })
     })
     await page.route('**/v1/responses', async route => {
@@ -3306,6 +3250,7 @@ test.describe('模型探测 · Muse Wonder 规格', () => {
     await page.getByRole('button', { name: '全不选' }).click()
     await check(page, 'chat-basic')
     await check(page, 'responses-basic')
+    await check(page, 'max_tokens')
     await check(page, 'tool_calling')
     await check(page, 'reasoning_effort')
     await start(page, 'e2e-muse-适配')
@@ -3328,6 +3273,10 @@ test.describe('模型探测 · Muse Wonder 规格', () => {
     const chatCombo = chatBodies.find(b => b.reasoning_effort !== undefined)
     expect(chatCombo?.reasoning_effort).toBe('low')
     expect(chatBodies.some(b => b.reasoning !== undefined)).toBe(false)
+    const forces = chatBodies.filter(b => extractPrompt(b).includes('You must call the get_weather tool'))
+    expect(forces.some(b => b.max_tokens != null && b.max_completion_tokens != null)).toBe(true)
+    expect(forces.some(b => b.max_tokens == null && b.max_completion_tokens === 2048)).toBe(true)
+    await expect(tileOf(page, 'max_tokens@chat').locator('.probe-status-text')).toHaveText('通过')
   })
 
   test('Anthropic 的 System / 多轮 / 图片给 2048 额度，推理不再吃光 120 回空', async ({ page }) => {
@@ -3435,7 +3384,7 @@ test.describe('模型探测 · Muse Wonder 规格', () => {
     await expect(proxied).toContainText('中间层插件 openrouter:web_search')
   })
 
-  test('多模态与用量：复述 PDF 口令；全档位里某一档缺官方用量字段记失败并点名', async ({ page }) => {
+  test('多模态与用量：复述 PDF 口令；全档位里某一档缺官方用量字段记依据不足并点名', async ({ page }) => {
     await page.route('**/v1/responses', async route => {
       const body = route.request().postDataJSON()
       const parts = Array.isArray(body.input) ? body.input.flatMap((m: any) => m.content || []) : []
@@ -3462,55 +3411,51 @@ test.describe('模型探测 · Muse Wonder 规格', () => {
     await expect(pdfTile.locator('.probe-status-text')).toHaveText('通过', { timeout: 10000 })
     await expect(pdfTile).toContainText('复述出 PDF 口令')
     const levels = tileOf(page, 'spec-muse-responses-effort-levels@responses')
-    await expect(levels.locator('.probe-status-text')).toHaveText('失败')
+    await expect(levels.locator('.probe-status-text')).toHaveText('依据不足')
     await expect(levels).toContainText('xhigh：用量没有 output_tokens_details.reasoning_tokens')
   })
 
-  test('推断写法失败记「依据不足」，不算通过也不算失败', async ({ page }) => {
-    await page.route('**/v1/chat/completions', async route => {
-      const body = route.request().postDataJSON()
-      if (JSON.stringify(body).includes('"video_url"')) {
-        await route.fulfill({ status: 400, contentType: 'application/json', body: JSON.stringify({ error: { message: 'Invalid input', type: 'invalid_request_error', param: 'messages.0.content' } }) })
-        return
-      }
-      await route.fulfill({ status: 200, contentType: 'application/json', body: MUSE_CHAT() })
+  test('工具、音频、视频与加密推理回放', async ({ page }) => {
+    const fn = (name: string, args: string) => ({ type: 'function_call', name, arguments: args })
+    const withUsage = (output: unknown[]) => JSON.stringify({
+      id: 'resp-cap', object: 'response', status: 'completed', model: 'muse-wonder-1.0', output,
+      usage: { input_tokens: 12, output_tokens: 8, output_tokens_details: { reasoning_tokens: 2 }, input_tokens_details: { cached_tokens: 0 } },
     })
-
-    await goto(page, /模型探测/)
-    await inputByLabel(page, '模型名称').fill('muse-wonder-1.0')
-    await page.getByRole('button', { name: '全不选' }).click()
-    await check(page, 'chat-basic')
-    await check(page, 'spec-muse-chat-video')
-    await start(page, 'e2e-muse-依据不足')
-
-    const tile = tileOf(page, 'spec-muse-chat-video@chat')
-    await expect(tile.locator('.probe-status-text')).toHaveText('依据不足', { timeout: 10000 })
-    await expect(tile.locator('.probe-status-text')).toHaveClass(/is-inconclusive/)
-    await expect(tile).toContainText('写法是推断的')
-  })
-
-  test('存储链：store → 续接 → GET 取回 → DELETE → 再取回 404，方法与路径都对', async ({ page }) => {
-    const calls: string[] = []
-    let deleted = false
-    const id = 'resp_store1'
-    await page.route(url => url.pathname.startsWith('/v1/responses'), async route => {
-      const req = route.request()
-      const path = new URL(req.url()).pathname
-      calls.push(`${req.method()} ${path}`)
-      if (req.method() === 'GET') {
-        await route.fulfill(deleted
-          ? { status: 404, contentType: 'application/json', body: JSON.stringify({ error: { message: 'not found', type: 'invalid_request_error' } }) }
-          : { status: 200, contentType: 'application/json', body: MUSE_RESP({ id, text: 'Got it.' }) })
+    await page.route('**/v1/responses', async route => {
+      const body = route.request().postDataJSON()
+      const parts = Array.isArray(body.input) ? body.input.flatMap((m: any) => Array.isArray(m?.content) ? m.content : []) : []
+      if (parts.some((p: any) => p.type === 'input_audio')) {
+        await route.fulfill({ status: 200, contentType: 'application/json', body: MUSE_RESP({ text: 'NONE' }) })
         return
       }
-      if (req.method() === 'DELETE') {
-        deleted = true
-        await route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ id, object: 'response', deleted: true }) })
+      if (parts.some((p: any) => p.type === 'input_video')) {
+        await route.fulfill({ status: 200, contentType: 'application/json', body: MUSE_RESP({ text: 'blue' }) })
         return
       }
-      const body = req.postDataJSON()
-      if (body.previous_response_id === id) { await route.fulfill({ status: 200, contentType: 'application/json', body: MUSE_RESP({ text: 'ORBIT' }) }); return }
-      if (body.store === true) { await route.fulfill({ status: 200, contentType: 'application/json', body: MUSE_RESP({ id, text: 'Got it.' }) }); return }
+      if (Array.isArray(body.include) && body.include.includes('reasoning.encrypted_content')) {
+        const replay = Array.isArray(body.input) && body.input.some((it: any) => it.type === 'reasoning')
+        const first = withUsage([
+          { type: 'reasoning', id: 'rs_1', summary: [], encrypted_content: 'Q-PaDgFZITnNU3P0' },
+          { type: 'message', role: 'assistant', content: [{ type: 'output_text', text: 'Acknowledged.' }] },
+        ])
+        await route.fulfill({ status: 200, contentType: 'application/json', body: replay ? MUSE_RESP({ text: 'ORBIT' }) : first })
+        return
+      }
+      if (body.tools?.some((t: any) => t.strict === true)) {
+        await route.fulfill({ status: 200, contentType: 'application/json', body: withUsage([fn('get_weather', '{"city":"Shanghai","date":"2026-10-20"}')]) })
+        return
+      }
+      if (body.parallel_tool_calls === false) {
+        await route.fulfill({ status: 200, contentType: 'application/json', body: withUsage([fn('get_weather', '{"city":"Shanghai"}')]) })
+        return
+      }
+      if (Array.isArray(body.tools) && body.tools.length >= 2) {
+        await route.fulfill({ status: 200, contentType: 'application/json', body: withUsage([
+          fn('get_weather', '{"city":"Shanghai"}'),
+          fn('query_order', '{"order_id":"SN1"}'),
+        ]) })
+        return
+      }
       await route.fulfill({ status: 200, contentType: 'application/json', body: MUSE_RESP() })
     })
 
@@ -3518,14 +3463,23 @@ test.describe('模型探测 · Muse Wonder 规格', () => {
     await inputByLabel(page, '模型名称').fill('muse-wonder-1.0')
     await page.getByRole('button', { name: '全不选' }).click()
     await check(page, 'responses-basic')
-    await check(page, 'spec-muse-responses-store-chain')
-    await start(page, 'e2e-muse-存储链')
+    for (const id of ['spec-muse-responses-parallel-tools', 'spec-muse-responses-parallel-off', 'spec-muse-responses-strict-tool', 'spec-muse-responses-audio', 'spec-muse-responses-video', 'spec-muse-responses-encrypted-replay']) {
+      await check(page, id)
+    }
+    await start(page, 'e2e-muse-能力')
 
-    const tile = tileOf(page, 'spec-muse-responses-store-chain@responses')
-    await expect(tile.locator('.probe-status-text')).toHaveText('通过', { timeout: 10000 })
-    await expect(tile).toContainText('再取回 404')
-    expect(calls.filter(c => !c.endsWith('/v1/responses') || !c.startsWith('POST')).slice(0, 3)).toEqual([
-      `GET /v1/responses/${id}`, `DELETE /v1/responses/${id}`, `GET /v1/responses/${id}`,
-    ])
+    await expect(tileOf(page, 'spec-muse-responses-parallel-tools@responses').locator('.probe-status-text')).toHaveText('通过', { timeout: 15000 })
+    await expect(tileOf(page, 'spec-muse-responses-parallel-off@responses').locator('.probe-status-text')).toHaveText('通过')
+    await expect(tileOf(page, 'spec-muse-responses-strict-tool@responses').locator('.probe-status-text')).toHaveText('通过')
+    const audio = tileOf(page, 'spec-muse-responses-audio@responses')
+    await expect(audio.locator('.probe-status-text')).toHaveText('失败')
+    await expect(audio).toContainText('没有收到音频')
+    const video = tileOf(page, 'spec-muse-responses-video@responses')
+    await expect(video.locator('.probe-status-text')).toHaveText('通过')
+    await expect(video).toContainText('识别出画面为蓝色')
+    const replay = tileOf(page, 'spec-muse-responses-encrypted-replay@responses')
+    await expect(replay.locator('.probe-status-text')).toHaveText('通过')
+    await expect(replay).toContainText('ORBIT')
   })
+
 })

@@ -258,7 +258,7 @@ const msgOk = (content: unknown[], extra: Record<string, unknown> = {}, usage: R
 const BLOB = 'Q-PaDgFZITnNU3P0nXaBgmPJJg24xjrHw4hNmUlfF6huZdPBg8i8JtMwCDE1'
 
 describe('scoreMuseSpecReply：四种方向', () => {
-  const reject = museSpecCaseById('spec-muse-chat-n2')!
+  const reject = museSpecCaseById('spec-muse-chat-effort-none')!
   const accept = { expect: 'accept', name: '接受类', oracles: (r: MuseSpecReply) => [oracleMuseUsageFields('chat', r.data)] } as const
   const reply = (status: number, data: unknown): MuseSpecReply => ({
     transport: 'http', status, ok: status < 300, data, text: status < 300 ? probeProtocolOf('chat').textOf(data) : '',
@@ -266,25 +266,27 @@ describe('scoreMuseSpecReply：四种方向', () => {
   })
 
   it('reject：4xx 通过；额度用尽的 400 失败；鉴权、限流、5xx、超时异常', () => {
-    const ok = scoreMuseSpecReply(reject, reply(400, err("Unsupported parameter: 'n'")), ctx)
+    const ok = scoreMuseSpecReply(reject, reply(400, err("Unsupported parameter: 'reasoning_effort'")), ctx)
     assert.equal(ok.status, 'passed')
-    assert.match(ok.detail, /n=2 返回 HTTP 400：Unsupported parameter: 'n'/)
+    assert.match(ok.detail, /reasoning_effort=none 返回 HTTP 400：Unsupported parameter: 'reasoning_effort'/)
     assert.equal(scoreMuseSpecReply(reject, reply(400, err(LIMIT)), ctx).status, 'failed')
     for (const s of [401, 403, 408, 429, 500, 503]) assert.equal(scoreMuseSpecReply(reject, reply(s, err('x')), ctx).status, 'abnormal', String(s))
     assert.equal(scoreMuseSpecReply(reject, { ...reply(200, null), transport: 'timeout', status: null, ok: false }, ctx).status, 'abnormal')
   })
 
-  it('reject 2xx：被丢弃记失败，真的生效记异常，看不出来记失败「无法判断」', () => {
-    const dropped = scoreMuseSpecReply(reject, reply(200, chatOk('OK')), ctx)
+  it('reject 2xx：被丢弃记失败，真的生效记异常，看不出来记依据不足', () => {
+    const droppedSpec = { expect: 'reject' as const, what: 'n=2', name: 'n', effect: () => ({ tookEffect: false as const, detail: '只返回 1 个 choice' }) }
+    const dropped = scoreMuseSpecReply(droppedSpec, reply(200, chatOk('OK')), ctx)
     assert.equal(dropped.status, 'failed')
     assert.match(dropped.detail, /静默丢弃（只返回 1 个 choice）/)
-    const two = chatOk('OK')
-    two.choices.push({ ...two.choices[0], index: 1 })
-    const took = scoreMuseSpecReply(reject, reply(200, two), ctx)
+    const tookSpec = { expect: 'reject' as const, what: 'n=2', name: 'n', effect: () => ({ tookEffect: true as const, detail: '返回了 2 个 choices' }) }
+    const took = scoreMuseSpecReply(tookSpec, reply(200, chatOk('OK')), ctx)
     assert.equal(took.status, 'abnormal')
     assert.match(took.detail, /n=2 生效了（返回了 2 个 choices）.*背后可能不是 muse-wonder-1\.0/)
-    const unknown = scoreMuseSpecReply(museSpecCaseById('spec-muse-chat-modalities')!, reply(200, chatOk('OK')), ctx)
-    assert.equal(unknown.status, 'failed')
+    const unknownSpec = { expect: 'reject' as const, what: 'modalities', name: 'modalities', effect: () => ({ tookEffect: null, detail: '响应里看不出 modalities' }) }
+    const unknown = scoreMuseSpecReply(unknownSpec, reply(200, chatOk('OK')), ctx)
+    assert.equal(unknown.status, 'inconclusive')
+    assert.match(unknown.detail, /^依据不足：/)
     assert.match(unknown.detail, /无法判断是否生效/)
   })
 
@@ -327,116 +329,44 @@ describe('规格用例清单', () => {
     assert.equal(new Set(ids).size, ids.length)
     assert.ok(ids.every(id => id.startsWith('spec-muse-')))
     const count = (topic: string) => MUSE_SPEC_CASES.filter(c => c.topic === topic).length
+    assert.equal(MUSE_SPEC_CASES.length, 19)
     assert.deepEqual(
       Object.fromEntries(Object.keys(MUSE_SPEC_GROUPS).map(t => [t, count(t)])),
-      { reasoning: 8, tools: 13, search: 2, multimodal: 8, state: 5, api: 8, constraint: 42, identity: 4 },
+      { reasoning: 7, tools: 3, multimodal: 5, identity: 4 },
     )
     assert.equal(MUSE_SPEC_CASES.filter(c => c.expect === 'conflict').length, 0)
-    assert.deepEqual(MUSE_SPEC_CASES.filter(c => c.expect === 'inferred').map(c => c.id).sort(), [
-      'spec-muse-anthropic-pdf', 'spec-muse-anthropic-tool-search', 'spec-muse-anthropic-video', 'spec-muse-chat-video',
-    ])
+    assert.equal(MUSE_SPEC_CASES.filter(c => c.expect === 'inferred').length, 0)
     for (const c of MUSE_SPEC_CASES) {
       assert.equal(c.group, MUSE_SPEC_GROUPS[c.topic], c.id)
       assert.ok(c.build || c.run, c.id)
       if (c.expect === 'reject') assert.ok(c.what, c.id)
-      if (c.expect === 'inferred') assert.ok(c.note, c.id)
       if (c.topic !== 'identity') assert.match(c.explain, /dev\.meta\.ai|API 参考/, c.id)
     }
-    // 约束组全是 reject；被拒类不带 oracle
-    assert.ok(MUSE_SPEC_CASES.filter(c => c.topic === 'constraint').every(c => c.expect === 'reject'))
-    assert.ok(MUSE_SPEC_CASES.filter(c => c.expect === 'reject').every(c => !c.oracles))
+    // 留下的拒绝类都在推理组，不带 oracle
+    const rejected = MUSE_SPEC_CASES.filter(c => c.expect === 'reject')
+    assert.equal(rejected.length, 3)
+    assert.ok(rejected.every(c => c.topic === 'reasoning' && !c.oracles))
   })
 
-  it('官方约束的请求体按文档逐条钉死', () => {
+  it('留下的请求体：拒绝类额度 2048，工具只跑 Responses', () => {
     setProbeAnthropicCapField('max_tokens')
     const body = (id: string) => museSpecCaseById(id)!.build!('muse-wonder-1.0', ctx)
-    assert.deepEqual(body('spec-muse-chat-stop').stop, ['5'])
-    assert.match(body('spec-muse-chat-stop').messages[0].content, /1 to 9/)
-    assert.equal(body('spec-muse-chat-n2').n, 2)
-    assert.equal(body('spec-muse-chat-logprobs').logprobs, true)
-    assert.deepEqual(body('spec-muse-chat-web-search-options').web_search_options, {})
-    assert.deepEqual(body('spec-muse-chat-modalities').modalities, ['text'])
-    const maxOut = body('spec-muse-chat-max-output-tokens')
-    assert.equal(maxOut.max_output_tokens, 16)
-    assert.equal(maxOut.max_completion_tokens, undefined)
-    assert.deepEqual(body('spec-muse-chat-audio-output').audio, { voice: 'alloy', format: 'wav' })
-    assert.ok(body('spec-muse-chat-logit-bias').logit_bias)
-    assert.equal(body('spec-muse-chat-prediction').prediction.type, 'content')
-    assert.equal(body('spec-muse-chat-verbosity').verbosity, 'low')
-    assert.equal(body('spec-muse-chat-text-format').text.format.type, 'json_schema')
-    assert.equal(body('spec-muse-chat-top-p-zero').top_p, 0)
-    assert.equal(body('spec-muse-chat-custom-tool').tools[0].type, 'custom')
-    assert.equal(body('spec-muse-chat-strict-tool-violation').tools[0].function.strict, true)
-    assert.equal(body('spec-muse-chat-strict-tool-violation').tools[0].function.parameters.additionalProperties, undefined)
-    assert.equal(body('spec-muse-chat-strict-schema-violation').response_format.json_schema.strict, true)
-    assert.ok(JSON.stringify(body('spec-muse-chat-recursive-schema').response_format).includes('#/$defs/node'))
-    assert.equal(body('spec-muse-chat-too-many-images').messages[0].content.filter((p: any) => p.type === 'image_url').length, 51)
-    assert.equal(body('spec-muse-chat-tool-required').tool_choice, 'required')
-    assert.equal(body('spec-muse-chat-tool-none').tool_choice, 'none')
-    assert.deepEqual(body('spec-muse-chat-tool-named').tool_choice, { type: 'function', function: { name: 'get_weather' } })
-    // 生效判据要靠「与工具无关」的提示才看得出来
-    assert.equal(body('spec-muse-chat-tool-required').messages[0].content, 'Reply with exactly: OK')
-    assert.match(body('spec-muse-chat-tool-none').messages[0].content, /must call the get_weather/)
-    assert.equal(body('spec-muse-responses-tool-required').tool_choice, 'required')
-    assert.equal(body('spec-muse-responses-tool-none').tool_choice, 'none')
-    assert.deepEqual(body('spec-muse-responses-tool-named').tool_choice, { type: 'function', name: 'get_weather' })
-    assert.equal(body('spec-muse-responses-truncation').truncation, 'auto')
-    assert.equal(body('spec-muse-responses-background-stream').background, true)
-    assert.equal(body('spec-muse-responses-background-stream').stream, true)
-    assert.deepEqual(body('spec-muse-responses-logprobs').include, ['message.output_text.logprobs'])
-    assert.deepEqual(body('spec-muse-responses-include-unknown').include, ['probe.unknown_value'])
-    assert.equal(body('spec-muse-responses-max-output-min').max_output_tokens, 15)
-    assert.equal(body('spec-muse-responses-reserved-tool-name').tools[0].name, 'web_search')
-    assert.deepEqual(body('spec-muse-anthropic-stop-sequences').stop_sequences, ['5'])
-    assert.equal(body('spec-muse-anthropic-top-k').top_k, 5)
-    assert.equal(body('spec-muse-anthropic-unknown-field').probe_unknown_field, true)
-    assert.deepEqual(body('spec-muse-anthropic-tool-named').tool_choice, { type: 'tool', name: 'get_weather' })
-    assert.deepEqual(body('spec-muse-anthropic-web-search-max-uses').tools, [{ type: 'web_search', max_uses: 1 }])
-    assert.deepEqual(body('spec-muse-anthropic-web-search-allowed-domains').tools, [{ type: 'web_search', allowed_domains: ['reuters.com'] }])
-    assert.deepEqual(body('spec-muse-anthropic-web-search-blocked-domains').tools, [{ type: 'web_search', blocked_domains: ['example.com'] }])
-    assert.equal(body('spec-muse-anthropic-container').container, 'probe-container')
-    assert.equal(body('spec-muse-anthropic-inference-geo').inference_geo, 'us')
-    assert.equal(body('spec-muse-anthropic-service-tier').service_tier, 'priority')
-    assert.equal(body('spec-muse-anthropic-system-image').system[0].type, 'image')
-    assert.deepEqual(body('spec-muse-anthropic-thinking-budget-low').thinking, { type: 'enabled', budget_tokens: 512 })
     assert.equal(body('spec-muse-chat-effort-none').reasoning_effort, 'none')
+    assert.equal(body('spec-muse-chat-effort-none').max_completion_tokens, PROBE_CLAUDE5_CAP)
     assert.deepEqual(body('spec-muse-responses-effort-none').reasoning, { effort: 'none' })
+    assert.equal(body('spec-muse-responses-effort-none').max_output_tokens, PROBE_CLAUDE5_CAP)
     assert.deepEqual(body('spec-muse-anthropic-thinking-disabled').thinking, { type: 'disabled' })
-    // 额度统一 2048（Chat 用 max_completion_tokens、Responses 用 max_output_tokens、Messages 用 max_tokens）
-    assert.equal(body('spec-muse-chat-n2').max_completion_tokens, PROBE_CLAUDE5_CAP)
-    assert.equal(body('spec-muse-responses-truncation').max_output_tokens, PROBE_CLAUDE5_CAP)
-    assert.equal(body('spec-muse-anthropic-top-k').max_tokens, PROBE_CLAUDE5_CAP)
-  })
-
-  it('官方支持项的请求体', () => {
-    const body = (id: string) => museSpecCaseById(id)!.build!('meta/muse-wonder', ctx)
-    assert.equal(body('spec-muse-chat-parallel-tools').tools.length, 2)
-    assert.equal(body('spec-muse-chat-parallel-tools').parallel_tool_calls, undefined)
-    assert.equal(body('spec-muse-chat-parallel-off').parallel_tool_calls, false)
+    assert.equal(body('spec-muse-anthropic-thinking-disabled').max_tokens, PROBE_CLAUDE5_CAP)
+    const parallel = body('spec-muse-responses-parallel-tools')
+    assert.equal(parallel.model, 'muse-wonder-1.0')
+    assert.equal(parallel.tools.length, 2)
+    assert.equal(parallel.parallel_tool_calls, undefined)
     assert.equal(body('spec-muse-responses-parallel-off').parallel_tool_calls, false)
-    const strict = body('spec-muse-chat-strict-tool').tools[0].function
+    const strict = body('spec-muse-responses-strict-tool').tools[0]
+    assert.equal(strict.name, 'get_weather')
     assert.equal(strict.strict, true)
     assert.equal(strict.parameters.additionalProperties, false)
     assert.deepEqual(strict.parameters.required, ['city', 'date'])
-    assert.equal(body('spec-muse-responses-strict-tool').tools[0].strict, true)
-    assert.deepEqual(body('spec-muse-responses-custom-tool').tools[0], { type: 'custom', name: 'echo_text', description: 'Echo the given text back verbatim. Input is free-form text.' })
-    const ts = body('spec-muse-responses-tool-search').tools
-    assert.equal(ts[0].defer_loading, true)
-    assert.deepEqual(ts[1], { type: 'tool_search' })
-    assert.deepEqual(body('spec-muse-anthropic-tool-choice-any').tool_choice, { type: 'any' })
-    assert.deepEqual(body('spec-muse-anthropic-tool-choice-none').tool_choice, { type: 'none' })
-    assert.deepEqual(body('spec-muse-anthropic-disable-parallel').tool_choice, { type: 'auto', disable_parallel_tool_use: true })
-    const cu = body('spec-muse-responses-computer-use')
-    assert.deepEqual(cu.tools, [{ type: 'computer' }])
-    assert.match(cu.input[0].content[1].image_url, /^data:image\/png;base64,/)
-    const ws = body('spec-muse-responses-web-search-options')
-    assert.deepEqual(ws.tools[0], { type: 'web_search', search_context_size: 'low', user_location: { type: 'approximate', country: 'US' } })
-    assert.deepEqual(ws.include, ['web_search_call.results'])
-    assert.deepEqual(body('spec-muse-anthropic-web-search-location').tools[0].user_location, { type: 'approximate', country: 'US' })
-    assert.equal(body('spec-muse-chat-cache-retention').prompt_cache_retention, '24h')
-    assert.equal(body('spec-muse-responses-cache-retention').prompt_cache_retention, '24h')
-    // 请求里的模型名保持用户输入原文
-    assert.equal(body('spec-muse-chat-n2').model, 'meta/muse-wonder')
   })
 
   it('多模态素材跟着本次 ctx 生成，写进各协议字段；提示允许回 NONE', () => {
@@ -444,9 +374,7 @@ describe('规格用例清单', () => {
       const b = (id: string) => museSpecCaseById(id)!.build!('muse-wonder-1.0', c)
       const chatPdf = b('spec-muse-chat-pdf').messages[0].content[1].file.file_data
       const respPdf = b('spec-muse-responses-pdf').input[0].content[1].file_data
-      const msgPdf = b('spec-muse-anthropic-pdf').messages[0].content[0]
-      assert.deepEqual(Object.keys(msgPdf.source), ['type', 'media_type', 'data'])
-      for (const pdf of [fromDataUrl(chatPdf), fromDataUrl(respPdf), Buffer.from(msgPdf.source.data, 'base64')]) {
+      for (const pdf of [fromDataUrl(chatPdf), fromDataUrl(respPdf)]) {
         assert.ok(pdf.toString('latin1').includes(`(The code is ${c.code})`), c.code)
       }
       for (const wav of [b('spec-muse-chat-audio').messages[0].content[1].input_audio.data, b('spec-muse-responses-audio').input[0].content[1].input_audio.data]) {
@@ -455,14 +383,11 @@ describe('规格用例清单', () => {
         assert.equal(countBeeps(Buffer.from(wav, 'base64')), c.beeps)
       }
       assert.equal(b('spec-muse-responses-video').input[0].content[1].video_url, `data:video/mp4;base64,${MUSE_BLUE_MP4_B64}`)
-      assert.deepEqual(b('spec-muse-chat-video').messages[0].content[1], { type: 'video_url', video_url: { url: `data:video/mp4;base64,${MUSE_BLUE_MP4_B64}` } })
-      assert.equal(b('spec-muse-anthropic-video').messages[0].content[0].source.data, MUSE_BLUE_MP4_B64)
     }
     const b = (id: string) => museSpecCaseById(id)!.build!('muse-wonder-1.0', ctx)
     // 音频、视频额度 4096（官方提示低于 4000 可能回空）
     assert.equal(b('spec-muse-chat-audio').max_completion_tokens, 4096)
     assert.equal(b('spec-muse-responses-video').max_output_tokens, 4096)
-    assert.equal(b('spec-muse-anthropic-video').max_tokens, 4096)
     for (const p of [MUSE_PDF_PROMPT, MUSE_AUDIO_PROMPT, MUSE_VIDEO_PROMPT]) assert.match(p, /reply NONE/)
   })
 
@@ -487,71 +412,16 @@ describe('约束用例的「生效」判据', () => {
     assert.match(dropped.detail, /静默丢弃（仍在推理，reasoning_tokens=5）/)
     assert.equal((await one('spec-muse-responses-effort-none', respOk('OK'))).status, 'failed')
     const noField = await one('spec-muse-anthropic-thinking-disabled', msgOk([{ type: 'text', text: 'OK' }], {}, { output_tokens_details: undefined }))
-    assert.equal(noField.status, 'failed')
+    assert.equal(noField.status, 'inconclusive')
+    assert.match(noField.detail, /^依据不足：/)
     assert.match(noField.detail, /无法判断是否生效/)
     // OpenRouter 自己拦下 none 的 400 也算拒绝
     const rejected = await one('spec-muse-chat-effort-none', { error: { message: 'Reasoning is mandatory for this endpoint and cannot be disabled.', code: 400 } }, 400)
     assert.equal(rejected.status, 'passed')
   })
-
-  it('stop / stop_sequences：停在 5 之前是生效，数到 9 是丢弃', async () => {
-    assert.equal((await one('spec-muse-chat-stop', chatOk('1 2 3 4 '))).status, 'abnormal')
-    assert.equal((await one('spec-muse-chat-stop', chatOk('1 2 3 4 5 6 7 8 9'))).status, 'failed')
-    assert.match((await one('spec-muse-chat-stop', chatOk(''))).detail, /无法判断是否生效/)
-    assert.equal((await one('spec-muse-anthropic-stop-sequences', msgOk([{ type: 'text', text: '1 2 3 4 ' }], { stop_reason: 'stop_sequence' }))).status, 'abnormal')
-    assert.equal((await one('spec-muse-anthropic-stop-sequences', msgOk([{ type: 'text', text: '1 2 3 4 5 6 7 8 9' }]))).status, 'failed')
-  })
-
-  it('tool_choice：required / 指定在无关提示下调用了工具是生效；none 在必须调用时没调用是生效', async () => {
-    const call = { tool_calls: [{ id: 'c1', type: 'function', function: { name: 'get_weather', arguments: '{"city":"Shanghai"}' } }] }
-    assert.equal((await one('spec-muse-chat-tool-required', chatOk('', call))).status, 'abnormal')
-    assert.equal((await one('spec-muse-chat-tool-required', chatOk('OK'))).status, 'failed')
-    assert.equal((await one('spec-muse-chat-tool-none', chatOk('Sunny'))).status, 'abnormal')
-    assert.equal((await one('spec-muse-chat-tool-none', chatOk('', call))).status, 'failed')
-    const fc = respOk('', {}, [{ type: 'function_call', name: 'get_weather', arguments: '{"city":"Shanghai"}' }])
-    assert.equal((await one('spec-muse-responses-tool-named', fc)).status, 'abnormal')
-    assert.equal((await one('spec-muse-anthropic-tool-named', msgOk([{ type: 'tool_use', id: 't', name: 'get_weather', input: {} }]))).status, 'abnormal')
-    // Meta 原句经 OpenRouter 透传：400 记通过
-    const raw = { error: { message: 'Provider returned error', code: 400, metadata: { raw: JSON.stringify({ error: { message: 'only `"auto"` is supported for `tool_choice`.' } }), provider_name: 'Meta' } } }
-    const out = await one('spec-muse-chat-tool-required', raw, 400)
-    assert.equal(out.status, 'passed')
-    assert.match(out.detail, /only `"auto"` is supported/)
-  })
-
-  it('n、logprobs、web_search_options、max_output_tokens、audio、text.format', async () => {
-    assert.equal((await one('spec-muse-chat-logprobs', chatOk('OK'))).status, 'failed')
-    const lp = chatOk('OK')
-    ;(lp.choices[0] as any).logprobs = { content: [{ token: 'OK', logprob: -0.01 }] }
-    assert.equal((await one('spec-muse-chat-logprobs', lp)).status, 'abnormal')
-    assert.equal((await one('spec-muse-chat-web-search-options', chatOk('News', { annotations: [{ type: 'url_citation', url_citation: { url: 'https://x' } }] }))).status, 'abnormal')
-    assert.equal((await one('spec-muse-chat-web-search-options', chatOk('News'))).status, 'failed')
-    const cut = chatOk('1 2 3')
-    cut.choices[0].finish_reason = 'length'
-    assert.equal((await one('spec-muse-chat-max-output-tokens', cut)).status, 'abnormal')
-    assert.equal((await one('spec-muse-chat-audio-output', chatOk('OK', { audio: { id: 'a', data: 'UklG' } }))).status, 'abnormal')
-    assert.equal((await one('spec-muse-chat-text-format', chatOk('{"ok":true}'))).status, 'abnormal')
-    assert.equal((await one('spec-muse-chat-text-format', chatOk('OK'))).status, 'failed')
-    const rlp = respOk('OK')
-    ;(rlp.output[0] as any).content[0].logprobs = [{ token: 'OK', logprob: -0.1 }]
-    assert.equal((await one('spec-muse-responses-logprobs', rlp)).status, 'abnormal')
-  })
 })
 
 describe('执行引擎：多步用例', () => {
-  it('对照：对照不通记依据不足且不发正式请求；对照通过后 400 记通过', async () => {
-    const blocked = harness([{ status: 400, data: { error: { type: '<nil>', message: 'openai_error' } } }])
-    const out = await blocked.run('spec-muse-anthropic-web-search-max-uses')
-    assert.equal(out.status, 'inconclusive')
-    assert.equal(blocked.sent.length, 1)
-    assert.equal(blocked.sent[0].label, '对照')
-    assert.deepEqual(blocked.sent[0].body!.tools, [{ type: 'web_search' }])
-    const ok = harness([{ status: 200, data: msgOk([{ type: 'server_tool_use', name: 'web_search', input: {} }]) }, { status: 400, data: err('max_uses is not supported') }])
-    const passed = await ok.run('spec-muse-anthropic-web-search-max-uses')
-    assert.equal(passed.status, 'passed')
-    assert.equal(passed.decisive, 1)
-    assert.equal((await harness([{ status: 503, data: err('down') }]).run('spec-muse-anthropic-web-search-allowed-domains')).status, 'abnormal')
-  })
-
   it('推理全档位：默认 + 6 档，每一发都要推理 token > 0 与官方用量字段', async () => {
     const h = harness(Array.from({ length: 7 }, () => ({ status: 200, data: chatOk('OK') })))
     const out = await h.run('spec-muse-chat-effort-levels')
@@ -576,11 +446,20 @@ describe('执行引擎：多步用例', () => {
     assert.match(failed.detail, /官方支持的 low 被拒（HTTP 400）/)
     assert.equal(stop.sent.length, 3)
     assert.equal(failed.decisive, 2)
-    // 推理 token 为 0、或缺用量字段，都记失败
+    // 推理 token 为 0 记失败；官方用量字段缺失记依据不足
     const zero = harness([{ status: 200, data: chatOk('OK', {}, { completion_tokens_details: { reasoning_tokens: 0 } }) }])
-    assert.match((await zero.run('spec-muse-chat-effort-levels')).detail, /默认：.*=0，推理没有发生/)
+    const zeroOut = await zero.run('spec-muse-chat-effort-levels')
+    assert.equal(zeroOut.status, 'failed')
+    assert.match(zeroOut.detail, /默认：.*=0，推理没有发生/)
+    assert.doesNotMatch(zeroOut.detail, /依据不足/)
     const noUsage = harness([{ status: 200, data: msgOk([{ type: 'text', text: 'OK' }], {}, { output_tokens_details: undefined }) }])
-    assert.match((await noUsage.run('spec-muse-anthropic-effort-levels')).detail, /thinking_tokens/)
+    const noOut = await noUsage.run('spec-muse-anthropic-effort-levels')
+    assert.equal(noOut.status, 'inconclusive')
+    assert.match(noOut.detail, /依据不足：默认：.*thinking_tokens/)
+    const missingCache = harness([{ status: 200, data: chatOk('OK', {}, { prompt_tokens_details: undefined }) }])
+    const cacheOut = await missingCache.run('spec-muse-chat-effort-levels')
+    assert.equal(cacheOut.status, 'inconclusive')
+    assert.match(cacheOut.detail, /依据不足：默认：.*cached_tokens/)
   })
 
   it('加密推理回放：第一跳要有 encrypted_content，第二跳原样回放并答出口令', async () => {
@@ -597,169 +476,44 @@ describe('执行引擎：多步用例', () => {
     assert.match((await none.run('spec-muse-responses-encrypted-replay')).detail, /没有 encrypted_content/)
   })
 
-  it('存储链：store → 续接 → GET → DELETE → GET 404', async () => {
-    const id = 'resp_6ad0c901a175184c0647496d'
-    const h = harness([
-      { status: 200, data: respOk('Got it.') },
-      { status: 200, data: respOk('ORBIT') },
-      { status: 200, data: respOk('Got it.') },
-      { status: 200, data: { id, object: 'response', deleted: true } },
-      { status: 404, data: err('not found') },
-    ])
-    const out = await h.run('spec-muse-responses-store-chain')
-    assert.equal(out.status, 'passed', out.detail)
-    assert.deepEqual(h.sent.map(r => r.method ?? 'POST'), ['POST', 'POST', 'GET', 'DELETE', 'GET'])
-    assert.deepEqual(h.sent.map(r => r.path ?? ''), ['', '', `/${id}`, `/${id}`, `/${id}`])
-    assert.equal(h.sent[0].body!.store, true)
-    assert.equal(h.sent[1].body!.previous_response_id, id)
-    assert.equal(out.usageExempt, true)
-    // 删除后还能取回：失败
-    const stale = harness([
-      { status: 200, data: respOk('Got it.') }, { status: 200, data: respOk('ORBIT') }, { status: 200, data: respOk('x') },
-      { status: 200, data: { deleted: true } }, { status: 200, data: respOk('x') },
-    ])
-    assert.match((await stale.run('spec-muse-responses-store-chain')).detail, /删除后仍能取回/)
-    // 取回接口不存在（网关不支持）：失败并停在这一步
-    const noGet = harness([{ status: 200, data: respOk('Got it.') }, { status: 200, data: respOk('ORBIT') }, { status: 404, data: err('Invalid URL') }])
-    const failed = await noGet.run('spec-muse-responses-store-chain')
-    assert.equal(failed.status, 'failed')
-    assert.equal(noGet.sent.length, 3)
-  })
-
-  it('background：创建后轮询到 completed；取消：2xx 通过，4xx 且已完成记依据不足', async () => {
-    const id = 'resp_bg1'
-    const bg = harness([
-      { status: 200, data: { id, object: 'response', status: 'queued', output: [] } },
-      { status: 200, data: { id, object: 'response', status: 'in_progress', output: [] } },
-      { status: 200, data: respOk('OK', { id }) },
-    ])
-    const out = await bg.run('spec-muse-responses-background')
-    assert.equal(out.status, 'passed', out.detail)
-    assert.equal(bg.sent[0].body!.background, true)
-    assert.deepEqual(bg.sent.slice(1).map(r => [r.method, r.path]), [['GET', `/${id}`], ['GET', `/${id}`]])
-    assert.deepEqual(bg.slept, [2000, 2000])
-    // 网关忽略 background、直接回 completed：也算通过，但这一发产生了 Token，不能免用量闸门
-    const immediate = await harness([{ status: 200, data: respOk('OK') }]).run('spec-muse-responses-background')
-    assert.equal(immediate.status, 'passed')
-    assert.equal(immediate.usageExempt, undefined)
-    // 轮询完成的那一发是 GET，免闸门
-    assert.equal(out.usageExempt, true)
-
-    const cancel = harness([{ status: 200, data: { id, status: 'in_progress', output: [] } }, { status: 200, data: { id, status: 'cancelled', output: [] } }])
-    const c1 = await cancel.run('spec-muse-responses-cancel')
-    assert.equal(c1.status, 'passed')
-    assert.equal(cancel.sent[1].path, `/${id}/cancel`)
-    assert.equal(cancel.sent[1].method ?? 'POST', 'POST')
-    const late = harness([{ status: 200, data: { id, status: 'in_progress', output: [] } }, { status: 400, data: err('cannot cancel') }, { status: 200, data: respOk('essay', { id }) }])
-    assert.equal((await late.run('spec-muse-responses-cancel')).status, 'inconclusive')
-    const missing = harness([{ status: 200, data: { id, status: 'in_progress', output: [] } }, { status: 404, data: err('no route') }, { status: 200, data: { id, status: 'in_progress' } }])
-    assert.equal((await missing.run('spec-muse-responses-cancel')).status, 'failed')
-  })
-
-  it('计数接口：与实际生成的 input_tokens 一致才通过', async () => {
-    const h = harness([{ status: 200, data: { object: 'response.input_tokens', input_tokens: 12 } }, { status: 200, data: respOk('OK') }])
-    const out = await h.run('spec-muse-responses-input-tokens')
-    assert.equal(out.status, 'passed', out.detail)
-    assert.equal(h.sent[0].path, '/input_tokens')
-    assert.deepEqual(h.sent[0].body, h.sent[1].body)
-    assert.equal(out.decisive, 1)
-    const off = harness([{ status: 200, data: { input_tokens: 30 } }, { status: 200, data: respOk('OK') }])
-    assert.match((await off.run('spec-muse-responses-input-tokens')).detail, /计数接口算出 30，实际生成 input_tokens 是 12/)
-    const gone = harness([{ status: 404, data: err('Not Found') }])
-    const g = await gone.run('spec-muse-anthropic-count-tokens')
-    assert.equal(g.status, 'failed')
-    assert.equal(gone.sent[0].path, '/count_tokens')
-    assert.equal(g.usageExempt, true)
-  })
-
-  it('错误格式：404 + model_not_found 通过；网关用 503 表示模型不存在记失败；401 记异常', async () => {
-    const good = { error: { message: 'The model `probe-no-such-model` does not exist or is not available', type: 'invalid_request_error', param: null, code: 'model_not_found' } }
-    const h = harness([{ status: 404, data: good }])
-    assert.equal((await h.run('spec-muse-responses-error-model')).status, 'passed')
-    assert.equal(h.sent[0].body!.model, 'probe-no-such-model')
-    const gw = await harness([{ status: 503, data: { error: { message: '分组 default 下模型无可用渠道', type: 'new_api_error' } } }]).run('spec-muse-chat-error-model')
-    assert.equal(gw.status, 'failed')
-    assert.match(gw.detail, /HTTP 503，官方是 404/)
-    assert.equal((await harness([{ status: 401, data: err('Unauthorized') }]).run('spec-muse-chat-error-model')).status, 'abnormal')
-    const param = await harness([{ status: 400, data: { error: { message: '`top_p`: The number must be `<= 1.0`.', type: 'invalid_request_error', param: 'top_p', code: null } } }]).run('spec-muse-anthropic-error-param')
-    assert.equal(param.status, 'passed')
-    const noParam = await harness([{ status: 400, data: err('bad top_p') }]).run('spec-muse-chat-error-param')
-    assert.match(noParam.detail, /error\.param 是 null，官方是 top_p/)
-  })
-
-  it('previous_response_id + 加密推理：对照拿不到 id 记依据不足，拿到后 400 通过', async () => {
-    assert.equal((await harness([{ status: 400, data: err('store not supported') }]).run('spec-muse-responses-prev-id-encrypted')).status, 'inconclusive')
-    const h = harness([{ status: 200, data: respOk('OK') }, { status: 400, data: err('cannot combine') }])
-    assert.equal((await h.run('spec-muse-responses-prev-id-encrypted')).status, 'passed')
-    assert.deepEqual(h.sent[1].body!.include, ['reasoning.encrypted_content'])
-    assert.equal(h.sent[1].body!.previous_response_id, 'resp_6ad0c901a175184c0647496d')
-  })
-
   it('超时、停止沿用通用规则', async () => {
-    assert.equal((await harness([{ transport: 'timeout' }]).run('spec-muse-chat-n2')).status, 'abnormal')
-    assert.equal((await harness([{ transport: 'stopped' }]).run('spec-muse-chat-n2')).status, 'skipped')
-    assert.equal((await harness([{ transport: 'network' }]).run('spec-muse-responses-store-chain')).status, 'abnormal')
+    assert.equal((await harness([{ transport: 'timeout' }]).run('spec-muse-chat-effort-none')).status, 'abnormal')
+    assert.equal((await harness([{ transport: 'stopped' }]).run('spec-muse-chat-effort-none')).status, 'skipped')
+    assert.equal((await harness([{ transport: 'network' }]).run('spec-muse-responses-encrypted-replay')).status, 'abnormal')
   })
 })
 
 describe('官方支持项的核对', () => {
   const one = async (id: string, data: unknown, status = 200) => harness([{ status, data }]).run(id)
-  const call = (name: string, i = 0) => ({ id: `c${i}`, type: 'function', function: { name, arguments: name === 'get_weather' ? '{"city":"Shanghai","date":"2026-10-20"}' : '{"order_id":"SN1"}' } })
+  const fc = (name: string, args: string) => ({ type: 'function_call', name, arguments: args })
+  const weather = fc('get_weather', '{"city":"Shanghai","date":"2026-10-20"}')
+  const order = fc('query_order', '{"order_id":"SN1"}')
 
-  it('并行工具：同一轮两个调用通过；关闭并行后恰好一个', async () => {
-    assert.equal((await one('spec-muse-chat-parallel-tools', chatOk('', { tool_calls: [call('get_weather'), call('query_order', 1)] }))).status, 'passed')
-    assert.equal((await one('spec-muse-chat-parallel-tools', chatOk('', { tool_calls: [call('get_weather')] }))).status, 'failed')
-    assert.equal((await one('spec-muse-chat-parallel-off', chatOk('', { tool_calls: [call('get_weather')] }))).status, 'passed')
-    assert.equal((await one('spec-muse-chat-parallel-off', chatOk('', { tool_calls: [call('get_weather'), call('query_order', 1)] }))).status, 'failed')
-    assert.equal((await one('spec-muse-anthropic-disable-parallel', msgOk([{ type: 'tool_use', id: 't', name: 'get_weather', input: {} }]))).status, 'passed')
+  it('Responses 并行工具：同一轮两个调用通过；关闭并行后恰好一个；strict 要 city 和 date', async () => {
+    assert.equal((await one('spec-muse-responses-parallel-tools', respOk('', {}, [weather, order]))).status, 'passed')
+    assert.equal((await one('spec-muse-responses-parallel-tools', respOk('', {}, [weather]))).status, 'failed')
+    assert.equal((await one('spec-muse-responses-parallel-off', respOk('', {}, [weather]))).status, 'passed')
+    assert.equal((await one('spec-muse-responses-parallel-off', respOk('', {}, [weather, order]))).status, 'failed')
+    assert.equal((await one('spec-muse-responses-strict-tool', respOk('', {}, [weather]))).status, 'passed')
+    assert.equal((await one('spec-muse-responses-strict-tool', respOk('', {}, [fc('get_weather', '{"city":"Shanghai"}')]))).status, 'failed')
   })
 
-  it('strict 函数、custom 工具、tool_search、tool_choice any / none、computer use', async () => {
-    assert.equal((await one('spec-muse-chat-strict-tool', chatOk('', { tool_calls: [call('get_weather')] }))).status, 'passed')
-    assert.equal((await one('spec-muse-responses-custom-tool', respOk('', {}, [{ type: 'custom_tool_call', name: 'echo_text', input: 'hello muse' }]))).status, 'passed')
-    assert.equal((await one('spec-muse-responses-tool-search', respOk('', {}, [{ type: 'tool_search_call', paths: ['list_open_orders'] }]))).status, 'passed')
-    assert.equal((await one('spec-muse-responses-tool-search', respOk('No tools.'))).status, 'failed')
-    // Messages 的 tool_search 写法是推断的：失败只记依据不足
-    assert.equal((await one('spec-muse-anthropic-tool-search', msgOk([{ type: 'text', text: 'none' }]))).status, 'inconclusive')
-    assert.equal((await one('spec-muse-anthropic-tool-search', msgOk([{ type: 'tool_use', id: 't', name: 'list_open_orders', input: {} }]))).status, 'passed')
-    assert.equal((await one('spec-muse-anthropic-tool-choice-any', msgOk([{ type: 'tool_use', id: 't', name: 'get_weather', input: {} }]))).status, 'passed')
-    assert.equal((await one('spec-muse-anthropic-tool-choice-any', msgOk([{ type: 'text', text: 'OK' }]))).status, 'failed')
-    assert.equal((await one('spec-muse-anthropic-tool-choice-none', msgOk([{ type: 'text', text: 'Sunny' }]))).status, 'passed')
-    assert.equal((await one('spec-muse-responses-computer-use', respOk('', {}, [{ type: 'computer_call', call_id: 'c', actions: [{ type: 'click', x: 160, y: 130 }] }]))).status, 'passed')
-    assert.equal((await one('spec-muse-responses-computer-use', respOk('I would click Continue.'))).status, 'failed')
-  })
-
-  it('联网：要有原生证据；openrouter:web_search 这类中间层插件记失败', async () => {
-    const ws = respOk('Headline', {}, [{ type: 'web_search_call', status: 'completed', results: [{ type: 'result', url: 'https://x', title: 't', snippet: 's' }] }])
-    assert.equal((await one('spec-muse-responses-web-search-options', ws)).status, 'passed')
-    const noResults = respOk('Headline', {}, [{ type: 'web_search_call', status: 'completed' }])
-    assert.match((await one('spec-muse-responses-web-search-options', noResults)).detail, /没有 results/)
-    const proxy = msgOk([{ type: 'server_tool_use', id: 'ws_call_01', name: 'openrouter:web_search', input: { query: 'news' } }, { type: 'text', text: 'Headline' }])
-    const out = await one('spec-muse-anthropic-web-search-location', proxy)
-    assert.equal(out.status, 'failed')
-    assert.match(out.detail, /中间层插件 openrouter:web_search/)
-    assert.equal((await one('spec-muse-anthropic-web-search-location', msgOk([{ type: 'server_tool_use', name: 'web_search', input: {} }]))).status, 'passed')
+  it('museSearchEvidence 仍能认出中间层插件代搜', () => {
+    const proxy = { content: [{ type: 'server_tool_use', name: 'openrouter:web_search', input: {} }] }
     assert.deepEqual(museSearchEvidence('anthropic', proxy), { found: false, proxy: 'openrouter:web_search', results: 0 })
+    const native = { content: [{ type: 'server_tool_use', name: 'web_search', input: {} }, { type: 'web_search_tool_result' }] }
+    assert.equal(museSearchEvidence('anthropic', native).found, true)
   })
 
-  it('多模态：回 NONE 说明附件没送到，接受类记失败、推断写法记依据不足', async () => {
+  it('多模态：回 NONE 说明附件没送到，接受类记失败', async () => {
     const none = await one('spec-muse-responses-audio', respOk('NONE'))
     assert.equal(none.status, 'failed')
     assert.match(none.detail, /没有收到音频/)
     assert.equal((await one('spec-muse-chat-audio', chatOk(String(ctx.beeps)))).status, 'passed')
     assert.equal((await one('spec-muse-chat-pdf', chatOk(ctx.code))).status, 'passed')
-    assert.equal((await one('spec-muse-anthropic-pdf', msgOk([{ type: 'text', text: 'NONE' }]))).status, 'inconclusive')
-    assert.equal((await one('spec-muse-anthropic-video', msgOk([{ type: 'text', text: 'Blue' }]))).status, 'passed')
-    assert.equal((await one('spec-muse-chat-video', { error: { message: 'Invalid input' } }, 400)).status, 'inconclusive')
+    assert.equal((await one('spec-muse-responses-video', respOk('blue'))).status, 'passed')
     assert.equal(museSaidNone(' none. '), true)
     assert.equal(museSaidNone('none of the frames are red'), false)
-  })
-
-  it('thinking 变体两发都要 2xx', async () => {
-    const h = harness([{ status: 200, data: msgOk([{ type: 'text', text: 'OK' }]) }, { status: 200, data: msgOk([{ type: 'text', text: 'OK' }]) }])
-    assert.equal((await h.run('spec-muse-anthropic-thinking-variants')).status, 'passed')
-    assert.deepEqual(h.sent.map(r => r.body!.thinking), [{ type: 'adaptive', display: 'omitted' }, { type: 'enabled', budget_tokens: 1024 }])
-    assert.equal((await harness([{ status: 200, data: msgOk([]) }, { status: 400, data: err('budget') }]).run('spec-muse-anthropic-thinking-variants')).status, 'failed')
   })
 })
 

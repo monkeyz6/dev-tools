@@ -2020,6 +2020,21 @@ function ModelProbeTool() {
           if (r.ok) break
         }
       }
+      // 组合把两个上限字段都接受了，工具 / 结构化语义会原样带上。Muse 把它们当成互斥，只留 max_completion_tokens 再试一次。
+      if (!r.ok && format === 'chat' && id !== 'max_tokens' && body.max_tokens != null && body.max_completion_tokens != null && probeChatMaxTokenBlame(probeExtractError(r.data)) === 'conflict') {
+        if (stopRef.current) return probeResult('skipped', PROBE_STOP_DETAIL, { format, repro: accepted.repro })
+        const retryBody = proto.baseBody(cfg.model, id === 'tool_calling' ? PROBE_TOOL_FORCE_PROMPT : PROBE_SCHEMA_PROMPT)
+        if (id === 'tool_calling') {
+          proto.applyTools(retryBody, [PROBE_WEATHER_TOOL], museAutoTools ? 'auto' : { name: 'get_weather' })
+          const cap = claudeProbeCap(cfg.model)
+          if (cap !== PROBE_DEFAULT_CAP) proto.applyMaxTokens(retryBody, cap, ['max_completion_tokens'])
+        } else {
+          proto.applyStructuredOutput(retryBody)
+          proto.applyMaxTokens(retryBody, claudeSchemaCap(cfg.model), ['max_completion_tokens'])
+        }
+        const retryLog = probeNewLog(probeKey(id, format), `${probeParamLabel(id)} 语义（${PROBE_FORMAT_LABELS[format]}，去掉 max_tokens）`, format)
+        r = await probeRequest(retryLog, format, retryBody)
+      }
       let toolChoiceFallback = museAutoTools
       if (!r.ok && !museAutoTools && id === 'tool_calling' && probeToolChoiceShouldFallback(probeExtractError(r.data), cfg.model)) {
         if (stopRef.current) return probeResult('skipped', PROBE_STOP_DETAIL, { format, repro: accepted.repro })

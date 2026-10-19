@@ -70,34 +70,20 @@ describe('回放：渠道判断', () => {
   })
 })
 
-describe('回放：约束类按新口径重判', () => {
-  it('ainowork：n=2、logprobs、stop 被网关丢弃，记失败「静默丢弃」，不是异常', () => {
-    for (const key of ['spec-muse-chat-n2@chat', 'spec-muse-chat-logprobs@chat']) {
-      const out = rescore(ainowork, key)
-      assert.equal(out.status, 'failed', key)
-      assert.match(out.detail, /静默丢弃/, key)
-    }
-    // 旧 stop 用例的提示是 OK，回复里没有数字：看不出来
-    assert.match(rescore(ainowork, 'spec-muse-chat-stop@chat').detail, /无法判断是否生效/)
-  })
-
-  it('ainowork：effort=none 仍在推理（reasoning_tokens=5），thinking disabled 缺字段看不出来', () => {
+describe('回放：拒绝类按新口径重判', () => {
+  it('ainowork：effort=none 仍在推理（reasoning_tokens=5）记失败；thinking disabled 缺字段记依据不足', () => {
     const none = rescore(ainowork, 'spec-muse-chat-effort-none@chat')
     assert.equal(none.status, 'failed')
     assert.match(none.detail, /仍在推理，reasoning_tokens=5/)
     const disabled = rescore(ainowork, 'spec-muse-anthropic-thinking-disabled@anthropic')
-    assert.equal(disabled.status, 'failed')
+    assert.equal(disabled.status, 'inconclusive')
+    assert.match(disabled.detail, /依据不足：/)
     assert.match(disabled.detail, /无法判断是否生效/)
   })
 
-  it('OpenRouter：none 被拒记通过；tool_choice=required 的 400 带出 Meta 原句', () => {
+  it('OpenRouter：none 与 thinking=disabled 被拒记通过', () => {
     assert.equal(rescore(openrouter, 'spec-muse-chat-effort-none@chat').status, 'passed')
     assert.equal(rescore(openrouter, 'spec-muse-anthropic-thinking-disabled@anthropic').status, 'passed')
-    const required = rescore(openrouter, 'spec-muse-chat-tool-required@chat')
-    assert.equal(required.status, 'passed')
-    assert.match(required.detail, /only `"auto"` is supported/)
-    // n=2 在 OpenRouter 上同样被丢弃
-    assert.match(rescore(openrouter, 'spec-muse-chat-n2@chat').detail, /静默丢弃/)
   })
 
   it('请求语义没变的约束格，两边都没有出现「参数真的生效」：真 muse 不会被打成异常', () => {
