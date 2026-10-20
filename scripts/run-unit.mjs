@@ -48,6 +48,7 @@ const files = [
   'src/tools/video-report/seedance-url.ts',
   'src/tools/video-report/seedance-url.test.ts',
   'src/tools/video-report/summary.ts',
+  'src/tools/video-report/batches.ts',
   'src/tools/video-report/google-omni.ts',
   'src/tools/video-report/google-omni.test.ts',
   'src/tools/video-report/seedance-features.ts',

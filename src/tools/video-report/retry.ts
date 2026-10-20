@@ -22,10 +22,14 @@ function videoTaskFailed(st: string) {
  * 能否手动重试查询：拿到了任务 id、不是素材类记录，且任务还没到终态
  * （succeeded 但没拿到 video_url 也算——可能是响应被截断，再查一次）。
  */
-export function videoCanRequery(rec: Pick<VideoRecord, 'taskId' | 'taskStatus' | 'kind' | 'videoUrl'>): boolean {
+export function videoCanRequery(rec: Pick<VideoRecord, 'taskId' | 'taskStatus' | 'kind' | 'videoUrl'> & { targets?: VideoRecord['targets'] }): boolean {
   if (!rec.taskId || rec.kind === 'material-group' || rec.kind === 'material-assets') return false
   const st = rec.taskStatus || ''
   if (videoTaskFailed(st)) return false
+  if (rec.kind === 'context-ir' && videoTaskSucceeded(st)) {
+    const prompt = typeof rec.targets?.enhancedPrompt === 'string' ? rec.targets.enhancedPrompt.trim() : ''
+    if (prompt) return false
+  }
   if (videoTaskSucceeded(st) && rec.videoUrl) return false
   return true
 }

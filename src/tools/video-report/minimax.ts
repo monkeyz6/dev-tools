@@ -3,6 +3,13 @@ import { vidAspectRatio, vidCheckRatio } from '../../shared/video-meta.ts'
 
 /** 官方 Video V2。网关根另见 videoMinimaxUrl，这里不要带 /minimax。 */
 export const MINIMAX_CREATE_ENDPOINT = '/v2/video_generation'
+/** 只回增强提示词，不出片。 */
+export const MINIMAX_CONTEXT_IR_ENDPOINT = '/v2/h3_context_ir'
+/** 把本轮 768P 文生再生成到 2K。两种 body 互斥，各是一条用例。 */
+export const MINIMAX_REGEN_ENDPOINT = '/v2/video_regeneration'
+/** 再生成的源：本轮这条文生成功之后才有 task_id / content.url。 */
+export const MINIMAX_SOURCE_CASE_ID = 'minimax:t2v-768p'
+export const MINIMAX_SOURCE_CASE_NAME = '文生 · 768P · 16:9 · 5s'
 
 export const MINIMAX_DEFAULT_MODEL = 'MiniMax-H3'
 
@@ -92,6 +99,10 @@ export function videoLooksLikeMinimaxModel(model: string): boolean {
 
 export function minimaxExpect(def: VideoCaseDef, model: string): VideoExpect {
   if (def.expect === 'reject') return 'reject'
+  // 再生成的 resolution 也是 2K，不能落到下面的 Max「预期不支持」。
+  if (def.kind === 'context-ir' || def.kind === 'regen-task' || def.kind === 'regen-video') {
+    return videoIsMinimaxH3(model) ? 'success' : 'unverified'
+  }
   if (def.params.resolution === '2K' && videoIsMinimaxMax(model)) return 'unsupported'
   return 'success'
 }
@@ -128,14 +139,45 @@ function minimaxRefImageCase(count: number): VideoCaseDef {
   }
 }
 
-/** 固定 5 条加上当前模型的参考图张数。插在混合参考之后、2K 文生之前。 */
+const MINIMAX_SIDE_CASE_DEFS: VideoCaseDef[] = [
+  {
+    id: 'minimax:context-ir',
+    name: 'H3-Context-IR · 5s · 16:9',
+    kind: 'context-ir',
+    expect: 'success',
+    desc: 'POST /v2/h3_context_ir。左栏提示词，duration=5，ratio=16:9。成功后查 content.prompt，不出片。H3 / H3-intl 正向；其余模型标「待核实」',
+    params: { duration: 5, ratio: '16:9' },
+  },
+  {
+    id: 'minimax:regen-task',
+    name: '再生成 · 任务 id · 2K',
+    kind: 'regen-task',
+    expect: 'success',
+    desc: 'POST /v2/video_regeneration。只带本轮「文生 · 768P · 16:9 · 5s」的 task_id 和 resolution=2K。没有 task_id 不发送',
+    params: { resolution: '2K', duration: 5, ratio: '16:9' },
+  },
+  {
+    id: 'minimax:regen-video',
+    name: '再生成 · 成片 URL · 2K',
+    kind: 'regen-video',
+    expect: 'success',
+    desc: '同一路径。content 复用那条 768P 实际发出的文本，并加一条 role=base_video，地址用 task.content.url。没有成片地址不发送',
+    params: { resolution: '2K', duration: 5, ratio: '16:9' },
+  },
+]
+
+/** 固定 5 条加上当前模型的参考图张数，末尾再加 Context-IR 和两条再生成。参考图插在混合参考之后、2K 文生之前。 */
 export function minimaxCaseDefsFor(model: string): VideoCaseDef[] {
   const imageCases = minimaxRefImageCounts(model).map(minimaxRefImageCase)
   const at = MINIMAX_CASE_DEFS.findIndex(d => d.id === 'minimax:t2v-2k')
   const defs = [...MINIMAX_CASE_DEFS.slice(0, at), ...imageCases, ...MINIMAX_CASE_DEFS.slice(at)]
-  if (!videoIsMinimaxMax(model)) return defs
-  const after = defs.findIndex(d => d.id === 'minimax:t2v-768p')
-  return [...defs.slice(0, after + 1), minimaxT2v480Case(), ...defs.slice(after + 1)]
+  const with480 = videoIsMinimaxMax(model)
+    ? (() => {
+      const after = defs.findIndex(d => d.id === 'minimax:t2v-768p')
+      return [...defs.slice(0, after + 1), minimaxT2v480Case(), ...defs.slice(after + 1)]
+    })()
+    : defs
+  return [...with480, ...MINIMAX_SIDE_CASE_DEFS]
 }
 
 export const MINIMAX_CASE_DEFS: VideoCaseDef[] = [
@@ -174,6 +216,15 @@ export interface MinimaxPlan {
   body: Record<string, unknown>
 }
 
+/** 本轮已成功的 768P 文生。videoUrl 只放远程 content.url，不放 blob。channelId / runId 用来核对是不是当前渠道、当前这一批。 */
+export interface MinimaxSourceRef {
+  taskId: string
+  videoUrl: string
+  prompt: string
+  channelId?: string
+  runId?: string
+}
+
 export interface MinimaxMediaUrls {
   firstFrame: string
   lastFrame: string
@@ -208,16 +259,86 @@ function minimaxMediaItem(role: MinimaxRole, url: string): Record<string, unknow
   return { type: 'audio_url', audio_url: { url }, role: role.role }
 }
 
+function minimaxPlanShell(endpoint: string, body: Record<string, unknown>): MinimaxPlan {
+  return {
+    kind: 'task',
+    method: 'POST',
+    endpoint,
+    headers: { Authorization: 'Bearer {{APIKEY}}', 'Content-Type': 'application/json' },
+    body,
+  }
+}
+
+/** 从已发送的文生请求体里取出文本，供再生成复用。解析失败返回 null。 */
+export function minimaxSentText(sentPreview: string): string | null {
+  try {
+    const body = JSON.parse(sentPreview) as { content?: { type?: string; text?: string }[] }
+    const text = body?.content?.find(item => item?.type === 'text')?.text
+    return typeof text === 'string' ? text : null
+  } catch {
+    return null
+  }
+}
+
+/** 768P 文生成功才留下源。失败返回 null，调用方不要擦掉上一次成功。 */
+export function minimaxSourceFromRecord(rec: Pick<VideoRecord, 'caseId' | 'apiType' | 'ok' | 'taskId' | 'taskStatus' | 'videoUrl' | 'targets' | 'sentPreview' | 'prompt'>): MinimaxSourceRef | null {
+  if (rec.caseId !== MINIMAX_SOURCE_CASE_ID) return null
+  if (rec.apiType && rec.apiType !== 'minimax') return null
+  if (!rec.ok || !rec.taskId || !minimaxTaskSucceeded(rec.taskStatus)) return null
+  const uri = typeof rec.targets.outputUri === 'string' ? rec.targets.outputUri.trim() : ''
+  const videoUrl = /^https?:\/\//i.test(uri)
+    ? uri
+    : (rec.videoUrl && /^https?:\/\//i.test(rec.videoUrl) ? rec.videoUrl : '')
+  const sent = minimaxSentText(rec.sentPreview)
+  return { taskId: rec.taskId, videoUrl, prompt: sent ?? rec.prompt }
+}
+
 /**
- * 官方字段只有 model / content / resolution / duration / ratio。
+ * 只有当前这一批、并且能确定渠道时才换成新源。别的批次原样退回。
+ * incoming 为空（这次没成功）也不擦掉上一次成功。
+ */
+export function minimaxAdoptSource(
+  session: MinimaxSourceRef | null,
+  incoming: Pick<MinimaxSourceRef, 'taskId' | 'videoUrl' | 'prompt'> | null,
+  channelId: string,
+  runId: string | undefined,
+  currentRunId: string | null,
+): MinimaxSourceRef | null {
+  if (!incoming || !channelId || !runId || runId !== currentRunId) return session
+  return { ...incoming, channelId, runId }
+}
+
+/** 渠道或批次对不上时不把源交给请求体。改模型不在这里判断。 */
+export function minimaxRegenSource(
+  source: MinimaxSourceRef | null,
+  channelId: string,
+  runId: string | null,
+): { source: MinimaxSourceRef | null; blocked: string | null } {
+  if (!source) return { source: null, blocked: null }
+  if (!channelId || source.channelId !== channelId) {
+    return { source: null, blocked: `当前渠道对不上本轮「${MINIMAX_SOURCE_CASE_NAME}」，不发送` }
+  }
+  if (!runId || source.runId !== runId) {
+    return { source: null, blocked: `当前批次对不上本轮「${MINIMAX_SOURCE_CASE_NAME}」，不发送` }
+  }
+  return { source, blocked: null }
+}
+
+/**
+ * 官方生成字段只有 model / content / resolution / duration / ratio。
  * 带素材的用例缺任一 URL 时 missing 非空，调用方不得发送，也不能只剩文本当文生。
+ * Context-IR 与再生成走各自的端点。再生成缺本轮 768P 源时 missing 非空，预览仍给出 body 形状。
  */
 export function minimaxBuildPlan(
   def: VideoCaseDef,
   model: string,
   prompt: string,
   urls: MinimaxMediaUrls,
+  source: MinimaxSourceRef | null = null,
 ): { plan: MinimaxPlan; skipped: string[]; missing: string | null; targets: Record<string, string | number | boolean | null> } {
+  if (def.kind === 'context-ir' || def.kind === 'regen-task' || def.kind === 'regen-video') {
+    return minimaxBuildSidePlan(def, model, prompt, source)
+  }
   const text = def.prompt ?? prompt
   const content: Record<string, unknown>[] = [{ type: 'text', text }]
   let missing: string | null = null
@@ -252,15 +373,54 @@ export function minimaxBuildPlan(
   if (def.params.duration != null) targets.duration = def.params.duration
   if (def.params.ratio != null) targets.ratio = def.params.ratio
   return {
-    plan: {
-      kind: 'task',
-      method: 'POST',
-      endpoint: MINIMAX_CREATE_ENDPOINT,
-      headers: { Authorization: 'Bearer {{APIKEY}}', 'Content-Type': 'application/json' },
-      body,
-    },
+    plan: minimaxPlanShell(MINIMAX_CREATE_ENDPOINT, body),
     skipped: [],
     missing,
+    targets,
+  }
+}
+
+function minimaxBuildSidePlan(
+  def: VideoCaseDef,
+  model: string,
+  prompt: string,
+  source: MinimaxSourceRef | null,
+): { plan: MinimaxPlan; skipped: string[]; missing: string | null; targets: Record<string, string | number | boolean | null> } {
+  if (def.kind === 'context-ir') {
+    return {
+      plan: minimaxPlanShell(MINIMAX_CONTEXT_IR_ENDPOINT, {
+        model,
+        content: [{ type: 'text', text: prompt }],
+        duration: 5,
+        ratio: '16:9',
+      }),
+      skipped: [],
+      missing: null,
+      targets: { duration: 5, ratio: '16:9' },
+    }
+  }
+  const targets: Record<string, string | number | boolean | null> = { resolution: '2K', duration: 5, ratio: '16:9' }
+  if (def.kind === 'regen-task') {
+    const taskId = source?.taskId.trim() || ''
+    return {
+      plan: minimaxPlanShell(MINIMAX_REGEN_ENDPOINT, { model, source_task_id: taskId, resolution: '2K' }),
+      skipped: [],
+      missing: taskId ? null : `本轮「${MINIMAX_SOURCE_CASE_NAME}」尚未成功，未拿到 task_id，不发送`,
+      targets,
+    }
+  }
+  const url = source?.videoUrl.trim() || ''
+  return {
+    plan: minimaxPlanShell(MINIMAX_REGEN_ENDPOINT, {
+      model,
+      content: [
+        { type: 'text', text: source ? source.prompt : prompt },
+        { type: 'video_url', video_url: { url }, role: 'base_video' },
+      ],
+      resolution: '2K',
+    }),
+    skipped: [],
+    missing: url ? null : `本轮「${MINIMAX_SOURCE_CASE_NAME}」尚未返回 task.content.url，不发送`,
     targets,
   }
 }
@@ -302,6 +462,21 @@ export function minimaxExtractVideoUrl(json: any): string | null {
   const url = minimaxExtractTask(json)?.content?.url
   if (typeof url !== 'string') return null
   const trimmed = url.trim()
+  return trimmed || null
+}
+
+/** H3-Context-IR 成功后的增强提示词。空串当没有。 */
+export function minimaxExtractPrompt(json: any): string | null {
+  const prompt = minimaxExtractTask(json)?.content?.prompt
+  if (typeof prompt !== 'string') return null
+  const trimmed = prompt.trim()
+  return trimmed || null
+}
+
+export function minimaxExtractTaskType(json: any): string | null {
+  const taskType = minimaxExtractTask(json)?.task_type
+  if (typeof taskType !== 'string') return null
+  const trimmed = taskType.trim()
   return trimmed || null
 }
 
@@ -355,12 +530,70 @@ function minimaxConcreteRatio(ratio: string | null | undefined): string | null {
   return (MINIMAX_RATIOS as readonly string[]).includes(ratio) ? ratio : null
 }
 
+function pushTaskType(checks: VideoCheck[], rec: VideoRecord, want: string) {
+  const got = typeof rec.targets.taskType === 'string' ? rec.targets.taskType.trim() : ''
+  if (!got) {
+    if (minimaxTaskSucceeded(rec.taskStatus)) {
+      checks.push({ name: '任务类型', target: want, actual: '响应未返回 task_type', pass: true, info: true })
+    }
+    return
+  }
+  checks.push({ name: '任务类型', target: want, actual: got, pass: got === want })
+}
+
+function minimaxContextIrChecks(rec: VideoRecord): VideoCheck[] {
+  const checks: VideoCheck[] = []
+  const httpOk = rec.status >= 200 && rec.status < 300
+  checks.push({
+    name: '请求成功',
+    target: 'HTTP 2xx',
+    actual: rec.status ? `HTTP ${rec.status}` : '无响应',
+    pass: httpOk,
+  })
+  const succeeded = minimaxTaskSucceeded(rec.taskStatus)
+  if (rec.taskStatus) {
+    checks.push({ name: '任务状态', target: 'succeeded', actual: rec.taskStatus, pass: succeeded })
+  }
+  const prompt = typeof rec.targets.enhancedPrompt === 'string' ? rec.targets.enhancedPrompt.trim() : ''
+  checks.push({
+    name: '增强提示词',
+    target: 'content.prompt 非空',
+    actual: prompt ? (prompt.length > 80 ? `${prompt.slice(0, 80)}…` : prompt) : '无',
+    pass: !!prompt,
+  })
+  pushTaskType(checks, rec, 'h3_context_ir')
+  if (rec.usage && rec.usage.total_tokens != null) {
+    checks.push({ name: 'usage', target: 'total_tokens', actual: rec.usage.total_tokens, pass: true, info: true })
+  }
+  if (!succeeded) return checks
+  const wantDur = rec.targets.duration
+  const echoDur = typeof rec.targets.echoDuration === 'number' ? rec.targets.echoDuration : null
+  if (typeof wantDur === 'number') {
+    checks.push({
+      name: '时长回显',
+      target: `${wantDur}s`,
+      actual: echoDur == null ? '无回显' : `${echoDur}s`,
+      pass: true,
+      info: true,
+    })
+  }
+  const wantRatio = typeof rec.targets.ratio === 'string' ? rec.targets.ratio : ''
+  const echoRatio = typeof rec.targets.echoRatio === 'string' ? rec.targets.echoRatio : ''
+  if (wantRatio) {
+    checks.push({ name: '比例回显', target: wantRatio, actual: echoRatio || '无回显', pass: true, info: true })
+  }
+  return checks
+}
+
 /**
  * 正向校验。调用方先处理「预期不支持」的那条 info，这里不要再写一遍。
  * 回显只在任务成功时核对，避免 4xx 上再堆一条「无回显」。
  * 像素没有官方宽高表，只记 info，不失败。
+ * Context-IR 只核增强提示词。再生成的比例允许为空。
  */
 export function minimaxBuildChecks(rec: VideoRecord): VideoCheck[] {
+  if (rec.kind === 'context-ir') return minimaxContextIrChecks(rec)
+  const regen = rec.kind === 'regen-task' || rec.kind === 'regen-video'
   const checks: VideoCheck[] = []
   const httpOk = rec.status >= 200 && rec.status < 300
   checks.push({
@@ -382,6 +615,7 @@ export function minimaxBuildChecks(rec: VideoRecord): VideoCheck[] {
   if (rec.usage && rec.usage.total_tokens != null) {
     checks.push({ name: 'usage', target: 'total_tokens', actual: rec.usage.total_tokens, pass: true, info: true })
   }
+  if (regen) pushTaskType(checks, rec, 'regeneration')
   if (!succeeded) return checks
 
   const wantRes = rec.targets.resolution
@@ -401,7 +635,15 @@ export function minimaxBuildChecks(rec: VideoRecord): VideoCheck[] {
   }
   const wantRatio = typeof rec.targets.ratio === 'string' ? rec.targets.ratio : ''
   const echoRatio = typeof rec.targets.echoRatio === 'string' ? rec.targets.echoRatio : ''
-  if (wantRatio === 'adaptive') {
+  if (regen) {
+    if (!echoRatio) {
+      checks.push({ name: '比例回显', target: '可为空', actual: '无回显', pass: true, info: true })
+    } else {
+      checks.push({ name: '比例回显', target: '16:9', actual: echoRatio, pass: echoRatio === '16:9' })
+      const probeTarget = minimaxConcreteRatio(echoRatio)
+      if (probeTarget) pushRatioProbe(checks, probeTarget, rec)
+    }
+  } else if (wantRatio === 'adaptive') {
     // 官方首帧实测原样回 adaptive，不解析成 1:1 这类具体比例。解析了才拿成片去对。
     const echoedAdaptive = echoRatio.toLowerCase() === 'adaptive'
     const allowed = minimaxConcreteRatio(echoRatio)

@@ -26,9 +26,12 @@ export type VideoCaseKind =
   | 'ref-audio-only'
   | 'draft-final'
   | 'i2v-reject'
+  | 'context-ir'
+  | 'regen-task'
+  | 'regen-video'
 
-/** 期望结果：success 出片；reject 网关/审核应拒绝；unsupported 由模型能力表推断、运行时才会标上 */
-export type VideoExpect = 'success' | 'reject' | 'unsupported'
+/** 期望结果：success 出片；reject 网关/审核应拒绝；unsupported 由模型能力表推断、运行时才会标上；unverified 照发但不进通过率 */
+export type VideoExpect = 'success' | 'reject' | 'unsupported' | 'unverified'
 
 /**
  * 只列 Seedance 2.x 官方请求参数表里的字段。`camera_fixed`、`seed`、`frames` 官方只列 1.0 pro，

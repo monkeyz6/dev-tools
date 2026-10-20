@@ -53,16 +53,23 @@ function Th({ children, numeric, shrink }: { children: React.ReactNode; numeric?
 const VIDEO_STATUS_TEXT: Record<'pass' | 'fail' | 'error', string> = { pass: '通过', fail: '未通过', error: '请求失败' }
 /** 拒绝 / 不支持类用例的判定文案：通过 = 已按预期拒绝 */
 const VIDEO_NEGATIVE_STATUS_TEXT: Record<'pass' | 'fail' | 'error', string> = { pass: '已拒绝', fail: '未通过', error: '未被拒绝' }
-function statusTextOf(row: { expect: string; status: 'pass' | 'fail' | 'error'; negativeProduced?: boolean }) {
+function statusTextOf(row: { expect: string; status: 'pass' | 'fail' | 'error' | 'unverified'; negativeProduced?: boolean }) {
+  if (row.status === 'unverified') return '待核实'
   if (row.expect === 'success') return VIDEO_STATUS_TEXT[row.status]
   if (row.status === 'error' && !row.negativeProduced) return '请求异常'
   return VIDEO_NEGATIVE_STATUS_TEXT[row.status]
 }
+function rowLevel(status: 'pass' | 'fail' | 'error' | 'unverified'): VideoSupportLevel | 'error' {
+  if (status === 'pass') return 'ok'
+  if (status === 'fail' || status === 'unverified') return 'partial'
+  return 'error'
+}
 function ExpectTag({ expect }: { expect: string }) {
   if (expect === 'success') return null
+  const label = expect === 'reject' ? '预期拒绝' : expect === 'unverified' ? '待核实' : '预期不支持'
   return (
     <span className="inline-flex items-center rounded-full px-2 py-0.5 text-[10.5px] font-semibold whitespace-nowrap" style={{ background: 'var(--s2)', color: 'var(--t2)', letterSpacing: '0.03em' }}>
-      {expect === 'reject' ? '预期拒绝' : '预期不支持'}
+      {label}
     </span>
   )
 }
@@ -108,7 +115,7 @@ function VideoReportView({ records, renderDetail, rootRef }: {
           </div>
           <div className="text-right">
             <div className="font-mono text-[30px] font-bold tabular-nums" style={{ color: toneOf(overall.level).color, fontFamily: VIDEO_REPORT_MONO, letterSpacing: '-0.025em', lineHeight: 1.1 }}>
-              {overall.passed}/{overall.total}
+              {overall.total === 0 && overall.unverified > 0 ? '—' : `${overall.passed}/${overall.total}`}
             </div>
             <div className="text-[11px] mt-2" style={{ color: 'var(--t3)' }}>用例通过</div>
             <div className="text-[11px] mt-2" style={{ color: 'var(--t3)' }}>{videoFmtTime(Date.now())}</div>
@@ -187,15 +194,15 @@ function VideoReportView({ records, renderDetail, rootRef }: {
                     <span className="inline-flex items-center gap-2">{row.caseName}<ExpectTag expect={row.expect} /></span>
                   </td>
                   <td className="px-4 py-3" style={{ borderBottom: line }}>
-                    <Pill level={row.status === 'pass' ? 'ok' : row.status === 'fail' ? 'partial' : 'error'}>
+                    <Pill level={rowLevel(row.status)}>
                       {statusTextOf(row)}
-                      {row.totalChecks > 0 && row.status !== 'error' && row.expect === 'success' ? ` ${row.passedChecks}/${row.totalChecks}` : ''}
+                      {row.totalChecks > 0 && row.status !== 'error' && row.status !== 'unverified' && row.expect === 'success' ? ` ${row.passedChecks}/${row.totalChecks}` : ''}
                     </Pill>
                   </td>
                   <td className="px-4 py-3 font-mono text-right tabular-nums" style={{ color: (row.httpStatus >= 200 && row.httpStatus < 300) || (row.expect !== 'success' && row.status === 'pass') ? 'var(--t2)' : 'var(--err)', ...num }}>{row.httpStatus || 'ERR'}</td>
                   <td className="px-4 py-3 font-mono whitespace-nowrap" style={{ color: 'var(--t2)', ...num }}>{row.sizeText}</td>
                   <td className="px-4 py-3 font-mono text-right tabular-nums whitespace-nowrap" style={{ color: 'var(--t2)', ...num }}>{row.durationMs} ms</td>
-                  <td className="px-4 py-3 text-[11.5px] break-all" style={{ color: row.issue ? 'var(--err)' : 'var(--t3)', borderBottom: line }}>{row.issue || '—'}</td>
+                  <td className="px-4 py-3 text-[11.5px] break-all" style={{ color: row.status === 'unverified' ? 'var(--t2)' : row.issue ? 'var(--err)' : 'var(--t3)', borderBottom: line }}>{row.issue || '—'}</td>
                 </tr>
               )
             })}
@@ -213,7 +220,7 @@ function VideoReportView({ records, renderDetail, rootRef }: {
                 <span className="font-mono text-[12px]" style={{ color: 'var(--t3)', fontFamily: VIDEO_REPORT_MONO }}>#{row.index}</span>
                 <h5 className="text-[15px] font-semibold" style={{ color: 'var(--text)', letterSpacing: '-0.008em' }}>{row.caseName}</h5>
                 <ExpectTag expect={row.expect} />
-                <Pill level={row.status === 'pass' ? 'ok' : row.status === 'fail' ? 'partial' : 'error'}>{statusTextOf(row)}</Pill>
+                <Pill level={rowLevel(row.status)}>{statusTextOf(row)}</Pill>
               </div>
               <p className="text-[11px] mt-2 font-mono break-all" style={{ color: 'var(--t3)', fontFamily: VIDEO_REPORT_MONO }}>
                 {[r.model, r.channelName, videoFmtTime(r.time)].filter(Boolean).join(' · ')}

@@ -22,11 +22,12 @@ import { VIDEO_TASK_ENDPOINT, videoAssetEndpoint, videoSeedancePath, videoSeedan
 import {
   MINIMAX_DEFAULT_MODEL, MINIMAX_MODEL_OPTIONS,
   minimaxBuildChecks, minimaxBuildPlan, minimaxCapabilityHint, minimaxCaseDefsFor, minimaxExpect, minimaxRefImageCounts,
-  minimaxExtractEcho, minimaxExtractStatus, minimaxExtractTaskId, minimaxExtractUsage, minimaxExtractVideoUrl,
-  minimaxFormatTaskError, minimaxQueryEndpoint, minimaxTaskErrorDetail,
+  minimaxExtractEcho, minimaxExtractPrompt, minimaxExtractStatus, minimaxExtractTaskId, minimaxExtractTaskType, minimaxExtractUsage, minimaxExtractVideoUrl,
+  minimaxAdoptSource, minimaxFormatTaskError, minimaxQueryEndpoint, minimaxRegenSource, minimaxSourceFromRecord, minimaxTaskErrorDetail,
   videoIsMinimaxPreset, videoLooksLikeMinimaxModel, videoMinimaxPath, videoMinimaxUrl,
 } from './video-report/minimax'
-import { videoClassify, videoVerdict } from './video-report/summary'
+import type { MinimaxSourceRef } from './video-report/minimax'
+import { videoClassify, videoScoreBucket, videoVerdict, videoWorkbenchExpect } from './video-report/summary'
 import { videoCanReprobe, videoCanRequery, videoHasUsableProbe, videoReprobeSrc, videoRetryAction, videoRetrySort, videoRetryTargets } from './video-report/retry'
 import { videoGroupBatches, videoTrimByBatch } from './video-report/batches'
 import { VIDEO_KIND_ROLES, videoApplyFeatureEcho, videoExtractEcho, videoAutoDurationChecks, videoDraftFinalContent, videoExtractFeatureEcho, videoFeatureChecks } from './video-report/seedance-features'
@@ -790,6 +791,12 @@ const VideoChannelsPane = React.memo(function VideoChannelsPane({
   )
 })
 
+function videoBatchPassText(b: VideoBatch): string {
+  const scored = b.passed + b.failed + b.errored
+  if (scored === 0 && b.unverified > 0) return `待核实 ${b.unverified}`
+  return `通过 ${b.passed}/${scored}${b.unverified ? ` · 待核实 ${b.unverified}` : ''}`
+}
+
 const VideoHistoryPane = React.memo(function VideoHistoryPane({
   history, channels, exportBusy, fChannel, fModel, fResult, requeryingIds,
   onFChannel, onFModel, onFResult, onStartExport, onClearAll, onDetail, onDeleteOne, onRestore, onDeleteBatch, onRequery, onReprobe, onReprobeBatch,
@@ -810,10 +817,7 @@ const VideoHistoryPane = React.memo(function VideoHistoryPane({
     const filtered = history.filter(r => {
       if (fChannel && r.channelName !== fChannel) return false
       if (fModel && r.model !== fModel) return false
-      if (fResult) {
-        const k = videoClassify(r)
-        if (fResult !== k) return false
-      }
+      if (fResult && videoScoreBucket(r) !== fResult) return false
       return true
     })
     return videoGroupBatches(filtered)
@@ -836,7 +840,7 @@ const VideoHistoryPane = React.memo(function VideoHistoryPane({
       <div className="flex flex-wrap gap-2 mb-3">
         <div className="w-40"><CustomSelect value={fChannel} onChange={onFChannel} options={[{ value: '', label: '全部渠道' }, ...channels.map(c => ({ value: c.name, label: c.name }))]} /></div>
         <div className="w-48"><CustomSelect value={fModel} onChange={onFModel} options={[{ value: '', label: '全部模型' }, ...models.map(m => ({ value: m, label: m }))]} /></div>
-        <div className="w-32"><CustomSelect value={fResult} onChange={onFResult} options={[{ value: '', label: '全部结果' }, { value: 'pass', label: '通过' }, { value: 'fail', label: '未通过' }, { value: 'error', label: '请求失败' }]} /></div>
+        <div className="w-32"><CustomSelect value={fResult} onChange={onFResult} options={[{ value: '', label: '全部结果' }, { value: 'pass', label: '通过' }, { value: 'fail', label: '未通过' }, { value: 'error', label: '请求失败' }, { value: 'unverified', label: '待核实' }]} /></div>
       </div>
       {batches.length === 0 && <p className="text-xs py-8 text-center" style={{ color: 'var(--t3)' }}>还没有历史记录</p>}
       <div className="flex flex-col gap-3">
@@ -853,7 +857,7 @@ const VideoHistoryPane = React.memo(function VideoHistoryPane({
                     {b.legacy && <Badge>旧记录</Badge>}
                   </div>
                   <div className="text-[11px] mt-0.5" style={{ color: 'var(--t3)' }}>
-                    {b.channelName || '—'} · {VIDEO_API_TYPE_LABEL[b.apiType]} · {b.models.join(' / ') || '—'} · {b.records.length} 个用例 · 通过 {b.passed}/{b.records.length}
+                    {b.channelName || '—'} · {VIDEO_API_TYPE_LABEL[b.apiType]} · {b.models.join(' / ') || '—'} · {b.records.length} 个用例 · {videoBatchPassText(b)}
                   </div>
                 </button>
                 <Btn small variant="soft" onClick={() => onRestore(b)}>↺ 还原到工作台</Btn>
@@ -878,11 +882,11 @@ const VideoHistoryPane = React.memo(function VideoHistoryPane({
                     </thead>
                     <tbody>
                       {b.records.map(r => {
-                        const k = videoClassify(r)
+                        const k = videoScoreBucket(r)
                         return (
                           <tr key={r.id} style={{ borderTop: '1px solid var(--border)' }}>
                             <td className="px-3 py-2">{r.caseName}</td>
-                            <td className="px-3 py-2">{k === 'pass' ? <Badge color="ok">通过</Badge> : k === 'fail' ? <Badge color="err">未通过</Badge> : <Badge color="warn">失败</Badge>}</td>
+                            <td className="px-3 py-2">{k === 'unverified' ? <Badge color="warn">待核实</Badge> : k === 'pass' ? <Badge color="ok">通过</Badge> : k === 'fail' ? <Badge color="err">未通过</Badge> : <Badge color="warn">失败</Badge>}</td>
                             <td className="px-3 py-2 font-mono">{r.status || '—'}</td>
                             <td className="px-3 py-2">
                               <Btn small variant="soft" onClick={() => onDetail(r)}>详情</Btn>
@@ -961,6 +965,7 @@ function VideoApiTestTool() {
   const omniSessionRef = useRef<{ lastInteractionId: string | null }>({ lastInteractionId: null })
   /** 本轮「样片 · 480p」的任务 id 与成片规格，「样片转正式」引用它 */
   const seedanceSessionRef = useRef<{ draft: VideoDraftRef | null }>({ draft: null })
+  const minimaxSessionRef = useRef<MinimaxSourceRef | null>(null)
   const omniMediaCacheRef = useRef(new Map<string, { mime: string; b64: string }>())
   const omniBlobUrlsRef = useRef(new Set<string>())
   const previewRecRef = useRef<VideoRecord | null>(null)
@@ -1225,6 +1230,7 @@ function VideoApiTestTool() {
     revokeOmniBlobs()
     omniSessionRef.current = { lastInteractionId: null }
     seedanceSessionRef.current = { draft: null }
+    minimaxSessionRef.current = null
     omniMediaCacheRef.current = new Map()
     assetsRef.current = { groupId: null }
     currentRunIdRef.current = null
@@ -1579,6 +1585,10 @@ function VideoApiTestTool() {
     const remote = minimaxExtractVideoUrl(lastJson)
     rec.videoUrl = remote
     if (remote) rec.targets.outputUri = remote
+    const enhanced = minimaxExtractPrompt(lastJson)
+    if (enhanced) rec.targets.enhancedPrompt = enhanced
+    const taskType = minimaxExtractTaskType(lastJson)
+    if (taskType) rec.targets.taskType = taskType
     const echo = minimaxExtractEcho(lastJson)
     if (echo.ratio) rec.targets.echoRatio = echo.ratio
     if (echo.duration != null && !Number.isNaN(echo.duration)) rec.targets.echoDuration = echo.duration
@@ -1590,6 +1600,18 @@ function VideoApiTestTool() {
     if (detail) rec.errorDetail = detail
     const failed = videoTaskFailed(rec.taskStatus || '')
     const succeeded = videoTaskSucceeded(rec.taskStatus || '')
+    if (rec.kind === 'context-ir') {
+      const hasPrompt = typeof rec.targets.enhancedPrompt === 'string' && !!rec.targets.enhancedPrompt.trim()
+      if (failed || !succeeded || !hasPrompt) {
+        rec.ok = false
+        rec.error = taskErr || videoOpenApiError(lastJson, rec.status, rec.rawSnippet) || (failed ? '任务失败' : succeeded ? '未返回 content.prompt' : `轮询超时（${VIDEO_POLL_MAX_MS / 60000} 分钟）任务仍未结束，可稍后「重试查询」`)
+      } else {
+        rec.ok = true
+        rec.error = null
+      }
+      rec.checks = videoBuildChecks(rec)
+      return
+    }
     if (failed || !succeeded || !rec.videoUrl) {
       rec.ok = false
       rec.error = taskErr || videoOpenApiError(lastJson, rec.status, rec.rawSnippet) || (failed ? '任务失败' : succeeded ? '未返回 task.content.url' : `轮询超时（${VIDEO_POLL_MAX_MS / 60000} 分钟）任务仍未结束，可稍后「重试查询」`)
@@ -1607,8 +1629,15 @@ function VideoApiTestTool() {
     rec.checks = videoBuildChecks(rec)
   }
 
+  const minimaxPlanFor = (def: VideoCaseDef, modelName: string, channelId: string, promptText: string, media: typeof urls) => {
+    const bound = minimaxRegenSource(minimaxSessionRef.current, channelId, currentRunIdRef.current)
+    const built = minimaxBuildPlan(def, modelName, promptText, media, bound.source)
+    if (bound.blocked && (def.kind === 'regen-task' || def.kind === 'regen-video')) built.missing = bound.blocked
+    return built
+  }
+
   const runMinimax = async (c: VideoCase, ch: VideoChannel, apiKey: string, rec: VideoRecord) => {
-    const built = minimaxBuildPlan(c.def, model.trim() || MINIMAX_DEFAULT_MODEL, prompt, urlsRef.current)
+    const built = minimaxPlanFor(c.def, model.trim() || MINIMAX_DEFAULT_MODEL, ch.id, prompt, urlsRef.current)
     if (built.missing) {
       rec.ok = false
       rec.error = built.missing
@@ -1785,6 +1814,17 @@ function VideoApiTestTool() {
     }
   }
 
+  /** 768P 成功才写入。渠道用记录所属渠道，批次对不上当前工作台时保留原源。 */
+  const rememberMinimaxSource = (rec: VideoRecord, channelId: string) => {
+    minimaxSessionRef.current = minimaxAdoptSource(
+      minimaxSessionRef.current,
+      minimaxSourceFromRecord(rec),
+      channelId,
+      rec.runId,
+      currentRunIdRef.current,
+    )
+  }
+
   /**
    * 手动重试查询：对「已拿到任务 id 但没等到终态」的记录（轮询超时 / 网络中断 / 手动停止）重新 GET 任务，
    * 拿到结果后按正常流程判定，并原地更新工作台与历史里的同一条记录（id 不变，不新增）。
@@ -1862,6 +1902,8 @@ function VideoApiTestTool() {
     next.ok = videoSettleOk(next)
     rememberOmniInteraction(next)
     rememberSeedanceDraft(next)
+    const owner = channelsRef.current.find(x => x.name === next.channelName)
+    if (owner) rememberMinimaxSource(next, owner.id)
     replaceRecord(next)
     if (!cancelled) {
       const st = next.taskStatus || ''
@@ -2015,6 +2057,7 @@ function VideoApiTestTool() {
     rec.durationMs = Math.round(performance.now() - t0)
     if (!rec.checks.length) rec.checks = videoBuildChecks(rec)
     rec.ok = videoSettleOk(rec)
+    if (apiType === 'minimax') rememberMinimaxSource(rec, ch.id)
     c.status = videoCaseStatus(rec)
     c.result = rec
     await persistRecord(rec)
@@ -2027,6 +2070,7 @@ function VideoApiTestTool() {
     assetsRef.current = { groupId: null }
     omniSessionRef.current = { lastInteractionId: null }
     seedanceSessionRef.current = { draft: null }
+    minimaxSessionRef.current = null
     omniMediaCacheRef.current = new Map()
     revokeOmniBlobs()
     setRestoredFrom(null)
@@ -2040,6 +2084,7 @@ function VideoApiTestTool() {
     assetsRef.current = { groupId: null }
     omniSessionRef.current = { lastInteractionId: null }
     seedanceSessionRef.current = { draft: null }
+    minimaxSessionRef.current = null
     setRestoredFrom(null)
     stopRef.current = false
     try {
@@ -2085,8 +2130,12 @@ function VideoApiTestTool() {
   const selCases = cases.filter(c => c.selected)
   const selAll = cases.length > 0 && cases.every(c => c.selected)
   const doneCount = cases.filter(c => c.status === 'pass' || c.status === 'fail' || c.status === 'error').length
-  const passCount = cases.filter(c => c.status === 'pass').length
-  const failCount = cases.filter(c => c.status === 'fail' || c.status === 'error').length
+  const liveModel = model.trim() || videoDefaultModelFor(apiType)
+  const caseExpect = (c: VideoCase) => videoWorkbenchExpect(!!c.result, c.result?.expect, videoExpectFor(c.def, liveModel, apiType))
+  const scoredCase = (c: VideoCase) => caseExpect(c) !== 'unverified'
+  const passCount = cases.filter(c => c.status === 'pass' && scoredCase(c)).length
+  const failCount = cases.filter(c => (c.status === 'fail' || c.status === 'error') && scoredCase(c)).length
+  const unverifiedCount = cases.filter(c => c.status !== 'idle' && c.status !== 'running' && !scoredCase(c)).length
 
   const statusBadge = (c: VideoCase) => {
     if (c.status === 'running') {
@@ -2186,6 +2235,12 @@ function VideoApiTestTool() {
           </div>
         </div>
       )}
+      {typeof r.targets.enhancedPrompt === 'string' && r.targets.enhancedPrompt.trim() && (
+        <div>
+          <p className="text-xs font-semibold mb-1.5" style={{ color: 'var(--t3)', letterSpacing: '0.05em' }}>增强提示词</p>
+          <pre data-export-scroll className="p-3 text-[11px] font-mono overflow-auto max-h-[16rem] whitespace-pre-wrap break-all rounded-xl" style={{ color: 'var(--t2)', border: '1px solid var(--border)', background: 'var(--s1)' }}>{r.targets.enhancedPrompt}</pre>
+        </div>
+      )}
       {r.videoUrl && (
         <div>
           <p className="text-xs font-semibold mb-1.5" style={{ color: 'var(--t3)', letterSpacing: '0.05em' }}>成片（链接约 24h 过期）</p>
@@ -2226,12 +2281,12 @@ function VideoApiTestTool() {
     const built = apiType === 'google-omni'
       ? omniBuildPlan(c.def, m, prompt, urls, omniSessionRef.current.lastInteractionId)
       : apiType === 'minimax'
-        ? minimaxBuildPlan(c.def, m, prompt, urls)
+        ? minimaxPlanFor(c.def, m, activeChId ?? '', prompt, urls)
         : videoBuildPlan(c.def, m, prompt, urls, testMaterials, assetsRef.current, seedanceSessionRef.current.draft)
     const preview = !c.expanded && apiType === 'google-omni'
       ? ''
       : (c.editedPreview != null ? c.editedPreview : (apiType === 'google-omni' ? omniPreviewBody(built.plan.body) : videoPlanPreview(built.plan)))
-    const expect = videoExpectFor(c.def, m, apiType)
+    const expect = caseExpect(c)
     const statusColor = c.status === 'running' ? 'var(--accent)' : c.status === 'pass' ? 'var(--ok)' : c.status === 'fail' ? 'var(--err)' : c.status === 'error' ? 'var(--warn)' : 'transparent'
     return (
       <div key={c.id} data-case-name={c.name} className="rounded-2xl overflow-hidden transition-all duration-150"
@@ -2246,6 +2301,7 @@ function VideoApiTestTool() {
               {c.kind.startsWith('material') && <Badge>素材</Badge>}
               {expect === 'reject' && <Badge color="warn">预期拒绝</Badge>}
               {expect === 'unsupported' && <Badge>预期不支持</Badge>}
+              {expect === 'unverified' && <Badge color="warn">待核实</Badge>}
             </div>
             <div className="text-[11px] truncate" style={{ color: 'var(--t3)' }}>{c.desc}</div>
           </div>
@@ -2290,6 +2346,8 @@ function VideoApiTestTool() {
     revokeOmniBlobs()
     omniSessionRef.current = { lastInteractionId: null }
     seedanceSessionRef.current = { draft: null }
+    minimaxSessionRef.current = null
+    currentRunIdRef.current = batch.id.startsWith('legacy:') ? null : batch.id
     omniMediaCacheRef.current = new Map()
     if (batchApi === 'google-omni') {
       const last = [...batch.records]
@@ -2300,6 +2358,10 @@ function VideoApiTestTool() {
     } else if (batchApi === 'seedance') {
       const draft = [...batch.records].filter(r => r.caseId === 'draft-480p').sort((a, b) => a.time - b.time).at(-1)
       if (draft) rememberSeedanceDraft(draft)
+    } else if (batchApi === 'minimax') {
+      const srcRec = [...batch.records].filter(r => r.caseId === 'minimax:t2v-768p').sort((a, b) => a.time - b.time).at(-1)
+      const owner = srcRec ? channelsRef.current.find(x => x.name === srcRec.channelName) : undefined
+      if (srcRec && owner) rememberMinimaxSource(srcRec, owner.id)
     }
     const nextCases = videoBuildCases(batchApi === 'seedance' && batch.records.some(r => r.testMaterials), batchApi, batch.models[0] || '')
     const byName = new Map(batch.records.map(r => [r.caseName, r]))
@@ -2324,7 +2386,6 @@ function VideoApiTestTool() {
     if (generic?.prompt) setPrompt(generic.prompt)
     const ch = channelsRef.current.find(x => x.name === batch.channelName)
     if (ch) setActiveChId(ch.id)
-    currentRunIdRef.current = batch.id.startsWith('legacy:') ? null : batch.id
     setRestoredFrom({ time: batch.endAt, count: restored })
     setPane('test')
     toastShow(`已还原 ${videoFmtTime(batch.endAt).slice(11, 16)} 那一轮（${restored} 条）` + (ch ? '' : ' · 未找到同名渠道，请手动选择'))
@@ -2473,7 +2534,7 @@ function VideoApiTestTool() {
             <div className="h-full rounded-full transition-all duration-300" style={{ background: 'var(--accent)', width: (cases.length ? (doneCount / cases.length * 100) : 0) + '%' }} />
           </div>
           <span className="text-xs whitespace-nowrap" style={{ color: 'var(--t2)' }}>
-            已选 <b style={{ color: 'var(--text)' }}>{selCases.length}</b> / 已完成 <b style={{ color: 'var(--text)' }}>{doneCount}</b> · 通过 <b style={{ color: 'var(--ok)' }}>{passCount}</b> · 未通过 <b style={{ color: failCount ? 'var(--err)' : 'var(--t2)' }}>{failCount}</b>
+            已选 <b style={{ color: 'var(--text)' }}>{selCases.length}</b> / 已完成 <b style={{ color: 'var(--text)' }}>{doneCount}</b> · 通过 <b style={{ color: 'var(--ok)' }}>{passCount}</b> · 未通过 <b style={{ color: failCount ? 'var(--err)' : 'var(--t2)' }}>{failCount}</b>{unverifiedCount > 0 ? <> · 待核实 <b style={{ color: 'var(--t2)' }}>{unverifiedCount}</b></> : null}
           </span>
         </div>
         <div className="flex flex-col">

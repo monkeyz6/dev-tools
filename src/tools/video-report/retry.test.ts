@@ -42,6 +42,11 @@ describe('videoCanRequery', () => {
     assert.equal(videoCanRequery(rec({ taskId: 't1', taskStatus: 'running' })), true)
     assert.equal(videoCanRequery(rec({ taskId: 't1', taskStatus: 'succeeded' })), true)
   })
+
+  it('Context-IR 已拿到增强提示词不再查', () => {
+    assert.equal(videoCanRequery({ taskId: 't1', taskStatus: 'succeeded', kind: 'context-ir', videoUrl: null, targets: { enhancedPrompt: 'expanded' } }), false)
+    assert.equal(videoCanRequery({ taskId: 't1', taskStatus: 'succeeded', kind: 'context-ir', videoUrl: null }), true)
+  })
 })
 
 describe('videoReprobeSrc', () => {

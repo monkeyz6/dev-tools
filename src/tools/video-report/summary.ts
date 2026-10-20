@@ -14,10 +14,24 @@ export function videoClassify(r: VideoRecord): 'pass' | 'fail' | 'error' {
   return !r.ok ? 'error' : (videoVerdict(r.checks || []).level === 'ok' ? 'pass' : 'fail')
 }
 
-const VIDEO_CAPABILITY_ORDER = ['request', 'task', 'videoUrl', 'officialHost', 'probe', 'resolution', 'duration', 'ratio', 'audio', 'echo', 'lastFrame', 'draft', 'reject', 'material'] as const
+/** 待核实单独成档，不并进通过 / 未通过 / 请求失败。 */
+export function videoScoreBucket(r: VideoRecord): 'pass' | 'fail' | 'error' | 'unverified' {
+  if (r.expect === 'unverified') return 'unverified'
+  return videoClassify(r)
+}
+
+/** 工作台徽章和通过数：已有结果认记录上的 expect（旧记录缺省 success）；还没跑的按当前模型现算。 */
+export function videoWorkbenchExpect(hasResult: boolean, stored: VideoExpect | undefined, live: VideoExpect): VideoExpect {
+  if (hasResult) return stored ?? 'success'
+  return live
+}
+
+const VIDEO_CAPABILITY_ORDER = ['request', 'task', 'prompt', 'taskType', 'videoUrl', 'officialHost', 'probe', 'resolution', 'duration', 'ratio', 'audio', 'echo', 'lastFrame', 'draft', 'reject', 'material'] as const
 const VIDEO_CAPABILITY_LABEL: Record<string, string> = {
   request: '接口连通',
   task: '任务成功',
+  prompt: '增强提示词',
+  taskType: '任务类型',
   videoUrl: '返回视频地址',
   officialHost: '官方成片域名',
   probe: '成片可读',
@@ -35,6 +49,8 @@ const VIDEO_CAPABILITY_LABEL: Record<string, string> = {
 function videoCapabilityKey(rawName: string): string | null {
   if (rawName.startsWith('请求成功') || rawName.startsWith('OpenAPI')) return 'request'
   if (rawName === '任务状态') return 'task'
+  if (rawName === '增强提示词') return 'prompt'
+  if (rawName === '任务类型') return 'taskType'
   if (rawName === '视频地址') return 'videoUrl'
   if (rawName === '官方域名') return 'officialHost'
   if (rawName === '成片元数据') return 'probe'
@@ -65,7 +81,7 @@ export interface VideoCaseRow {
   caseName: string
   /** 拒绝 / 不支持类用例：通过表示「已按预期拒绝」 */
   expect: VideoExpect
-  status: 'pass' | 'fail' | 'error'
+  status: 'pass' | 'fail' | 'error' | 'unverified'
   /** 拒绝类用例 status=error 时区分「真出片」与「请求异常」 */
   negativeProduced: boolean
   httpStatus: number
@@ -83,6 +99,8 @@ export interface VideoReportSummary {
     failed: number
     errored: number
     passRate: number | null
+    /** 照发但不计入通过、未通过、请求异常的条数 */
+    unverified: number
     avgDurationMs: number
     level: VideoSupportLevel
     verdictText: string
@@ -120,29 +138,40 @@ function videoIssueText(r: VideoRecord, firstFail: VideoCheck | null): string | 
   return firstFail ? videoTruncate(videoCheckSummaryText(firstFail)) : null
 }
 
+/** 待核实不进通过率，问题列仍写出这次实际发生了什么。 */
+function videoUnverifiedNote(r: VideoRecord, firstFail: VideoCheck | null): string {
+  if (!r.ok) return videoTruncate(r.error || (firstFail ? videoCheckSummaryText(firstFail) : `HTTP ${r.status || 0}`))
+  if (firstFail) return videoTruncate(videoCheckSummaryText(firstFail))
+  if (r.kind === 'context-ir') return '有增强提示词'
+  if (r.videoUrl) return '已出片'
+  return '已完成'
+}
+
 export function videoBuildReportSummary(records: VideoRecord[]): VideoReportSummary {
   const rows: VideoCaseRow[] = records.map((r, i) => {
     const real = (r.checks || []).filter(x => !x.info)
     const firstFail = real.find(x => !x.pass) || null
     const size = r.probe && r.probe.w > 0 ? `${r.probe.w}×${r.probe.h}` : ''
+    const unverified = r.expect === 'unverified'
     return {
       id: r.id,
       index: i + 1,
       caseName: r.caseName || '（未命名用例）',
       expect: r.expect ?? 'success',
-      status: videoClassify(r),
+      status: unverified ? 'unverified' as const : videoClassify(r),
       negativeProduced: videoNegativeProduced(r),
       httpStatus: r.status || 0,
       durationMs: r.durationMs || 0,
       sizeText: size || '—',
       passedChecks: real.filter(x => x.pass).length,
       totalChecks: real.length,
-      issue: videoIssueText(r, firstFail),
+      issue: unverified ? videoUnverifiedNote(r, firstFail) : videoIssueText(r, firstFail),
     }
   })
 
   const buckets = new Map<string, { passedCases: number; totalCases: number; sample: string | null }>()
   for (const r of records) {
+    if (r.expect === 'unverified') continue
     const seen = new Map<string, { pass: boolean; sample: string | null }>()
     for (const c of r.checks || []) {
       if (c.info) continue
@@ -180,27 +209,31 @@ export function videoBuildReportSummary(records: VideoRecord[]): VideoReportSumm
     }))
     .sort((a, b) => orderOf(a.key) - orderOf(b.key))
 
-  const total = rows.length
-  const passed = rows.filter(x => x.status === 'pass').length
-  const failed = rows.filter(x => x.status === 'fail').length
-  const errored = rows.filter(x => x.status === 'error').length
+  const scored = rows.filter(x => x.status !== 'unverified')
+  const unverified = rows.length - scored.length
+  const total = scored.length
+  const passed = scored.filter(x => x.status === 'pass').length
+  const failed = scored.filter(x => x.status === 'fail').length
+  const errored = scored.filter(x => x.status === 'error').length
   const unsupported = capabilities.filter(c => c.level !== 'ok').length
-  const level: VideoSupportLevel = errored > 0 ? 'fail' : failed > 0 ? 'partial' : 'ok'
-  const verdictText = level === 'ok' ? '全部通过' : level === 'partial' ? '部分能力不支持' : '存在请求失败'
+  const note = unverified ? ` · ${unverified} 条待核实` : ''
+  const level: VideoSupportLevel = total === 0 && unverified > 0 ? 'partial' : errored > 0 ? 'fail' : failed > 0 ? 'partial' : 'ok'
+  const verdictText = total === 0 && unverified > 0 ? '待核实' : level === 'ok' ? '全部通过' : level === 'partial' ? '部分能力不支持' : '存在请求失败'
   const headline = total === 0
-    ? '没有可展示的测试记录'
+    ? (unverified > 0 ? `${unverified} 条待核实，没有计入通过率的用例` : '没有可展示的测试记录')
     : level === 'ok'
-      ? `${total} 个用例全部通过，所测参数均被正确支持`
+      ? `${total} 个用例全部通过，所测参数均被正确支持${note}`
       : errored > 0
-        ? `${passed}/${total} 个用例通过 · ${errored} 个请求失败${unsupported ? ` · ${unsupported} 项能力未完整支持` : ''}`
-        : `${passed}/${total} 个用例通过 · ${unsupported} 项能力未完整支持`
+        ? `${passed}/${total} 个用例通过 · ${errored} 个请求失败${unsupported ? ` · ${unsupported} 项能力未完整支持` : ''}${note}`
+        : `${passed}/${total} 个用例通过 · ${unsupported} 项能力未完整支持${note}`
 
   const times = records.map(r => r.time).filter(t => typeof t === 'number')
   return {
     overall: {
       total, passed, failed, errored,
       passRate: total ? passed / total : null,
-      avgDurationMs: total ? Math.round(records.reduce((s, r) => s + (r.durationMs || 0), 0) / total) : 0,
+      unverified,
+      avgDurationMs: total ? Math.round(records.filter(r => r.expect !== 'unverified').reduce((s, r) => s + (r.durationMs || 0), 0) / total) : 0,
       level, verdictText, headline,
     },
     capabilities,

@@ -1,6 +1,6 @@
 import type { VideoApiType, VideoRecord } from './types'
 import { videoApiTypeOf } from './types'
-import { videoClassify } from './summary'
+import { videoScoreBucket } from './summary'
 
 export const VIDEO_HIST_MAX_BATCHES = 20
 const VIDEO_LEGACY_GAP_MS = 3 * 60 * 1000
@@ -16,6 +16,7 @@ export interface VideoBatch {
   passed: number
   failed: number
   errored: number
+  unverified: number
   legacy: boolean
 }
 
@@ -24,12 +25,13 @@ function videoBatchOf(id: string, records: VideoRecord[], legacy: boolean): Vide
   const times = sorted.map(r => r.time)
   const models: string[] = []
   for (const r of sorted) if (r.model && !models.includes(r.model)) models.push(r.model)
-  let passed = 0, failed = 0, errored = 0
+  let passed = 0, failed = 0, errored = 0, unverified = 0
   for (const r of sorted) {
-    const k = videoClassify(r)
+    const k = videoScoreBucket(r)
     if (k === 'pass') passed++
     else if (k === 'fail') failed++
-    else errored++
+    else if (k === 'error') errored++
+    else unverified++
   }
   return {
     id,
@@ -39,7 +41,7 @@ function videoBatchOf(id: string, records: VideoRecord[], legacy: boolean): Vide
     channelName: sorted[0]?.channelName || '',
     models,
     apiType: videoApiTypeOf(sorted[0]?.apiType),
-    passed, failed, errored,
+    passed, failed, errored, unverified,
     legacy,
   }
 }

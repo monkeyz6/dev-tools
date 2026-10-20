@@ -1,13 +1,14 @@
 import { describe, it } from 'node:test'
 import assert from 'node:assert/strict'
-import { videoBuildReportSummary } from './summary.ts'
+import { videoBuildReportSummary, videoScoreBucket, videoWorkbenchExpect } from './summary.ts'
+import { videoGroupBatches } from './batches.ts'
 import { VIDEO_CASE_DEFS, videoApiTypeOf } from './types.ts'
 import type { VideoRecord } from './types.ts'
 import {
-  MINIMAX_CASE_DEFS, MINIMAX_CREATE_ENDPOINT, MINIMAX_DEFAULT_MODEL,
+  MINIMAX_CASE_DEFS, MINIMAX_CONTEXT_IR_ENDPOINT, MINIMAX_CREATE_ENDPOINT, MINIMAX_DEFAULT_MODEL, MINIMAX_REGEN_ENDPOINT,
   minimaxBuildChecks, minimaxBuildPlan, minimaxCapabilityHint, minimaxCaseDefsFor, minimaxExpect,
-  minimaxExtractEcho, minimaxExtractStatus, minimaxExtractTaskId, minimaxExtractVideoUrl,
-  minimaxFormatTaskError, minimaxQueryEndpoint, minimaxRefImageCounts,
+  minimaxExtractEcho, minimaxExtractPrompt, minimaxExtractStatus, minimaxExtractTaskId, minimaxExtractTaskType, minimaxExtractVideoUrl,
+  minimaxAdoptSource, minimaxFormatTaskError, minimaxQueryEndpoint, minimaxRefImageCounts, minimaxRegenSource, minimaxSentText, minimaxSourceFromRecord,
   videoIsMinimaxH3, videoIsMinimaxMax, videoLooksLikeMinimaxModel, videoMinimaxPath, videoMinimaxUrl,
 } from './minimax.ts'
 
@@ -20,7 +21,7 @@ const urls = {
 }
 
 const def = (id: string) => {
-  const d = MINIMAX_CASE_DEFS.find(x => x.id === id)
+  const d = minimaxCaseDefsFor('MiniMax-H3').find(x => x.id === id) || MINIMAX_CASE_DEFS.find(x => x.id === id)
   assert.ok(d, `缺少用例 ${id}`)
   return d!
 }
@@ -197,6 +198,7 @@ describe('minimaxBuildPlan', () => {
     assert.deepEqual(h3.map(d => d.id), [
       'minimax:t2v-768p', 'minimax:i2v-first', 'minimax:i2v-frames', 'minimax:ref',
       'minimax:ref-img-1', 'minimax:ref-img-5', 'minimax:ref-img-6', 'minimax:t2v-2k',
+      'minimax:context-ir', 'minimax:regen-task', 'minimax:regen-video',
     ])
     assert.equal(MINIMAX_CASE_DEFS.some(d => d.kind === 'ref-images'), false)
     assert.equal(h3.filter(d => d.kind === 'ref-images').every(d => d.expect === 'success' && d.params.resolution === '768P' && d.params.duration === 5 && d.params.ratio === 'adaptive'), true)
@@ -253,6 +255,99 @@ describe('minimaxBuildPlan', () => {
     assert.ok(fourImages.every(x => x.image_url?.url === urls.refImage))
     assert.equal(minimaxCaseDefsFor('MiniMax-H3').some(d => d.id === 'minimax:ref-img-4'), false)
   })
+
+  it('三条旁路在列表末尾；H3 正向，Max 与认不出的名字待核实，2K 文生仍按原规则', () => {
+    for (const model of ['MiniMax-H3', 'MiniMax-H3-intl', 'MiniMax-H3-Max', 'MiniMax-H3-Fast']) {
+      const ids = minimaxCaseDefsFor(model).map(d => d.id)
+      assert.deepEqual(ids.slice(-3), ['minimax:context-ir', 'minimax:regen-task', 'minimax:regen-video'], model)
+    }
+    const ir = def('minimax:context-ir')
+    const task = def('minimax:regen-task')
+    const video = def('minimax:regen-video')
+    for (const d of [ir, task, video]) {
+      assert.equal(minimaxExpect(d, 'MiniMax-H3'), 'success')
+      assert.equal(minimaxExpect(d, 'MiniMax-H3-intl'), 'success')
+      assert.equal(minimaxExpect(d, 'MiniMax-H3-Max'), 'unverified')
+      assert.equal(minimaxExpect(d, 'MiniMax-H3-Max-intl'), 'unverified')
+      assert.equal(minimaxExpect(d, 'MiniMax-H3-Fast'), 'unverified')
+    }
+    assert.equal(minimaxExpect(def('minimax:t2v-2k'), 'MiniMax-H3-Max'), 'unsupported')
+  })
+
+  it('Context-IR 只发文本、时长和比例', () => {
+    const built = minimaxBuildPlan(def('minimax:context-ir'), 'MiniMax-H3-intl', '海浪', urls)
+    assert.equal(built.missing, null)
+    assert.equal(built.plan.endpoint, MINIMAX_CONTEXT_IR_ENDPOINT)
+    assert.deepEqual(built.plan.body, {
+      model: 'MiniMax-H3-intl',
+      content: [{ type: 'text', text: '海浪' }],
+      duration: 5,
+      ratio: '16:9',
+    })
+    assert.equal('resolution' in built.plan.body, false)
+  })
+
+  it('再生成两种 body 互斥，缺源不发送，文本用 768P 当时发出的', () => {
+    const source = { taskId: 'task_768', videoUrl: 'https://cdn.hailuoai.com/a.mp4', prompt: '当时的海浪' }
+    const task = minimaxBuildPlan(def('minimax:regen-task'), 'MiniMax-H3', '后来改的', urls, source)
+    assert.equal(task.missing, null)
+    assert.equal(task.plan.endpoint, MINIMAX_REGEN_ENDPOINT)
+    assert.deepEqual(task.plan.body, { model: 'MiniMax-H3', source_task_id: 'task_768', resolution: '2K' })
+    assert.equal('content' in task.plan.body, false)
+    const video = minimaxBuildPlan(def('minimax:regen-video'), 'MiniMax-H3-intl', '后来改的', urls, source)
+    assert.equal(video.missing, null)
+    assert.deepEqual(video.plan.body, {
+      model: 'MiniMax-H3-intl',
+      content: [
+        { type: 'text', text: '当时的海浪' },
+        { type: 'video_url', video_url: { url: 'https://cdn.hailuoai.com/a.mp4' }, role: 'base_video' },
+      ],
+      resolution: '2K',
+    })
+    assert.equal('source_task_id' in video.plan.body, false)
+    assert.equal('duration' in video.plan.body, false)
+    const noTask = minimaxBuildPlan(def('minimax:regen-task'), 'MiniMax-H3', '海浪', urls, null)
+    assert.match(noTask.missing || '', /task_id/)
+    assert.equal(noTask.plan.body.source_task_id, '')
+    const noUrl = minimaxBuildPlan(def('minimax:regen-video'), 'MiniMax-H3', '海浪', urls, { taskId: 'task_768', videoUrl: '  ', prompt: '当时的海浪' })
+    assert.match(noUrl.missing || '', /content\.url/)
+    assert.equal((noUrl.plan.body.content as { text?: string }[])[0].text, '当时的海浪')
+  })
+
+  it('再生成只认同一渠道和同一批，改模型仍用这条源', () => {
+    const incoming = { taskId: 'task_768', videoUrl: 'https://cdn.hailuoai.com/a.mp4', prompt: '当时的海浪' }
+    const kept = { ...incoming, channelId: 'ch-a', runId: 'run-a' }
+    assert.deepEqual(minimaxAdoptSource(kept, null, 'ch-a', 'run-a', 'run-a'), kept)
+    assert.deepEqual(minimaxAdoptSource(kept, incoming, 'ch-b', 'run-b', 'run-a'), kept)
+    assert.deepEqual(minimaxAdoptSource(null, incoming, 'ch-a', 'run-a', 'run-a'), kept)
+    assert.equal(minimaxAdoptSource(null, incoming, '', 'run-a', 'run-a'), null)
+    const same = minimaxRegenSource(kept, 'ch-a', 'run-a')
+    assert.equal(same.blocked, null)
+    assert.equal(same.source?.taskId, 'task_768')
+    const otherCh = minimaxRegenSource(kept, 'ch-b', 'run-a')
+    assert.match(otherCh.blocked || '', /渠道/)
+    assert.equal(otherCh.source, null)
+    const otherRun = minimaxRegenSource(kept, 'ch-a', 'run-b')
+    assert.match(otherRun.blocked || '', /批次/)
+    assert.equal(otherRun.source, null)
+    const built = minimaxBuildPlan(def('minimax:regen-task'), 'MiniMax-H3-Max', '后来改的', urls, same.source)
+    assert.equal(built.missing, null)
+    assert.equal(built.plan.body.model, 'MiniMax-H3-Max')
+    assert.equal(built.plan.body.source_task_id, 'task_768')
+  })
+
+  it('768P 成功记录能还原源，blob 地址不拿去再生成', () => {
+    const sent = JSON.stringify({ content: [{ type: 'text', text: '发出的文案' }] })
+    assert.equal(minimaxSentText(sent), '发出的文案')
+    const src = minimaxSourceFromRecord(rec({
+      caseId: 'minimax:t2v-768p', sentPreview: sent, prompt: '左栏',
+      targets: { outputUri: 'https://cdn.hailuoai.com/remote.mp4' },
+      videoUrl: 'blob:http://localhost/1',
+    }))
+    assert.deepEqual(src, { taskId: 'task_1', videoUrl: 'https://cdn.hailuoai.com/remote.mp4', prompt: '发出的文案' })
+    assert.equal(minimaxSourceFromRecord(rec({ caseId: 'minimax:t2v-768p', ok: false, taskStatus: 'failed' })), null)
+    assert.equal(minimaxSourceFromRecord(rec({ caseId: 'minimax:t2v-2k' })), null)
+  })
 })
 
 describe('MiniMax 响应解析', () => {
@@ -306,6 +401,15 @@ describe('MiniMax 响应解析', () => {
       '1026 video description contains sensitive content',
     )
     assert.equal(minimaxExtractEcho({ data: { task: { duration: '5', resolution: '2K', ratio: '9:16' } } }).duration, 5)
+  })
+
+  it('Context-IR 读 content.prompt，再生成读 task_type', () => {
+    const ir = { task: { status: 'succeeded', content: { prompt: '  enhanced  ' }, task_type: 'h3_context_ir', ratio: '16:9' } }
+    assert.equal(minimaxExtractPrompt(ir), 'enhanced')
+    assert.equal(minimaxExtractTaskType(ir), 'h3_context_ir')
+    assert.equal(minimaxExtractVideoUrl(ir), null)
+    assert.equal(minimaxExtractPrompt({ task: { content: { prompt: '  ' } } }), null)
+    assert.equal(minimaxExtractTaskType({ task: { task_type: '' } }), null)
   })
 })
 
@@ -405,5 +509,97 @@ describe('minimaxBuildChecks', () => {
     assert.equal(echo?.label, '参数回显')
     assert.equal(echo?.passedCases, 0)
     assert.equal(echo?.totalCases, 1)
+  })
+
+  it('Context-IR 无成片仍通过，提示词为空则失败，时长比例只记 info', () => {
+    const ok = minimaxBuildChecks(rec({
+      kind: 'context-ir', caseName: 'H3-Context-IR · 5s · 16:9', videoUrl: null, probe: null,
+      targets: { duration: 5, ratio: '16:9', enhancedPrompt: 'a longer prompt', echoDuration: 5, echoRatio: '16:9', taskType: 'h3_context_ir' },
+    }))
+    assert.equal(ok.find(c => c.name === '增强提示词')?.pass, true)
+    assert.equal(ok.some(c => c.name === '视频地址'), false)
+    assert.equal(ok.find(c => c.name === '时长回显')?.info, true)
+    assert.equal(ok.find(c => c.name === '比例回显')?.info, true)
+    assert.equal(ok.filter(c => !c.info).every(c => c.pass), true)
+    const missing = minimaxBuildChecks(rec({
+      kind: 'context-ir', videoUrl: null, probe: null, taskStatus: 'succeeded',
+      targets: { duration: 5, ratio: '16:9' },
+    }))
+    assert.equal(missing.find(c => c.name === '增强提示词')?.pass, false)
+    assert.equal(missing.find(c => c.name === '任务类型')?.info, true)
+    const wrong = minimaxBuildChecks(rec({
+      kind: 'context-ir', videoUrl: null, probe: null,
+      targets: { enhancedPrompt: 'p', taskType: 'generation' },
+    }))
+    assert.equal(wrong.find(c => c.name === '任务类型')?.pass, false)
+  })
+
+  it('再生成空比例只记 info，回了具体比例才比对，待核实不进通过率', () => {
+    const checks = minimaxBuildChecks(rec({
+      kind: 'regen-task',
+      targets: { resolution: '2K', duration: 5, ratio: '16:9', echoResolution: '2K', echoDuration: 5, echoRatio: '', taskType: 'regeneration' },
+    }))
+    assert.equal(checks.find(c => c.name === '分辨率回显')?.pass, true)
+    assert.equal(checks.find(c => c.name === '比例回显')?.info, true)
+    assert.equal(checks.find(c => c.name === '比例回显')?.pass, true)
+    assert.equal(checks.some(c => c.name === '宽高比'), false)
+    assert.equal(checks.filter(c => !c.info).every(c => c.pass), true)
+    const concrete = minimaxBuildChecks(rec({
+      kind: 'regen-video',
+      targets: { resolution: '2K', duration: 5, ratio: '16:9', echoResolution: '2K', echoDuration: 5, echoRatio: '9:16' },
+      probe: { w: 1280, h: 720, duration: 5 },
+    }))
+    assert.equal(concrete.find(c => c.name === '比例回显')?.pass, false)
+    const scored = rec({ id: 'scored', checks: minimaxBuildChecks(rec({})) })
+    const pending = rec({
+      id: 'pending', expect: 'unverified', kind: 'context-ir', ok: false, status: 400, videoUrl: null, probe: null,
+      error: 'HTTP 400', checks: minimaxBuildChecks(rec({ kind: 'context-ir', status: 400, ok: false, taskStatus: null, videoUrl: null, probe: null, targets: {} })),
+    })
+    const summary = videoBuildReportSummary([scored, pending])
+    assert.equal(summary.overall.passed, 1)
+    assert.equal(summary.overall.total, 1)
+    assert.equal(summary.overall.failed, 0)
+    assert.equal(summary.overall.errored, 0)
+    assert.equal(summary.overall.unverified, 1)
+    assert.match(summary.overall.headline, /1 条待核实/)
+    assert.equal(summary.rows[1].status, 'unverified')
+    assert.match(summary.rows[1].issue || '', /HTTP 400|无响应|增强提示词/)
+    assert.equal(summary.capabilities.every(c => c.totalCases === 1), true)
+    const only = videoBuildReportSummary([pending])
+    assert.equal(only.overall.total, 0)
+    assert.equal(only.overall.verdictText, '待核实')
+    assert.match(only.overall.headline, /没有计入通过率/)
+  })
+})
+
+describe('历史批次通过率', () => {
+  it('待核实不进通过、未通过、请求失败', () => {
+    const scored = rec({ id: 'scored', runId: 'run-1', checks: minimaxBuildChecks(rec({})) })
+    const pendingOk = rec({
+      id: 'pending-ok', runId: 'run-1', expect: 'unverified', kind: 'context-ir', ok: true,
+      checks: [{ name: '增强提示词', target: '非空', actual: 'x', pass: true }],
+    })
+    const pendingErr = rec({
+      id: 'pending-err', runId: 'run-1', expect: 'unverified', kind: 'regen-task', ok: false, status: 400, error: 'HTTP 400',
+      checks: [{ name: '请求成功', target: 'HTTP 2xx', actual: 'HTTP 400', pass: false }],
+    })
+    assert.equal(videoScoreBucket(pendingOk), 'unverified')
+    assert.equal(videoScoreBucket(pendingErr), 'unverified')
+    const batch = videoGroupBatches([scored, pendingOk, pendingErr])[0]
+    assert.equal(batch.passed, 1)
+    assert.equal(batch.failed, 0)
+    assert.equal(batch.errored, 0)
+    assert.equal(batch.unverified, 2)
+    assert.equal(batch.records.length, 3)
+  })
+})
+
+describe('工作台计数认记录', () => {
+  it('有结果用记录上的 expect，没有则用当前模型现算', () => {
+    assert.equal(videoWorkbenchExpect(true, 'unverified', 'success'), 'unverified')
+    assert.equal(videoWorkbenchExpect(true, 'success', 'unverified'), 'success')
+    assert.equal(videoWorkbenchExpect(true, undefined, 'unverified'), 'success')
+    assert.equal(videoWorkbenchExpect(false, undefined, 'unverified'), 'unverified')
+    assert.equal(videoWorkbenchExpect(false, 'success', 'unverified'), 'unverified')
   })
 })
