@@ -1,4 +1,4 @@
-import type { VideoCheck, VideoErrorDetail, VideoRecord } from './types.ts'
+import { videoIsMaterialKind, type VideoCheck, type VideoErrorDetail, type VideoRecord } from './types.ts'
 
 /** 火山方舟推理错误码（docs/82379/1299023）里与视频生成相关的族 */
 export type VideoErrorFamily = 'sensitive' | 'parameter' | 'auth' | 'rateLimit' | 'internal'
@@ -80,7 +80,7 @@ export function videoTaskFailedStatus(st: string | null | undefined): boolean {
 /** 生成任务 failed，或查询/提交 HTTP ≥400 时才做错误体校验；素材 OpenAPI 错误形态不同，不套用 */
 export function videoShouldCheckErrorBody(rec: Pick<VideoRecord, 'status' | 'taskStatus'> & { kind?: VideoRecord['kind']; apiType?: VideoRecord['apiType'] }): boolean {
   if (rec.apiType === 'google-omni' || rec.apiType === 'minimax') return false
-  if (rec.kind === 'material-group' || rec.kind === 'material-assets') return false
+  if (videoIsMaterialKind(rec.kind)) return false
   return videoTaskFailedStatus(rec.taskStatus) || rec.status >= 400
 }
 

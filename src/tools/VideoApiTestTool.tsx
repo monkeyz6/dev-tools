@@ -8,7 +8,7 @@ import { uniqueCopyName } from '../shared/channel-copy'
 import { encryptLlmApiKey, decryptLlmApiKey } from '../shared/api-key-crypto'
 import { fetchVideoObjectUrl, probeVideoMeta, vidAspectRatio, vidCheckRatio, vidCheckResolution, vidFormatDuration, videoIsRemoteHttpUrl } from '../shared/video-meta'
 import type { VideoProbeResult } from '../shared/video-meta'
-import { VIDEO_API_TYPE_LABEL, VIDEO_CASE_DEFS, VIDEO_MATERIAL_DEFS, VIDEO_REQUIREMENT_LABEL, VIDEO_RESOLUTION_HEIGHT, videoApiTypeOf, videoModelMaxResolution, videoModelMaxResolutionLabel, videoModelMeetsRequirement, videoFmtTime } from './video-report/types'
+import { VIDEO_API_TYPE_LABEL, VIDEO_CASE_DEFS, VIDEO_MATERIAL_DEFS, VIDEO_REQUIREMENT_LABEL, VIDEO_RESOLUTION_HEIGHT, videoApiTypeOf, videoIsMaterialKind, videoModelMaxResolution, videoModelMaxResolutionLabel, videoModelMeetsRequirement, videoFmtTime } from './video-report/types'
 import type { VideoApiType, VideoCaseDef, VideoCaseKind, VideoCheck, VideoExpect, VideoRecord } from './video-report/types'
 import {
   OMNI_CASE_DEFS, OMNI_DEFAULT_MODEL, OMNI_DEFAULT_URLS, OMNI_MODEL_OPTIONS,
@@ -16,6 +16,8 @@ import {
   omniLooksLikeModel, omniResolveFileUrl, omniSupportsResolution,
   omniMaterializeRequest, omniParseSubmit, omniPollUrl, omniPreviewBody, omniScrubBody, omniScrubValue,
 } from './video-report/google-omni'
+import { videoAssetEmptyNameChecks } from './video-report/asset-empty-name'
+import { VIDEO_ASSET_QUERY_MAX, VIDEO_ASSET_QUERY_WAIT_MS, videoAssetListBody, videoAssetQueryChecks, videoMaterialAssetsFromRecords, videoNamedAssets, videoScoreGetAsset, videoScoreListAssets } from './video-report/asset-query'
 import { formatVideoTaskError, parseVideoTaskError, videoBuildErrorBodyChecks, videoShouldCheckErrorBody } from './video-report/errors'
 import { videoOfficialLink, videoOfficialUrlVerdict } from './video-report/official-url'
 import { VIDEO_TASK_ENDPOINT, videoAssetEndpoint, videoSeedancePath, videoSeedanceUrl } from './video-report/seedance-url'
@@ -357,6 +359,50 @@ function videoBuildPlan(def: VideoCaseDef, model: string, prompt: string, urls: 
       skipped: [], missing: assets?.groupId ? null : '素材组尚未创建', targets: {},
     }
   }
+  if (kind === 'material-asset-empty-name') {
+    const url = videoTrimUrl(urls.firstFrame)
+    return {
+      plan: {
+        kind: 'openapi',
+        method: 'POST',
+        endpoint: videoAssetEndpoint('CreateAsset'),
+        headers: { Authorization: 'Bearer {{APIKEY}}', 'Content-Type': 'application/json' },
+        body: { GroupId: assets?.groupId || '{{GROUP_ID}}', URL: url, AssetType: 'Image' },
+      },
+      skipped: [],
+      missing: !assets?.groupId ? '素材组尚未创建' : (!url ? '首帧 URL（左栏为空）' : null),
+      targets: {},
+    }
+  }
+  if (kind === 'material-asset-get') {
+    const named = videoNamedAssets(assets)
+    return {
+      plan: {
+        kind: 'openapi',
+        method: 'POST',
+        endpoint: videoAssetEndpoint('GetAsset'),
+        headers: { Authorization: 'Bearer {{APIKEY}}', 'Content-Type': 'application/json' },
+        body: { Id: named[0]?.id || '{{ASSET_ID}}' },
+      },
+      skipped: [],
+      missing: named.length ? null : '请先运行「素材登记」',
+      targets: {},
+    }
+  }
+  if (kind === 'material-asset-list') {
+    return {
+      plan: {
+        kind: 'openapi',
+        method: 'POST',
+        endpoint: videoAssetEndpoint('ListAssets'),
+        headers: { Authorization: 'Bearer {{APIKEY}}', 'Content-Type': 'application/json' },
+        body: videoAssetListBody(assets?.groupId || '{{GROUP_ID}}'),
+      },
+      skipped: [],
+      missing: videoNamedAssets(assets).length ? null : '请先运行「素材登记」',
+      targets: {},
+    }
+  }
 
   const text = { type: 'text', text: def.prompt ?? prompt }
   let content: Record<string, unknown>[] = [text]
@@ -501,8 +547,20 @@ function videoBuildChecks(rec: VideoRecord): VideoCheck[] {
     checks.push({ name: '素材角色', target: '已提供', actual: skip, pass: true, info: true })
   }
 
-  if (rec.kind === 'material-group' || rec.kind === 'material-assets') {
-    checks.push({ name: rec.kind === 'material-group' ? '素材组' : '素材登记', target: '成功', actual: rec.ok ? (rec.taskId || 'ok') : (rec.error || '失败'), pass: rec.ok })
+  if (rec.kind === 'material-asset-empty-name' && rec.assetEmptyName) {
+    checks.push(...videoAssetEmptyNameChecks(rec.assetEmptyName))
+    return checks
+  }
+  if ((rec.kind === 'material-asset-get' || rec.kind === 'material-asset-list') && rec.assetQuery?.queried) {
+    checks.push(...videoAssetQueryChecks(rec.assetQuery))
+    return checks
+  }
+  if (videoIsMaterialKind(rec.kind)) {
+    const label = rec.kind === 'material-group' ? '素材组'
+      : rec.kind === 'material-asset-get' ? '素材查询'
+        : rec.kind === 'material-asset-list' ? '素材列表'
+          : '素材登记'
+    checks.push({ name: label, target: '成功', actual: rec.ok ? (rec.taskId || 'ok') : (rec.error || '失败'), pass: rec.ok })
     return checks
   }
 
@@ -1275,7 +1333,8 @@ function VideoApiTestTool() {
   const runOpenApi = async (c: VideoCase, ch: VideoChannel, apiKey: string, rec: VideoRecord) => {
     const built = videoBuildPlan(c.def, model, prompt, urlsRef.current, testMaterials, assetsRef.current)
     let plan = built.plan
-    if (c.editedPreview != null) plan = videoParseEditedPreview(plan, c.editedPreview)
+    // 素材查询的预览只是单条占位，实际按登记 id 逐条发。手改或写坏这块 JSON 不参与请求。
+    if (c.editedPreview != null && c.kind !== 'material-asset-get') plan = videoParseEditedPreview(plan, c.editedPreview)
     rec.skippedRoles = built.skipped
     rec.sentPreview = JSON.stringify(plan.body, null, 2)
     if (c.kind === 'material-assets' && !assetsRef.current.groupId) {
@@ -1302,6 +1361,197 @@ function VideoApiTestTool() {
         rec.ok = true
         rec.taskId = String(id)
         assetsRef.current = { groupId: String(id) }
+      }
+      rec.checks = videoBuildChecks(rec)
+      return
+    }
+
+    if (c.kind === 'material-asset-empty-name') {
+      const groupId = assetsRef.current.groupId
+      if (!groupId) {
+        rec.ok = false
+        rec.error = '请先运行「创建素材组」'
+        rec.checks = videoBuildChecks(rec)
+        return
+      }
+      const body: Record<string, unknown> = { ...plan.body }
+      if (body.GroupId === '{{GROUP_ID}}' || body.GroupId == null || body.GroupId === '') body.GroupId = groupId
+      const url = typeof body.URL === 'string' ? body.URL.trim() : ''
+      if (!url) {
+        rec.ok = false
+        rec.error = '首帧 URL（左栏为空）'
+        rec.checks = videoBuildChecks(rec)
+        return
+      }
+      body.URL = url
+      rec.sentPreview = JSON.stringify(body, null, 2)
+      const resp = await videoFetch(videoSeedanceUrl(ch.baseUrl, videoAssetEndpoint('CreateAsset')), VIDEO_REQUEST_TIMEOUT_MS, {
+        method: 'POST', headers: videoHeaders(apiKey), body: JSON.stringify(body),
+      })
+      const text = await resp.text()
+      rec.status = resp.status
+      rec.respHeaders = Object.fromEntries(resp.headers.entries())
+      const json = videoParseJson(text)
+      const metaRequestId = json?.ResponseMetadata?.RequestId
+      rec.reqId = rec.respHeaders['x-oneapi-request-id'] || rec.respHeaders['x-request-id'] || (typeof metaRequestId === 'string' ? metaRequestId : '')
+      const err = videoOpenApiError(json, resp.status, text)
+      const id = json?.Result?.Id || json?.Result?.id
+      const evidence = {
+        requestBody: body,
+        createJson: json,
+        getJson: null as unknown,
+        groupId: typeof body.GroupId === 'string' ? body.GroupId : groupId,
+        assetType: typeof body.AssetType === 'string' ? body.AssetType : 'Image',
+        queried: false,
+      }
+      rec.assetEmptyName = evidence
+      if (err || !id) {
+        rec.ok = false
+        rec.error = err || '未返回素材 Id'
+        rec.rawSnippet = videoFormatBody(text)
+        rec.checks = videoBuildChecks(rec)
+        return
+      }
+      // 不写入 assetsRef：这条没有 Name，不能盖掉「素材登记」留给生视频用例的素材 id
+      const assetId = String(id)
+      rec.taskId = assetId
+      const t0 = Date.now()
+      let status = 'Processing'
+      let lastStatus = resp.status
+      let lastText = ''
+      while (Date.now() - t0 < VIDEO_ASSET_POLL_MAX_MS) {
+        if (stopRef.current) break
+        const q = await videoFetch(videoSeedanceUrl(ch.baseUrl, videoAssetEndpoint('GetAsset')), VIDEO_REQUEST_TIMEOUT_MS, {
+          method: 'POST', headers: videoHeaders(apiKey), body: JSON.stringify({ Id: assetId }),
+        })
+        const qt = await q.text()
+        lastStatus = q.status
+        lastText = qt
+        const qj = videoParseJson(qt)
+        evidence.getJson = qj
+        evidence.queried = true
+        status = qj?.Result?.Status || qj?.Result?.status || ''
+        rec.pollLog.push({ at: Date.now(), status })
+        rec.pollCount += 1
+        if (status === 'Active' || status === 'Failed') break
+        await sleep(VIDEO_POLL_MS)
+      }
+      rec.status = lastStatus
+      rec.rawSnippet = [videoFormatBody(text), lastText ? videoFormatBody(lastText) : ''].filter(Boolean).join('\n\n')
+      const httpOk = rec.status >= 200 && rec.status < 300
+      if (status !== 'Active') {
+        rec.ok = false
+        rec.error = stopRef.current ? '已停止' : `素材状态 ${status || '超时'}`
+      } else {
+        rec.ok = httpOk
+        if (!httpOk) rec.error = `HTTP ${rec.status}`
+      }
+      rec.checks = videoBuildChecks(rec)
+      return
+    }
+
+    if (c.kind === 'material-asset-get' || c.kind === 'material-asset-list') {
+      const named = videoNamedAssets(assetsRef.current)
+      if (!named.length) {
+        rec.ok = false
+        rec.error = '请先运行「素材登记」'
+        rec.checks = videoBuildChecks(rec)
+        return
+      }
+      const responseRequestId = (json: unknown) => {
+        const meta = json && typeof json === 'object' ? (json as { ResponseMetadata?: { RequestId?: unknown } }).ResponseMetadata : undefined
+        return typeof meta?.RequestId === 'string' ? meta.RequestId : ''
+      }
+      const responseStatus = (json: unknown) => {
+        const result = json && typeof json === 'object' ? (json as { Result?: { Status?: unknown } }).Result : undefined
+        return typeof result?.Status === 'string' ? result.Status : ''
+      }
+      const snippets: string[] = []
+      const responses: unknown[] = []
+      let lastHttp = 0
+      let failedHttp = 0
+      let stopped = false
+      let httpOk = true
+      const noteStop = () => {
+        stopped = true
+        rec.ok = false
+        rec.error = '已停止'
+      }
+      const finishAttempt = (statusCode: number, verdict: 'ready' | 'wait' | 'fail', attempt: number) => {
+        if (statusCode < 200 || statusCode >= 300) {
+          httpOk = false
+          if (!failedHttp) failedHttp = statusCode
+        }
+        return statusCode < 200 || statusCode >= 300 || verdict !== 'wait' || attempt === VIDEO_ASSET_QUERY_MAX
+      }
+
+      if (c.kind === 'material-asset-get') {
+        rec.sentPreview = JSON.stringify(named.map(asset => ({ Id: asset.id })), null, 2)
+        for (const asset of named) {
+          if (stopRef.current) { noteStop(); break }
+          let json: unknown = null
+          let text = ''
+          for (let attempt = 1; attempt <= VIDEO_ASSET_QUERY_MAX; attempt++) {
+            if (stopRef.current) { noteStop(); break }
+            const resp = await videoFetch(videoSeedanceUrl(ch.baseUrl, videoAssetEndpoint('GetAsset')), VIDEO_REQUEST_TIMEOUT_MS, {
+              method: 'POST', headers: videoHeaders(apiKey), body: JSON.stringify({ Id: asset.id }),
+            })
+            text = await resp.text()
+            lastHttp = resp.status
+            rec.respHeaders = Object.fromEntries(resp.headers.entries())
+            json = videoParseJson(text)
+            if (!rec.reqId) rec.reqId = rec.respHeaders['x-oneapi-request-id'] || rec.respHeaders['x-request-id'] || responseRequestId(json)
+            const scored = videoScoreGetAsset(json, asset)
+            rec.pollLog.push({ at: Date.now(), status: `${asset.name} #${attempt} ${responseStatus(json) || 'HTTP ' + resp.status}` })
+            rec.pollCount += 1
+            if (finishAttempt(resp.status, scored.verdict, attempt)) break
+            await sleep(VIDEO_ASSET_QUERY_WAIT_MS)
+            if (stopRef.current) { noteStop(); break }
+          }
+          if (text) {
+            responses.push(json)
+            snippets.push(videoFormatBody(text))
+          }
+          if (stopped) break
+        }
+        rec.assetQuery = { action: 'GetAsset', responses, expected: named.slice(0, responses.length), queried: responses.length > 0 }
+      } else {
+        let body = plan.body
+        const groupId = assetsRef.current.groupId
+        if (groupId) body = JSON.parse(JSON.stringify(body).split('{{GROUP_ID}}').join(groupId))
+        rec.sentPreview = JSON.stringify(body, null, 2)
+        let json: unknown = null
+        let text = ''
+        for (let attempt = 1; attempt <= VIDEO_ASSET_QUERY_MAX; attempt++) {
+          if (stopRef.current) { noteStop(); break }
+          const resp = await videoFetch(videoSeedanceUrl(ch.baseUrl, videoAssetEndpoint('ListAssets')), VIDEO_REQUEST_TIMEOUT_MS, {
+            method: 'POST', headers: videoHeaders(apiKey), body: JSON.stringify(body),
+          })
+          text = await resp.text()
+          lastHttp = resp.status
+          rec.respHeaders = Object.fromEntries(resp.headers.entries())
+          json = videoParseJson(text)
+          rec.reqId = rec.respHeaders['x-oneapi-request-id'] || rec.respHeaders['x-request-id'] || responseRequestId(json)
+          const scored = videoScoreListAssets(json, named)
+          rec.pollLog.push({ at: Date.now(), status: `列表 #${attempt} ${scored.verdict}` })
+          rec.pollCount += 1
+          if (finishAttempt(resp.status, scored.verdict, attempt)) break
+          await sleep(VIDEO_ASSET_QUERY_WAIT_MS)
+          if (stopRef.current) { noteStop(); break }
+        }
+        if (text) {
+          responses.push(json)
+          snippets.push(videoFormatBody(text))
+        }
+        rec.assetQuery = { action: 'ListAssets', responses, expected: named, queried: responses.length > 0 }
+      }
+
+      rec.status = failedHttp || lastHttp
+      rec.rawSnippet = snippets.join('\n\n')
+      rec.taskId = named.map(asset => `${asset.name}=${asset.id}`).join(', ')
+      if (!stopped) {
+        rec.ok = httpOk
+        if (!httpOk) rec.error = `HTTP ${failedHttp || lastHttp || '无响应'}`
       }
       rec.checks = videoBuildChecks(rec)
       return
@@ -2043,7 +2293,7 @@ function VideoApiTestTool() {
     try {
       if (apiType === 'google-omni') await runOmni(c, ch, apiKey, rec)
       else if (apiType === 'minimax') await runMinimax(c, ch, apiKey, rec)
-      else if (c.kind === 'material-group' || c.kind === 'material-assets') await runOpenApi(c, ch, apiKey, rec)
+      else if (videoIsMaterialKind(c.kind)) await runOpenApi(c, ch, apiKey, rec)
       else await runTask(c, ch, apiKey, rec)
     } catch (e: any) {
       rec.ok = false
@@ -2349,6 +2599,7 @@ function VideoApiTestTool() {
     minimaxSessionRef.current = null
     currentRunIdRef.current = batch.id.startsWith('legacy:') ? null : batch.id
     omniMediaCacheRef.current = new Map()
+    assetsRef.current = batchApi === 'seedance' ? videoMaterialAssetsFromRecords(batch.records) : { groupId: null }
     if (batchApi === 'google-omni') {
       const last = [...batch.records]
         .filter(r => r.ok && r.taskId && (r.expect ?? 'success') === 'success')

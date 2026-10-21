@@ -28,6 +28,7 @@ describe('videoCanRequery', () => {
     assert.equal(videoCanRequery(rec({})), false)
     assert.equal(videoCanRequery(rec({ taskId: 'g1', kind: 'material-group' })), false)
     assert.equal(videoCanRequery(rec({ taskId: 'a1', kind: 'material-assets' })), false)
+    assert.equal(videoCanRequery(rec({ taskId: 'a2', kind: 'material-asset-empty-name' })), false)
   })
 
   it('任务 failed 不能查，succeeded 且已有 video_url 也不能查', () => {
@@ -67,6 +68,7 @@ describe('videoCanReprobe', () => {
     assert.equal(videoCanReprobe({ kind: 't2v', videoUrl: 'https://cdn.example/v.mp4', probe, targets: {}, ok: true, checks: [] }), false)
     assert.equal(videoCanReprobe({ kind: 't2v', videoUrl: 'https://cdn.example/v.mp4', probe, targets: {}, ok: true, checks: [{ name: '分辨率', target: '1080p', actual: '最近 720p', pass: true }] }), false)
     assert.equal(videoCanReprobe({ kind: 'material-group', videoUrl: 'https://cdn.example/v.mp4', probe: null, targets: {}, ok: true, checks: [] }), false)
+    assert.equal(videoCanReprobe({ kind: 'material-asset-empty-name', videoUrl: 'https://cdn.example/v.mp4', probe: null, targets: {}, ok: true, checks: [] }), false)
     assert.equal(videoCanReprobe({ kind: 't2v', videoUrl: null, probe: null, targets: {}, ok: true, checks: [] }), false)
   })
 
@@ -121,8 +123,9 @@ describe('videoRetrySort', () => {
       cse({ kind: 't2v', status: 'idle' }),
       cse({ kind: 'material-group', status: 'idle' }),
       cse({ kind: 'material-assets', status: 'idle' }),
+      cse({ kind: 'material-asset-empty-name', status: 'idle' }),
     ])
-    assert.deepEqual(list.map(c => c.kind), ['material-group', 'material-assets', 't2v', 't2v'])
-    assert.equal(list[3].def.expect, 'reject')
+    assert.deepEqual(list.map(c => c.kind), ['material-group', 'material-assets', 'material-asset-empty-name', 't2v', 't2v'])
+    assert.equal(list[4].def.expect, 'reject')
   })
 })

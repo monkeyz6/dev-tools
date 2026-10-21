@@ -106,7 +106,7 @@ test('改 URL 后用例预览重写；素材开关改写成 asset://', async ({ 
   await page.getByRole('switch').click()
   await expect(page.getByRole('switch')).toHaveAttribute('aria-checked', 'true')
   await expect(page.getByText('素材组', { exact: true })).toBeVisible()
-  await expect(page.getByText('素材登记')).toBeVisible()
+  await expect(page.getByText('素材登记', { exact: true })).toBeVisible()
   if (!await framesPreview.isVisible()) await page.getByText('首尾帧', { exact: true }).click()
   await expect(framesPreview).toContainText('asset://{{first_frame}}')
   await expect(framesPreview).not.toContainText('https://example.com/custom-first.png')
@@ -267,6 +267,195 @@ test('素材库用例走 OpenAPI，媒体用例改写 asset://', async ({ page }
   expect(actions.filter(a => a === 'CreateAssetGroup').length).toBe(1)
   expect(actions.filter(a => a === 'CreateAsset').length).toBeGreaterThan(0)
   expect(taskBodies.some((b: any) => JSON.stringify(b).includes('asset://'))).toBeTruthy()
+})
+
+test('素材登记不传 Name：请求无 Name，返回按官方字段核对', async ({ page }) => {
+  const creates: any[] = []
+  await page.route(url => /[?&]Action=/.test(String(url)), async route => {
+    if (route.request().method() === 'OPTIONS') {
+      await route.fulfill({ status: 204, headers: CORS })
+      return
+    }
+    const action = new URL(route.request().url()).searchParams.get('Action') || ''
+    const body = route.request().postDataJSON()
+    if (action === 'CreateAssetGroup') {
+      await route.fulfill({
+        status: 200, contentType: 'application/json', headers: CORS,
+        body: JSON.stringify({ ResponseMetadata: { Action: 'CreateAssetGroup', Version: '2024-01-01', RequestId: 'req-g' }, Result: { Id: 'group-empty-name' } }),
+      })
+      return
+    }
+    if (action === 'CreateAsset') {
+      creates.push(body)
+      await route.fulfill({
+        status: 200, contentType: 'application/json', headers: CORS,
+        body: JSON.stringify({
+          ResponseMetadata: { Action: 'CreateAsset', Version: '2024-01-01', RequestId: 'req-c', Service: 'ark', Region: 'cn-beijing' },
+          Result: { Id: 'asset-empty-1' },
+        }),
+      })
+      return
+    }
+    if (action === 'GetAsset') {
+      await route.fulfill({
+        status: 200, contentType: 'application/json', headers: CORS,
+        body: JSON.stringify({
+          ResponseMetadata: { Action: 'GetAsset', Version: '2024-01-01', RequestId: 'req-q' },
+          Result: {
+            Id: 'asset-empty-1',
+            Name: '',
+            URL: 'https://ark-media-asset.example/a.jpg?X-Tos-Signature=1',
+            AssetType: 'Image',
+            GroupId: 'group-empty-name',
+            Status: 'Active',
+          },
+        }),
+      })
+      return
+    }
+    await route.fulfill({ status: 404, body: 'no' })
+  })
+
+  await page.goto('/tools/videotest')
+  await page.getByRole('button', { name: '渠道管理', exact: true }).click()
+  await page.getByPlaceholder('例如：主线-oinone').fill('空名称素材')
+  await page.getByPlaceholder('https://api.oinone.top').fill('https://mock.example')
+  await page.getByPlaceholder('sk-xxxxxxxx').fill('sk-test-1234567890')
+  await page.getByRole('button', { name: '保存渠道' }).click()
+  await page.getByRole('button', { name: '批量测试', exact: true }).click()
+  await page.getByRole('switch').click()
+  await expect(page.getByText('素材登记 · 不传 Name', { exact: true })).toBeVisible()
+
+  await page.getByText('素材登记 · 不传 Name', { exact: true }).click()
+  const emptyPreview = page.locator('[data-case-name="素材登记 · 不传 Name"] textarea')
+  await expect(emptyPreview).toContainText('"AssetType": "Image"')
+  await expect(emptyPreview).toContainText('seepro_first_frame')
+  await expect(emptyPreview).not.toContainText('Name')
+  await page.getByText('素材登记', { exact: true }).click()
+  await expect(page.locator('[data-case-name="素材登记"] textarea')).toContainText('"Name": "first_frame"')
+
+  const selectAll = page.locator('label:has-text("全选") input[type="checkbox"]')
+  if (!await selectAll.isChecked()) await selectAll.check()
+  await selectAll.uncheck()
+  for (const name of ['素材组', '素材登记 · 不传 Name']) {
+    await page.locator(`[data-case-name="${name}"] input[type="checkbox"]`).check()
+  }
+  await page.getByRole('button', { name: '▶ 运行选中' }).click()
+  await expect(page.getByText('批量测试结束')).toBeVisible({ timeout: 20000 })
+
+  expect(creates).toHaveLength(1)
+  expect(creates[0]).not.toHaveProperty('Name')
+  expect(creates[0]).toMatchObject({ GroupId: 'group-empty-name', AssetType: 'Image' })
+  expect(String(creates[0].URL)).toContain('seepro_first_frame')
+
+  const checkRow = (name: string) => page.locator('[data-case-name="素材登记 · 不传 Name"] tr').filter({ hasText: name })
+  for (const name of ['素材 Action', '素材 Version', '素材 RequestId', '素材 Id', '素材 AssetType', '素材 GroupId', '素材状态', '素材 URL', '素材 Name']) {
+    await expect(checkRow(name)).not.toContainText('未通过')
+  }
+  await expect(page.locator('[data-case-name="素材登记 · 不传 Name"]')).toContainText('✓')
+})
+
+test('素材查询与列表：官方字段、https 链接，Active 显示成功', async ({ page }) => {
+  const created = new Map<string, { Id: string; Name: string; AssetType: string; GroupId: string }>()
+  const lists: any[] = []
+  await page.route(url => /[?&]Action=/.test(String(url)), async route => {
+    if (route.request().method() === 'OPTIONS') {
+      await route.fulfill({ status: 204, headers: CORS })
+      return
+    }
+    const action = new URL(route.request().url()).searchParams.get('Action') || ''
+    const body = route.request().postDataJSON()
+    if (action === 'CreateAssetGroup') {
+      await route.fulfill({
+        status: 200, contentType: 'application/json', headers: CORS,
+        body: JSON.stringify({ Result: { Id: 'group-q' } }),
+      })
+      return
+    }
+    if (action === 'CreateAsset') {
+      const id = `asset-${body.Name}`
+      created.set(id, { Id: id, Name: body.Name, AssetType: body.AssetType, GroupId: body.GroupId })
+      await route.fulfill({
+        status: 200, contentType: 'application/json', headers: CORS,
+        body: JSON.stringify({ Result: { Id: id } }),
+      })
+      return
+    }
+    if (action === 'GetAsset' || action === 'ListAssets') {
+      const assetBody = (row: { Id: string; Name: string; AssetType: string; GroupId: string }) => ({
+        ...row,
+        Status: 'Active',
+        URL: `https://ark-media-asset.example/${row.Id}.jpg`,
+        CreateTime: '2024-05-14T21:27:50Z',
+        UpdateTime: '2024-05-14T21:30:00Z',
+      })
+      if (action === 'ListAssets') {
+        lists.push(body)
+        const items = [...created.values()].map(assetBody)
+        await route.fulfill({
+          status: 200, contentType: 'application/json', headers: CORS,
+          body: JSON.stringify({
+            ResponseMetadata: { Action: 'ListAssets', Version: '2024-01-01', RequestId: 'req-l' },
+            Result: { Items: items, TotalCount: items.length, PageNumber: 1, PageSize: 100 },
+          }),
+        })
+        return
+      }
+      const row = created.get(body.Id)
+      await route.fulfill({
+        status: 200, contentType: 'application/json', headers: CORS,
+        body: JSON.stringify({
+          ResponseMetadata: { Action: 'GetAsset', Version: '2024-01-01', RequestId: 'req-q' },
+          Result: row ? assetBody(row) : { Status: 'Active' },
+        }),
+      })
+      return
+    }
+    await route.fulfill({ status: 404, body: 'no' })
+  })
+
+  await page.goto('/tools/videotest')
+  await page.getByRole('button', { name: '渠道管理', exact: true }).click()
+  await page.getByPlaceholder('例如：主线-oinone').fill('素材查询渠道')
+  await page.getByPlaceholder('https://api.oinone.top').fill('https://mock.example')
+  await page.getByPlaceholder('sk-xxxxxxxx').fill('sk-test-1234567890')
+  await page.getByRole('button', { name: '保存渠道' }).click()
+  await page.getByRole('button', { name: '批量测试', exact: true }).click()
+  await page.getByRole('switch').click()
+  await expect(page.getByText('素材查询', { exact: true })).toBeVisible()
+  await expect(page.getByText('素材列表查询', { exact: true })).toBeVisible()
+
+  await page.getByText('素材查询', { exact: true }).click()
+  await expect(page.locator('[data-case-name="素材查询"] textarea')).toContainText('"Id": "{{ASSET_ID}}"')
+  await page.getByText('素材列表查询', { exact: true }).click()
+  const listPreview = page.locator('[data-case-name="素材列表查询"] textarea')
+  await expect(listPreview).toContainText('GroupIds')
+  await expect(listPreview).toContainText('{{GROUP_ID}}')
+  await expect(listPreview).not.toContainText('Statuses')
+
+  const selectAll = page.locator('label:has-text("全选") input[type="checkbox"]')
+  if (!await selectAll.isChecked()) await selectAll.check()
+  await selectAll.uncheck()
+  for (const name of ['素材组', '素材登记', '素材查询', '素材列表查询']) {
+    await page.locator(`[data-case-name="${name}"] input[type="checkbox"]`).check()
+  }
+  await page.getByRole('button', { name: '▶ 运行选中' }).click()
+  await expect(page.getByText('批量测试结束')).toBeVisible({ timeout: 20000 })
+
+  expect(lists).toHaveLength(1)
+  expect(lists[0].Filter.GroupIds).toEqual(['group-q'])
+  expect(lists[0].Filter).not.toHaveProperty('Statuses')
+  expect(created.size).toBeGreaterThan(0)
+
+  const row = (caseName: string, check: string) => page.locator(`[data-case-name="${caseName}"] tr`).filter({ hasText: check })
+  await expect(row('素材查询', '素材状态 · first_frame')).toContainText('成功（Active）')
+  await expect(row('素材查询', '素材状态 · first_frame')).not.toContainText('未通过')
+  await expect(row('素材查询', '素材 URL · first_frame')).not.toContainText('未通过')
+  await expect(row('素材查询', '素材创建时间 · first_frame')).not.toContainText('未通过')
+  await expect(row('素材列表查询', '素材状态 · first_frame')).toContainText('成功（Active）')
+  await expect(row('素材列表查询', '素材更新时间 · first_frame')).not.toContainText('未通过')
+  await expect(page.locator('[data-case-name="素材查询"]')).toContainText('✓')
+  await expect(page.locator('[data-case-name="素材列表查询"]')).toContainText('✓')
 })
 
 test('分辨率按面积档校验；拒绝与预期不支持用例反向判定；名人首帧走直链', async ({ page }) => {

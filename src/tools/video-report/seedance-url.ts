@@ -1,7 +1,7 @@
 /** 生成任务路径，不含可选的 /byteplus 前缀。 */
 export const VIDEO_TASK_ENDPOINT = '/api/v3/contents/generations/tasks'
 
-export function videoAssetEndpoint(action: 'CreateAssetGroup' | 'CreateAsset' | 'GetAsset') {
+export function videoAssetEndpoint(action: 'CreateAssetGroup' | 'CreateAsset' | 'GetAsset' | 'ListAssets') {
   return `/?Action=${action}&Version=2024-01-01`
 }
 

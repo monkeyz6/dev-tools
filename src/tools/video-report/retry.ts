@@ -1,4 +1,4 @@
-import type { VideoCaseKind, VideoRecord } from './types.ts'
+import { videoIsMaterialKind, type VideoCaseKind, type VideoRecord } from './types.ts'
 
 export type VideoRetryAction = 'requery' | 'resubmit'
 
@@ -23,7 +23,7 @@ function videoTaskFailed(st: string) {
  * （succeeded 但没拿到 video_url 也算——可能是响应被截断，再查一次）。
  */
 export function videoCanRequery(rec: Pick<VideoRecord, 'taskId' | 'taskStatus' | 'kind' | 'videoUrl'> & { targets?: VideoRecord['targets'] }): boolean {
-  if (!rec.taskId || rec.kind === 'material-group' || rec.kind === 'material-assets') return false
+  if (!rec.taskId || videoIsMaterialKind(rec.kind)) return false
   const st = rec.taskStatus || ''
   if (videoTaskFailed(st)) return false
   if (rec.kind === 'context-ir' && videoTaskSucceeded(st)) {
@@ -51,7 +51,7 @@ export function videoHasUsableProbe(rec: Pick<VideoRecord, 'probe'>): boolean {
  * 只重探 / 重算校验，不重提任务。已通过的不再打扰。
  */
 export function videoCanReprobe(rec: Pick<VideoRecord, 'videoUrl' | 'probe' | 'kind' | 'targets' | 'ok' | 'checks'>): boolean {
-  if (rec.kind === 'material-group' || rec.kind === 'material-assets') return false
+  if (videoIsMaterialKind(rec.kind)) return false
   const src = videoReprobeSrc(rec)
   const probed = videoHasUsableProbe(rec)
   if (!src && !probed) return false
@@ -66,7 +66,7 @@ export function videoRetryAction(rec: Pick<VideoRecord, 'taskId' | 'taskStatus' 
 
 export function videoRetrySortRank(c: { kind: VideoCaseKind; def: { expect: string } }): number {
   if (c.kind === 'material-group') return 0
-  if (c.kind === 'material-assets') return 1
+  if (videoIsMaterialKind(c.kind)) return 1
   if (c.def.expect === 'reject') return 3
   return 2
 }

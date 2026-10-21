@@ -15,6 +15,9 @@ export function videoApiTypeOf(v: string | null | undefined): VideoApiType {
 export type VideoCaseKind =
   | 'material-group'
   | 'material-assets'
+  | 'material-asset-empty-name'
+  | 'material-asset-get'
+  | 'material-asset-list'
   | 't2v'
   | 'i2v'
   | 'i2v-frames'
@@ -74,7 +77,37 @@ export interface VideoCaseDef {
 export const VIDEO_MATERIAL_DEFS: VideoCaseDef[] = [
   { id: 'material-group', name: '素材组', desc: 'OpenAPI CreateAssetGroup，创建一个 AIGC 素材组', kind: 'material-group', params: {}, expect: 'success' },
   { id: 'material-assets', name: '素材登记', desc: '用当前左栏 URL 登记 Image / Video / Audio，并轮询到 Active', kind: 'material-assets', params: {}, expect: 'success' },
+  {
+    id: 'material-asset-empty-name',
+    name: '素材登记 · 不传 Name',
+    desc: 'CreateAsset 不写 Name，只用左栏首帧登记一张 Image。创建响应核对 Action / Version / RequestId / Result.Id；GetAsset 核对 Id、AssetType、GroupId、Active 与 http(s) URL。Name 缺失或空字符串通过',
+    kind: 'material-asset-empty-name',
+    params: {},
+    expect: 'success',
+  },
+  {
+    id: 'material-asset-get',
+    name: '素材查询',
+    desc: '对本轮「素材登记」的每条素材调 GetAsset。Status 为 Active 时显示成功，并核对 https 链接、RFC3339 的创建时间与更新时间。Processing 时每 30 秒再查，最多 5 次',
+    kind: 'material-asset-get',
+    params: {},
+    expect: 'success',
+  },
+  {
+    id: 'material-asset-list',
+    name: '素材列表查询',
+    desc: 'ListAssets 按本轮素材组过滤。本轮登记的素材都要在列表里，每条同样核对 Active、https 链接和创建、更新时间。不按状态过滤',
+    kind: 'material-asset-list',
+    params: {},
+    expect: 'success',
+  },
 ]
+
+/** 素材 OpenAPI，不走生成任务的查询与错误体 */
+export function videoIsMaterialKind(kind: string | null | undefined): boolean {
+  return kind === 'material-group' || kind === 'material-assets' || kind === 'material-asset-empty-name'
+    || kind === 'material-asset-get' || kind === 'material-asset-list'
+}
 
 /** 480p 用例搭载的终端用户标识：固定、不含个人信息 */
 export const VIDEO_SAFETY_IDENTIFIER = 'videotest-tool-user'
@@ -280,6 +313,22 @@ export interface VideoRecord {
   durationMs: number
   checks: VideoCheck[]
   pollLog: VideoPollTick[]
+  /** 仅「素材登记 · 不传 Name」：实际请求与两次响应，供结构校验。未发请求时不写 */
+  assetEmptyName?: {
+    requestBody: unknown
+    createJson: unknown
+    getJson: unknown | null
+    groupId: string
+    assetType: string
+    queried: boolean
+  } | null
+  /** 仅素材查询 / 素材列表：最后一次响应，供结构校验。未发请求时不写 */
+  assetQuery?: {
+    action: 'GetAsset' | 'ListAssets'
+    responses: unknown[]
+    expected: { id: string; name: string; assetType: string; groupId: string }[]
+    queried: boolean
+  } | null
 }
 
 export function videoFmtTime(ts: number) {
