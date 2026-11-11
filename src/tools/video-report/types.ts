@@ -1,14 +1,16 @@
-export type VideoApiType = 'seedance' | 'google-omni' | 'minimax'
+export type VideoApiType = 'seedance' | 'google-omni' | 'minimax' | 'kling'
 
 export const VIDEO_API_TYPE_LABEL: Record<VideoApiType, string> = {
   seedance: 'Seedance 火山原生',
   'google-omni': 'Google Omni',
   minimax: 'MiniMax-H3',
+  kling: 'Kling 4.0',
 }
 
 export function videoApiTypeOf(v: string | null | undefined): VideoApiType {
   if (v === 'google-omni') return 'google-omni'
   if (v === 'minimax') return 'minimax'
+  if (v === 'kling') return 'kling'
   return 'seedance'
 }
 

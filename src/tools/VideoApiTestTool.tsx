@@ -29,6 +29,12 @@ import {
   videoIsMinimaxPreset, videoLooksLikeMinimaxModel, videoMinimaxPath, videoMinimaxUrl,
 } from './video-report/minimax'
 import type { MinimaxSourceRef } from './video-report/minimax'
+import {
+  KLING_CASE_DEFS, KLING_DEFAULT_MODEL, KLING_MODEL_OPTIONS,
+  klingBuildChecks, klingBuildPlan, klingBusinessCode, klingBusinessRejected, klingCapabilityHint, klingExpect, klingExtractRequestId, klingExtractStatus, klingExtractTaskId,
+  klingExtractUsage, klingExtractVideoUrl, klingFormatTaskError, klingQueryEndpoint,
+  videoIsKlingPreset, videoKlingPath, videoKlingUrl, videoLooksLikeKlingModel,
+} from './video-report/kling'
 import { videoClassify, videoScoreBucket, videoVerdict, videoWorkbenchExpect } from './video-report/summary'
 import { videoCanReprobe, videoCanRequery, videoHasUsableProbe, videoReprobeSrc, videoRetryAction, videoRetrySort, videoRetryTargets } from './video-report/retry'
 import { videoGroupBatches, videoTrimByBatch } from './video-report/batches'
@@ -68,7 +74,15 @@ const VIDEO_MODEL_OPTIONS = [
 function videoDefaultModelFor(apiType: VideoApiType): string {
   if (apiType === 'google-omni') return OMNI_DEFAULT_MODEL
   if (apiType === 'minimax') return MINIMAX_DEFAULT_MODEL
+  if (apiType === 'kling') return KLING_DEFAULT_MODEL
   return VIDEO_DEFAULT_MODEL
+}
+
+function videoCasePreviewPath(apiType: VideoApiType, baseUrl: string, endpoint: string): string {
+  if (apiType === 'google-omni') return endpoint
+  if (apiType === 'minimax') return videoMinimaxPath(baseUrl, endpoint)
+  if (apiType === 'kling') return videoKlingPath(baseUrl, endpoint)
+  return videoSeedancePath(baseUrl, endpoint)
 }
 
 /**
@@ -488,16 +502,19 @@ function videoNegativeOutcome(rec: VideoRecord): { rejected: boolean; produced: 
   const http4xx = rec.status >= 400 && rec.status < 500
   // 提交 4xx 不会写入 taskId；查询 4xx 已有 taskId，只是轮询终态，不能算模型拒绝
   const submitRejected = http4xx && !rec.taskId
+  // 可灵参数错误经常是 HTTP 200 + code≠0，没有任务 id。只认 Kling，避免改 Seedance 的 4xx 口径。
+  const businessRejected = klingBusinessRejected(rec.status, rec.taskId, rec.targets.klingCode)
   // expired 是超过 execution_expires_after 被调度终止：请求已被接受，不是模型拒绝，按超时记请求异常
   const expired = (rec.taskStatus || '').toLowerCase() === 'expired'
   const taskFailed = videoTaskFailed(rec.taskStatus || '') && !expired
   const mediaFetchErr = videoIsMediaFetchError(rec.error)
-  const rejected = !produced && !mediaFetchErr && (submitRejected || taskFailed)
+  const rejected = !produced && !mediaFetchErr && (submitRejected || businessRejected || taskFailed)
   const actual = produced ? '任务成功并出片'
     : mediaFetchErr ? (omniIsCorsError(rec.error)
       ? `素材跨域读失败（浏览器 fetch 被拦，不是模型拒绝，请换左栏链接）· ${rec.error}`
       : `素材拉取失败（网关取不到图，不是模型拒绝，请换左栏「敏感人像」链接）· ${rec.error}`)
     : submitRejected ? `HTTP ${rec.status} 已拒绝${rec.error ? ' · ' + rec.error : ''}`
+    : businessRejected ? `HTTP ${rec.status} · code ${rec.targets.klingCode} 已拒绝${rec.error ? ' · ' + rec.error : ''}`
     : expired ? `任务 expired（已被接受，后因超过 execution_expires_after 被终止，属调度超时、不是拒绝）${rec.error ? ' · ' + rec.error : ''}`
     : taskFailed ? `任务 ${rec.taskStatus}${rec.error ? ' · ' + rec.error : ''}`
     : rec.status ? `HTTP ${rec.status}${rec.taskStatus ? ' · 任务 ' + rec.taskStatus : ''}${rec.error ? ' · ' + rec.error : ''}`
@@ -533,6 +550,10 @@ function videoBuildChecks(rec: VideoRecord): VideoCheck[] {
 
   if (videoApiTypeOf(rec.apiType) === 'minimax') {
     checks.push(...minimaxBuildChecks(rec))
+    return checks
+  }
+  if (videoApiTypeOf(rec.apiType) === 'kling') {
+    checks.push(...klingBuildChecks(rec))
     return checks
   }
 
@@ -666,6 +687,7 @@ function videoBuildChecks(rec: VideoRecord): VideoCheck[] {
 
 function videoCapabilityHint(rec: Pick<VideoRecord, 'model' | 'apiType' | 'caseId'>): string {
   if (videoApiTypeOf(rec.apiType) === 'minimax') return minimaxCapabilityHint(rec.model)
+  if (videoApiTypeOf(rec.apiType) === 'kling') return klingCapabilityHint(rec.model, rec.caseId)
   if (videoApiTypeOf(rec.apiType) === 'google-omni' && omniIs720OnlyModel(rec.model)) return '仅 720p'
   const req = VIDEO_CASE_DEFS.find(d => d.id === rec.caseId)?.requires
   if (req && !videoModelMeetsRequirement(rec.model, req)) return VIDEO_REQUIREMENT_LABEL[req]
@@ -679,6 +701,7 @@ function videoExpectFor(def: VideoCaseDef, model: string, apiType: VideoApiType 
     return omniSupportsResolution(model, def.params.resolution) ? 'success' : 'unsupported'
   }
   if (apiType === 'minimax') return minimaxExpect(def, model)
+  if (apiType === 'kling') return klingExpect(def, model)
   if (!videoModelMeetsRequirement(model, def.requires)) return 'unsupported'
   const h = def.params.resolution ? VIDEO_RESOLUTION_HEIGHT[def.params.resolution.toLowerCase()] : undefined
   if (h && h > videoModelMaxResolution(model)) return 'unsupported'
@@ -690,7 +713,9 @@ function videoBuildCases(testMaterials: boolean, apiType: VideoApiType = 'seedan
     ? OMNI_CASE_DEFS
     : apiType === 'minimax'
       ? minimaxCaseDefsFor(model || MINIMAX_DEFAULT_MODEL)
-      : (testMaterials ? [...VIDEO_MATERIAL_DEFS, ...VIDEO_CASE_DEFS] : VIDEO_CASE_DEFS)
+      : apiType === 'kling'
+        ? KLING_CASE_DEFS
+        : (testMaterials ? [...VIDEO_MATERIAL_DEFS, ...VIDEO_CASE_DEFS] : VIDEO_CASE_DEFS)
   return defs.map(d => ({
     id: d.id,
     def: d,
@@ -841,7 +866,9 @@ const VideoChannelsPane = React.memo(function VideoChannelsPane({
               ? 'baseUrl 填网关根，工具会拼 /v1beta/interactions。apiKey 经 AES-GCM 加密。'
               : apiType === 'minimax'
                 ? 'baseUrl 填网关根或官方根。含 oinone 或 ainowork（如 hk.ainowork.ai、api.ainowork.ai）时拼一次 /minimax/v2/...；路径里已有 /minimax 不再加。官方 api.minimax.io / api.minimax.cn 不加 /minimax。apiKey 经 AES-GCM 加密。'
-                : 'baseUrl 填网关根。含 oinone 或 ainowork 时拼 /byteplus/api/v3/... 与 /byteplus/?Action=…，否则不加 /byteplus。末尾已是 /byteplus 不会再加一次。apiKey 经 AES-GCM 加密。'
+                : apiType === 'kling'
+                  ? 'baseUrl 填网关根或官方根。含 oinone 或 ainowork 时拼一次 /kling/text-to-video/… 与 /kling/tasks?task_ids=；路径里已有 /kling 不再加。官方 api-singapore.klingai.com 不加 /kling，也不插 /byteplus。apiKey 经 AES-GCM 加密。'
+                  : 'baseUrl 填网关根。含 oinone 或 ainowork 时拼 /byteplus/api/v3/... 与 /byteplus/?Action=…，否则不加 /byteplus。末尾已是 /byteplus 不会再加一次。apiKey 经 AES-GCM 加密。'
           }</span>
         </div>
       </Card>
@@ -1301,7 +1328,10 @@ function VideoApiTestTool() {
     } else if (t === 'minimax') {
       setTestMaterials(false)
       if (!videoIsMinimaxPreset(model)) nextModel = MINIMAX_DEFAULT_MODEL
-    } else if (omniLooksLikeModel(model) || videoLooksLikeMinimaxModel(model)) {
+    } else if (t === 'kling') {
+      setTestMaterials(false)
+      if (!videoIsKlingPreset(model)) nextModel = KLING_DEFAULT_MODEL
+    } else if (omniLooksLikeModel(model) || videoLooksLikeMinimaxModel(model) || videoLooksLikeKlingModel(model)) {
       nextModel = VIDEO_DEFAULT_MODEL
     }
     if (nextModel !== model) setModel(nextModel)
@@ -1933,6 +1963,120 @@ function VideoApiTestTool() {
     await finalizeMinimax(rec, polled.lastJson)
   }
 
+  const klingNoteRequestId = (rec: VideoRecord, json: any) => {
+    if (rec.reqId) return
+    rec.reqId = rec.respHeaders['x-oneapi-request-id'] || rec.respHeaders['x-request-id'] || klingExtractRequestId(json) || ''
+  }
+
+  const pollKling = async (
+    rec: VideoRecord, ch: VideoChannel, apiKey: string, initialJson: any,
+    shouldStop: () => boolean, immediate = false,
+  ): Promise<{ lastJson: any; stopped: boolean }> => {
+    const pollUrl = videoKlingUrl(ch.baseUrl, klingQueryEndpoint(rec.taskId || ''))
+    const t0 = Date.now()
+    let lastJson: any = initialJson
+    let first = immediate
+    while (Date.now() - t0 < VIDEO_POLL_MAX_MS) {
+      if (shouldStop()) return { lastJson, stopped: true }
+      const st = klingExtractStatus(lastJson, rec.taskId)
+      if (!first && (videoTaskSucceeded(st) || videoTaskFailed(st))) break
+      if (!first) {
+        await sleep(VIDEO_POLL_MS)
+        if (shouldStop()) return { lastJson, stopped: true }
+      }
+      first = false
+      rec.pollCount += 1
+      const q = await videoFetch(pollUrl, VIDEO_REQUEST_TIMEOUT_MS, { headers: { Authorization: `Bearer ${apiKey}` } })
+      const qt = await q.text()
+      rec.status = q.status
+      rec.respHeaders = Object.fromEntries(q.headers.entries())
+      rec.rawSnippet = videoFormatBody(qt)
+      lastJson = videoParseJson(qt)
+      klingNoteRequestId(rec, lastJson)
+      rec.taskStatus = klingExtractStatus(lastJson, rec.taskId) || rec.taskStatus
+      rec.pollLog.push({ at: Date.now(), status: rec.taskStatus || '' })
+      if (q.status >= 400) break
+    }
+    return { lastJson, stopped: false }
+  }
+
+  const finalizeKling = async (rec: VideoRecord, lastJson: any) => {
+    rec.taskStatus = klingExtractStatus(lastJson, rec.taskId) || rec.taskStatus
+    const remote = klingExtractVideoUrl(lastJson, rec.taskId)
+    rec.videoUrl = remote
+    if (remote) rec.targets.outputUri = remote
+    const usage = klingExtractUsage(lastJson, rec.taskId)
+    if (usage) rec.usage = usage
+    klingNoteRequestId(rec, lastJson)
+    const taskErr = klingFormatTaskError(lastJson, rec.taskId)
+    const failed = videoTaskFailed(rec.taskStatus || '')
+    const succeeded = videoTaskSucceeded(rec.taskStatus || '')
+    if (failed || !succeeded || !rec.videoUrl) {
+      rec.ok = false
+      rec.error = taskErr || videoOpenApiError(lastJson, rec.status, rec.rawSnippet) || (failed ? '任务失败' : succeeded ? '未返回 outputs video url' : `轮询超时（${VIDEO_POLL_MAX_MS / 60000} 分钟）任务仍未结束，可稍后「重试查询」`)
+      rec.checks = videoBuildChecks(rec)
+      return
+    }
+    try {
+      const meta = await probeVideoMeta(rec.videoUrl, 20000)
+      adoptProbedVideo(rec, rec.videoUrl, meta)
+    } catch (e: any) {
+      rec.ok = true
+      rec.probe = null
+      rec.error = e?.message || '成片元数据不可读'
+    }
+    rec.checks = videoBuildChecks(rec)
+  }
+
+  const runKling = async (c: VideoCase, ch: VideoChannel, apiKey: string, rec: VideoRecord) => {
+    const built = klingBuildPlan(c.def, model.trim() || KLING_DEFAULT_MODEL, prompt, urlsRef.current)
+    if (built.missing) {
+      rec.ok = false
+      rec.error = built.missing
+      rec.skippedRoles = built.skipped
+      rec.checks = videoBuildChecks(rec)
+      return
+    }
+    let plan: VideoPlan = built.plan
+    rec.targets = { ...built.targets }
+    rec.skippedRoles = built.skipped
+    if (c.editedPreview != null) plan = videoParseEditedPreview(plan, c.editedPreview)
+    rec.sentPreview = JSON.stringify(plan.body, null, 2)
+
+    const resp = await videoFetch(videoKlingUrl(ch.baseUrl, plan.endpoint), VIDEO_SUBMIT_TIMEOUT_MS, {
+      method: 'POST', headers: videoHeaders(apiKey), body: JSON.stringify(plan.body),
+    })
+    const text = await resp.text()
+    rec.status = resp.status
+    rec.respHeaders = Object.fromEntries(resp.headers.entries())
+    rec.rawSnippet = videoFormatBody(text)
+    const json = videoParseJson(text)
+    klingNoteRequestId(rec, json)
+    const taskId = klingExtractTaskId(json)
+    if (!taskId) {
+      const code = klingBusinessCode(json)
+      if (code != null) rec.targets.klingCode = code
+    }
+    if (resp.status >= 400 || !taskId) {
+      rec.ok = false
+      rec.error = klingFormatTaskError(json) || videoOpenApiError(json, resp.status, text) || '未返回任务 id'
+      rec.checks = videoBuildChecks(rec)
+      return
+    }
+    rec.taskId = taskId
+    rec.taskStatus = klingExtractStatus(json, taskId) || 'submitted'
+    rec.pollLog.push({ at: Date.now(), status: rec.taskStatus })
+
+    const polled = await pollKling(rec, ch, apiKey, json, () => stopRef.current)
+    if (polled.stopped) {
+      rec.ok = false
+      rec.error = '已停止轮询'
+      rec.checks = videoBuildChecks(rec)
+      return
+    }
+    await finalizeKling(rec, polled.lastJson)
+  }
+
   const applyOmniOutput = async (rec: VideoRecord, video: { uri?: string; data?: string; mime: string } | null, ch: VideoChannel, apiKey: string) => {
     if (video?.uri) rec.targets.outputUri = video.uri
     let playUrl: string | null = null
@@ -2126,6 +2270,16 @@ function VideoApiTestTool() {
         } else {
           await finalizeMinimax(next, polled.lastJson)
         }
+      } else if (videoApiTypeOf(rec.apiType) === 'kling') {
+        const polled = await pollKling(next, ch, apiKey, null, () => requeryCancelRef.current.has(rec.id), true)
+        if (polled.stopped) {
+          cancelled = true
+          next.ok = false
+          next.error = '已停止查询'
+          next.checks = videoBuildChecks(next)
+        } else {
+          await finalizeKling(next, polled.lastJson)
+        }
       } else {
         const polled = await pollTask(next, ch, apiKey, null, () => requeryCancelRef.current.has(rec.id), true)
         if (polled.stopped) {
@@ -2293,6 +2447,7 @@ function VideoApiTestTool() {
     try {
       if (apiType === 'google-omni') await runOmni(c, ch, apiKey, rec)
       else if (apiType === 'minimax') await runMinimax(c, ch, apiKey, rec)
+      else if (apiType === 'kling') await runKling(c, ch, apiKey, rec)
       else if (videoIsMaterialKind(c.kind)) await runOpenApi(c, ch, apiKey, rec)
       else await runTask(c, ch, apiKey, rec)
     } catch (e: any) {
@@ -2532,7 +2687,9 @@ function VideoApiTestTool() {
       ? omniBuildPlan(c.def, m, prompt, urls, omniSessionRef.current.lastInteractionId)
       : apiType === 'minimax'
         ? minimaxPlanFor(c.def, m, activeChId ?? '', prompt, urls)
-        : videoBuildPlan(c.def, m, prompt, urls, testMaterials, assetsRef.current, seedanceSessionRef.current.draft)
+        : apiType === 'kling'
+          ? klingBuildPlan(c.def, m, prompt, urls)
+          : videoBuildPlan(c.def, m, prompt, urls, testMaterials, assetsRef.current, seedanceSessionRef.current.draft)
     const preview = !c.expanded && apiType === 'google-omni'
       ? ''
       : (c.editedPreview != null ? c.editedPreview : (apiType === 'google-omni' ? omniPreviewBody(built.plan.body) : videoPlanPreview(built.plan)))
@@ -2566,7 +2723,7 @@ function VideoApiTestTool() {
                 {built.skipped.join('；')}
               </div>
             )}
-            {apiType === 'minimax' && built.missing && (
+            {(apiType === 'minimax' || apiType === 'kling') && built.missing && (
               <div className="rounded-xl px-3 py-2 text-xs" style={{ background: 'var(--accentSub)', color: 'var(--t2)' }}>
                 {built.missing}
               </div>
@@ -2579,7 +2736,7 @@ function VideoApiTestTool() {
                   <Btn small variant="accent" disabled={c.status === 'running'} onClick={() => { c.expanded = true; runCase(c) }}>▶ 运行此用例</Btn>
                 </div>
               </div>
-              <div className="text-[11px] font-mono mb-1.5" style={{ color: 'var(--t3)' }}>{built.plan.method} {apiType === 'google-omni' ? built.plan.endpoint : apiType === 'minimax' ? videoMinimaxPath(channels.find(x => x.id === activeChId)?.baseUrl ?? '', built.plan.endpoint) : videoSeedancePath(channels.find(x => x.id === activeChId)?.baseUrl ?? '', built.plan.endpoint)}</div>
+              <div className="text-[11px] font-mono mb-1.5" style={{ color: 'var(--t3)' }}>{built.plan.method} {videoCasePreviewPath(apiType, channels.find(x => x.id === activeChId)?.baseUrl ?? '', built.plan.endpoint)}</div>
               <CustomTextarea value={preview} mono rows={Math.min(16, preview.split('\n').length + 1)}
                 onChange={v => { c.editedPreview = v; setCases([...cases]) }} />
             </div>
@@ -2673,11 +2830,12 @@ function VideoApiTestTool() {
               { value: 'seedance', label: 'Seedance 火山原生' },
               { value: 'google-omni', label: 'Google Omni' },
               { value: 'minimax', label: 'MiniMax-H3' },
+              { value: 'kling', label: 'Kling 4.0' },
             ]} />
           </div>
           <div>
             <Label className="block mb-1.5">模型编码</Label>
-            <EditableSelect value={model} onChange={setModel} options={apiType === 'google-omni' ? OMNI_MODEL_OPTIONS : apiType === 'minimax' ? MINIMAX_MODEL_OPTIONS : VIDEO_MODEL_OPTIONS} placeholder={videoDefaultModelFor(apiType)} />
+            <EditableSelect value={model} onChange={setModel} options={apiType === 'google-omni' ? OMNI_MODEL_OPTIONS : apiType === 'minimax' ? MINIMAX_MODEL_OPTIONS : apiType === 'kling' ? KLING_MODEL_OPTIONS : VIDEO_MODEL_OPTIONS} placeholder={videoDefaultModelFor(apiType)} />
           </div>
           <div>
             <Label className="block mb-1.5">提示词</Label>
@@ -2698,7 +2856,9 @@ function VideoApiTestTool() {
             ? 'Omni 由浏览器 fetch 成 base64 再发送，链接必须允许 CORS。默认用 picsum / MDN。名人照仍是 Wikimedia，读失败记请求异常。'
             : apiType === 'minimax'
               ? '默认仍是火山方舟官方文档的示例素材。链接由网关或 MiniMax 服务端拉取，需公网可匿名访问。参考图张数用例只重复左栏参考图；图+视频+音频那条三个都要有。缺了不发送。'
-              : '默认是火山方舟官方文档的示例素材。链接由网关服务端拉取：需公网可匿名访问（Wikimedia 等对非浏览器 UA / 数据中心 IP 会 403、429），图片宽高 ≥300px、宽高比 0.4~2.5。'}
+              : apiType === 'kling'
+                ? '只发首帧和尾帧。默认仍是火山方舟示例图，由可灵或网关的服务器拉取，需公网可匿名访问。空了不发送。'
+                : '默认是火山方舟官方文档的示例素材。链接由网关服务端拉取：需公网可匿名访问（Wikimedia 等对非浏览器 UA / 数据中心 IP 会 403、429），图片宽高 ≥300px、宽高比 0.4~2.5。'}
         </p>
         <div className="flex flex-col gap-3">
           <div data-testid="videotest-first-frame">
@@ -2709,10 +2869,13 @@ function VideoApiTestTool() {
             <Label className="block mb-1.5">尾帧</Label>
             <CustomInput value={urls.lastFrame} onChange={v => setUrls(u => ({ ...u, lastFrame: v }))} placeholder="https://…" />
           </div>
+          {apiType !== 'kling' && (
           <div data-testid="videotest-ref-image">
             <Label className="block mb-1.5">参考图</Label>
             <CustomInput value={urls.refImage} onChange={v => setUrls(u => ({ ...u, refImage: v }))} placeholder="https://…" />
           </div>
+          )}
+          {apiType !== 'kling' && (
           <div data-testid="videotest-ref-video">
             <Label className="block mb-1.5">参考视频</Label>
             <CustomInput value={urls.refVideo} onChange={v => setUrls(u => ({ ...u, refVideo: v }))} placeholder="https://…" onBlur={probeRefVideo} />
@@ -2730,13 +2893,14 @@ function VideoApiTestTool() {
                 onError={e => { void recoverPlayableVideo(e.currentTarget, urls.refVideo.trim()) }} />
             )}
           </div>
+          )}
           {(apiType === 'seedance' || apiType === 'minimax') && (
           <div data-testid="videotest-ref-audio">
             <Label className="block mb-1.5">参考音频</Label>
             <CustomInput value={urls.refAudio} onChange={v => setUrls(u => ({ ...u, refAudio: v }))} placeholder="https://…" />
           </div>
           )}
-          {apiType !== 'minimax' && (
+          {apiType !== 'minimax' && apiType !== 'kling' && (
           <div data-testid="videotest-sensitive-face" className="pt-3" style={{ borderTop: '1px solid var(--border)' }}>
             <Label className="block mb-1.5">敏感人像</Label>
             <CustomInput value={urls.sensitiveFace} onChange={v => setUrls(u => ({ ...u, sensitiveFace: v }))} placeholder="https://…（名人 / 真人正脸）" />

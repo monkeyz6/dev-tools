@@ -105,7 +105,7 @@ export const TOOL_DEFINITIONS: ToolDefinition[] = [
   { key: 'llmbatch', path: toolPath('llmbatch'), label: 'LLM 批量测试', desc: 'Token 计费口径、一致性、波动与模型验真', icon: <IconBatch />, fullHeight: true, component: lazyComponents.llmbatch, group: 'ai' },
   { key: 'llmreport', path: toolPath('llmreport'), label: 'LLM 报告生成', desc: '日志导入生成性能/稳定性分析报告，可导出 HTML', icon: <IconReport />, fullHeight: false, component: lazyComponents.llmreport, group: 'ai' },
   { key: 'imgtest', path: toolPath('imgtest'), label: '图片接口测试', desc: '多渠道图片生成接口批测、价格与响应校验', icon: <IconImgTest />, fullHeight: true, component: lazyComponents.imgtest, group: 'ai' },
-  { key: 'videotest', path: toolPath('videotest'), label: '视频接口测试', desc: 'Seedance 火山原生生视频批测、素材登记与成片校验', icon: <IconVideoTest />, fullHeight: true, component: lazyComponents.videotest, group: 'ai' },
+  { key: 'videotest', path: toolPath('videotest'), label: '视频接口测试', desc: 'Seedance、Google Omni、MiniMax、Kling 生视频批测与成片校验', icon: <IconVideoTest />, fullHeight: true, component: lazyComponents.videotest, group: 'ai' },
   { key: 'imganalyze', path: toolPath('imganalyze'), label: '图片信息识别', desc: '图片分辨率、格式、尺寸与等级识别', icon: <IconImage />, fullHeight: false, component: lazyComponents.imganalyze, group: 'ai' },
   { key: 'videoanalyze', path: toolPath('videoanalyze'), label: '视频信息检测', desc: '本地文件或 URL 视频元信息与播放检测', icon: <IconVideo />, fullHeight: false, component: lazyComponents.videoanalyze, group: 'ai' },
   // 数据格式工具
