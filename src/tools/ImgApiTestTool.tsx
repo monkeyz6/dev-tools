@@ -13,7 +13,7 @@ import { imgClassify, imgExpectedRejected, imgVerdict } from './img-report/summa
 import { imgCarrierCheck, imgClassifyGeminiPart, imgClassifyOpenAiImage, sniffImageMime } from './img-report/carrier'
 import { IMG_NANO_TIER_TOKENS, imgInteractionChecks, imgParseInteraction } from './img-report/interactions'
 import { imgGenerateContentExtraChecks, imgGenerateContentGrounded, imgGenerateContentImageTokens, imgIsThoughtPart } from './img-report/generate-content'
-import { imgGptImageChecks, imgGptImageFamily, imgGptQualityRejected, imgParseOpenAiEcho } from './img-report/gpt-image'
+import { imgCountGifFrames, imgGptImageChecks, imgGptImageFamily, imgGptQualityRejected, imgParseOpenAiEcho, imgPickPriceModel } from './img-report/gpt-image'
 import type { ImgGptImageFamily } from './img-report/gpt-image'
 import { imgGroupBatches, imgTrimByBatch } from './img-report/batches'
 import type { ImgBatch } from './img-report/batches'
@@ -107,6 +107,15 @@ const IMG_DEFAULT_PRICES: ImgPrice[] = [
   { model: 'gpt-image-1-mini', tier: 'low', usd: 0.005, note: 'OpenAI 官网' },
   { model: 'gpt-image-1-mini', tier: 'medium', usd: 0.013, note: 'OpenAI 官网' },
   { model: 'gpt-image-1-mini', tier: 'high', usd: 0.036, note: 'OpenAI 官网' },
+  // GPT Image 2.6（2026-11-04）。单价仍是 $30/百万 output token，low / medium 的 token 数高于 2.5。
+  // 1024×1024 取官方图片生成计算器：low 823、medium 1449、high 1756、xhigh 3122、max 7024。
+  ...['gpt-image-2.6-flare', 'gpt-image-2.6-sunburst'].flatMap(model => [
+    { model, tier: 'low', usd: 0.0247, note: 'OpenAI 计算器 · 1024方形 low · 823 tokens × $30/百万' },
+    { model, tier: 'medium', usd: 0.0435, note: 'OpenAI 计算器 · 1024方形 medium · 1449 tokens × $30/百万' },
+    { model, tier: 'high', usd: 0.0527, note: 'OpenAI 计算器 · 1024方形 high · 1756 tokens × $30/百万' },
+    { model, tier: 'xhigh', usd: 0.0937, note: 'OpenAI 计算器 · 1024方形 xhigh · 3122 tokens × $30/百万' },
+    { model, tier: 'max', usd: 0.2107, note: 'OpenAI 计算器 · 1024方形 max · 7024 tokens × $30/百万' },
+  ]),
   // xAI Grok Imagine（docs.x.ai/models 已核实，1K/2K 档）
   { model: 'grok-imagine-image', tier: '1k', usd: 0.02, note: 'xAI 官网 · 1K 与 2K 同价' },
   { model: 'grok-imagine-image', tier: '2k', usd: 0.02, note: 'xAI 官网' },
@@ -145,13 +154,26 @@ const IMG_DEFAULT_PRICES: ImgPrice[] = [
 // 补的时候按 model+tier 只加缺的行；补过之后用户删掉的行不再被补回来。
 const IMG_PRICES_SEEDED_KEY = 'imgtest-prices-seeded'
 const IMG_PRICE_SEED_NANO = 'nano-2.1-v1'
-function imgWithNanoBananaPrices(prices: ImgPrice[]): ImgPrice[] {
-  let seeded: string[] = []
-  try { const v = JSON.parse(kvGet(IMG_PRICES_SEEDED_KEY) || '[]'); if (Array.isArray(v)) seeded = v } catch { /* ignore */ }
-  if (seeded.includes(IMG_PRICE_SEED_NANO)) return prices
-  const missing = IMG_DEFAULT_PRICES.filter(d => d.model === IMG_NANO_BANANA_21 && !prices.some(p => p.model === d.model && p.tier === d.tier))
-  try { kvSet(IMG_PRICES_SEEDED_KEY, JSON.stringify([...seeded, IMG_PRICE_SEED_NANO])) } catch { /* ignore */ }
+const IMG_PRICE_SEED_GPT26 = 'gpt-image-2.6-v1'
+function imgSeededPriceIds(): string[] {
+  try {
+    const v = JSON.parse(kvGet(IMG_PRICES_SEEDED_KEY) || '[]')
+    if (Array.isArray(v)) return v.filter(x => typeof x === 'string')
+  } catch { /* ignore */ }
+  return []
+}
+function imgWithSeededPrices(prices: ImgPrice[], seedId: string, pick: (row: ImgPrice) => boolean): ImgPrice[] {
+  const seeded = imgSeededPriceIds()
+  if (seeded.includes(seedId)) return prices
+  const missing = IMG_DEFAULT_PRICES.filter(d => pick(d) && !prices.some(p => p.model === d.model && p.tier === d.tier))
+  try { kvSet(IMG_PRICES_SEEDED_KEY, JSON.stringify([...seeded, seedId])) } catch { /* ignore */ }
   return missing.length ? [...prices, ...missing.map(d => ({ ...d }))] : prices
+}
+function imgWithNanoBananaPrices(prices: ImgPrice[]): ImgPrice[] {
+  return imgWithSeededPrices(prices, IMG_PRICE_SEED_NANO, d => d.model === IMG_NANO_BANANA_21)
+}
+function imgWithGpt26Prices(prices: ImgPrice[]): ImgPrice[] {
+  return imgWithSeededPrices(prices, IMG_PRICE_SEED_GPT26, d => d.model.startsWith('gpt-image-2.6-'))
 }
 function imgLoadPrices(): ImgPrice[] {
   if (typeof window === 'undefined') return []
@@ -159,11 +181,11 @@ function imgLoadPrices(): ImgPrice[] {
     const raw = kvGet(IMG_PRICES_KEY)
     if (raw) {
       const p = JSON.parse(raw)
-      if (Array.isArray(p)) return imgWithNanoBananaPrices(p)
+      if (Array.isArray(p)) return imgWithGpt26Prices(imgWithNanoBananaPrices(p))
     }
   } catch { /* ignore */ }
   // 全新安装：默认表已含种子，标记为已补，之后用户删行不会被补回
-  try { kvSet(IMG_PRICES_SEEDED_KEY, JSON.stringify([IMG_PRICE_SEED_NANO])) } catch { /* ignore */ }
+  try { kvSet(IMG_PRICES_SEEDED_KEY, JSON.stringify([IMG_PRICE_SEED_NANO, IMG_PRICE_SEED_GPT26])) } catch { /* ignore */ }
   return JSON.parse(JSON.stringify(IMG_DEFAULT_PRICES))
 }
 function imgSavePrices(p: ImgPrice[]) { try { kvSet(IMG_PRICES_KEY, JSON.stringify(p)) } catch { /* ignore */ } }
@@ -222,7 +244,7 @@ const ZEROFA_ARK_BASE_URL = 'https://api.fornai.im/ark'
 interface ImgChannel { id: string; name: string; baseUrl: string; apiKeyEnc: string; keyMask: string }
 interface ImgRef { dataUri?: string | null; url?: string; name?: string }
 interface ImgCaseParams { [k: string]: any }
-interface ImgSynthRefs { count: number; mime: 'image/png' | 'image/jpeg' | 'image/webp' }
+interface ImgSynthRefs { count: number; mime: 'image/png' | 'image/jpeg' | 'image/webp'; size?: number }
 interface ImgCaseDef { name: string; desc: string; params: ImgCaseParams; needRef?: boolean; prompt?: string; synthRefs?: ImgSynthRefs; expect?: 'unsupported' }
 
 const IMG_TEST_SETS: Record<ImgApiType, ImgCaseDef[]> = {
@@ -322,18 +344,39 @@ const IMG_NANO_GENERATE_CONTENT_CASES: ImgCaseDef[] = [
   { name: 'google_search · 1K 16:9', desc: 'tools: [{google_search:{}}] · imageConfig 1K · 16:9：响应 groundingMetadata 里要有搜索证据（搜索可能单独计费）', params: { imageSize: '1K', aspectRatio: '16:9', googleSearch: true }, prompt: '用 Google 搜索查今天旧金山的天气，并把结果画成一张简洁的天气信息图' },
 ]
 
-// gpt-image 家族追加在通用 openai 用例之后，只补两代之间有差别的档位（snapshot 按前缀归族，见 img-report/gpt-image.ts）。
-// gpt-image-2 不支持 xhigh / max：只认 4xx 拒绝。2.5 支持：出图且 quality 回显一致才算通过。
+// gpt-image 家族追加在通用 openai 用例之后（snapshot 按前缀归族，见 img-report/gpt-image.ts）。
+// gpt-image-2 不支持 xhigh / max：只认 4xx 拒绝。2.5 与 2.6 支持：出图且 quality 回显一致才算通过。
 // gpt-image-2 不测透明背景：只有社区证据（2026-09-16 开放 preview，2026-10-01 起回 400 invalid_value），官方状态不明。
+// 2.6 另测 complexity（low / medium，以及不写时按默认 high；没回显只记 info）、GIF、SVG、markup。
+// SVG 用短提示词，并带 size、quality=medium、background=transparent、svg.model=gpt-6.1-terra。不传 reasoning。
+// 模型名用模型框里的值。矢量不按像素核对尺寸，也不按采样判断透明。
+// GIF 用官方提示词示例：单帧 512，9 帧，每帧 200ms。帧数按 GIF 图像块核对，须等于 frame_count；不核对每帧时长。
+// 9 帧排成 3×3，1024 会合成 3072×3072，超出像素预算。另有一条 frame_count=2：默认是 9，只发 9 证明不了字段被留下。
+// markup 走 edits：同尺寸透明 PNG，不带 mask。2xx 出图即通过，不核对画面是否跟着标记改。
+const IMG_GPT_XHIGH_MAX: ImgCaseDef[] = [
+  { name: 'quality=xhigh', desc: '出图且响应 quality 回显为 xhigh（被悄悄降档会在回显上露出来）', params: { size: '1024x1024', n: 1, quality: 'xhigh' } },
+  { name: 'quality=max', desc: '最高档位：出图且响应 quality 回显为 max', params: { size: '1024x1024', n: 1, quality: 'max' } },
+]
+const IMG_GPT_TRANSPARENT: ImgCaseDef = { name: 'background=transparent · png', desc: '透明背景 + png：采样像素，透明像素占比 ≥ 1% 才算真透明', params: { size: '1024x1024', n: 1, background: 'transparent', output_format: 'png' }, prompt: '单个红苹果贴纸素材，居中，背景完全透明' }
 const IMG_GPT_IMAGE_CASES: Record<ImgGptImageFamily, ImgCaseDef[]> = {
   v2: [
     { name: 'quality=xhigh（预期不支持）', desc: 'gpt-image-2 只支持 low / medium / high / auto：只认 4xx 拒绝，出了图就是渠道接受了官方不支持的档位', params: { size: '1024x1024', n: 1, quality: 'xhigh' }, expect: 'unsupported' },
     { name: 'quality=max（预期不支持）', desc: 'gpt-image-2 只支持 low / medium / high / auto：只认 4xx 拒绝，出了图就是渠道接受了官方不支持的档位', params: { size: '1024x1024', n: 1, quality: 'max' }, expect: 'unsupported' },
   ],
   'v2.5': [
-    { name: 'quality=xhigh', desc: '2.5 新增档位：出图且响应 quality 回显为 xhigh（被悄悄降档会在回显上露出来）', params: { size: '1024x1024', n: 1, quality: 'xhigh' } },
-    { name: 'quality=max', desc: '2.5 最高档位：出图且响应 quality 回显为 max', params: { size: '1024x1024', n: 1, quality: 'max' } },
-    { name: 'background=transparent · png', desc: '透明背景 + png：采样像素，透明像素占比 ≥ 1% 才算真透明', params: { size: '1024x1024', n: 1, background: 'transparent', output_format: 'png' }, prompt: '单个红苹果贴纸素材，居中，背景完全透明' },
+    ...IMG_GPT_XHIGH_MAX,
+    IMG_GPT_TRANSPARENT,
+  ],
+  'v2.6': [
+    ...IMG_GPT_XHIGH_MAX,
+    IMG_GPT_TRANSPARENT,
+    { name: 'complexity=low', desc: '规划档 complexity=low，与 quality 分开。出图；响应回显必须是 low，没回显只记 info', params: { size: '1024x1024', n: 1, complexity: 'low' } },
+    { name: 'complexity=medium', desc: '规划档 complexity=medium。出图；响应回显必须是 medium，没回显只记 info。medium 不是默认值，回显对得上才说明上游留下了这个字段', params: { size: '1024x1024', n: 1, complexity: 'medium' } },
+    { name: 'complexity 默认不写', desc: '不传 complexity。官方默认 high：回显 high 通过，回成别的档未通过，没回显只记 info', params: { size: '1024x1024', n: 1, complexityDefault: true } },
+    { name: 'output_format=gif', desc: '官方提示词示例：output_format=gif · size=512x512 · quality=high · frame_count=9 · frame_duration_ms=200。文件头须是 GIF，按单帧尺寸核对，帧数按图像块核对且须等于 frame_count。不核对每帧时长', params: { size: '512x512', n: 1, quality: 'high', output_format: 'gif', frame_count: 9, frame_duration_ms: 200 }, prompt: 'A little monkey in an olive-green hooded coat stands in a snowy pine forest at dusk. A wooden cabin glows in the background. The monkey holds a glowing amber paper lantern at chest height, slowly lifts it, looks up and blinks, then lowers it back to its starting pose. Keep the lantern in its hands and the camera still. Make the motion loop smoothly.' },
+    { name: 'frame_count=2', desc: 'GIF 帧数取 API reference 允许的 2–16 里、且不是默认 9 的最小值。帧数须等于 2。不发 frame_duration_ms', params: { size: '512x512', n: 1, quality: 'high', output_format: 'gif', frame_count: 2 }, prompt: 'A red square on a white background blinks once and returns to the same pose. Seamless loop.' },
+    { name: 'output_format=svg', desc: 'output_format=svg · size=1024x1024 · quality=medium · background=transparent · n=1 · svg.model=gpt-6.1-terra。返回体须是 SVG 文档，不按位图像素核对尺寸或透明', params: { size: '1024x1024', n: 1, quality: 'medium', background: 'transparent', output_format: 'svg', svg: { model: 'gpt-6.1-terra' } }, prompt: 'A simple flat vector logo of a wheat sheaf and flour bag, clean lines, two solid colors, no text, transparent background' },
+    { name: 'markup 标注', desc: 'edits：浏览器合成 1024×1024 首图，再附一张同尺寸、含透明像素的 PNG 到 markup。不带 mask。HTTP 2xx 且出图即通过，不核对画面是否跟着标记改', params: { size: '1024x1024', n: 1, markup: true }, needRef: true, synthRefs: { count: 1, mime: 'image/png', size: 1024 }, prompt: 'Edit the image using the markup overlay. Change only the marked region.' },
   ],
 }
 
@@ -343,11 +386,15 @@ interface ImgPlan {
   method: string
   headers: Record<string, string>
   body?: any
-  multipart?: { fields: Record<string, string>; imagesField: string; images: string[] }
+  multipart?: { fields: Record<string, string>; imagesField: string; images: string[]; markup?: boolean }
   /** 多轮用例的第一轮请求：先发它，拿到 interaction id 再发 body（见 runCase） */
   pre?: { body: any }
   /** 不随请求发送。用来区分 nano 的 generateContent 与通用 Gemini：两者 URL 相同，请求体也都没有 model。 */
   geminiEndpoint?: ImgGeminiEndpoint
+  /** 不随请求发送。2.6「不写 complexity」时，回显按官方默认 high 核对。 */
+  complexityDefault?: boolean
+  /** 不随请求发送。markup 透明层与合成首图共用这个边长。 */
+  markupSide?: number
 }
 
 function imgUid() { return Date.now().toString(36) + Math.random().toString(36).slice(2, 7) }
@@ -440,7 +487,12 @@ function imgResponseForDisplay(body: string): { body: string; complete: boolean 
 function imgB64ToDataURI(b: string, fmt: string) {
   if (!b) return null
   if (b.startsWith('data:')) return b
-  return `data:image/${fmt || 'png'};base64,${b}`
+  const mime = fmt === 'svg' ? 'image/svg+xml' : `image/${fmt || 'png'}`
+  return `data:${mime};base64,${b}`
+}
+function imgFormatToken(fmt: string): string {
+  const s = fmt.toLowerCase().replace(/^image\//, '').replace(/\+xml$/, '')
+  return s === 'jpg' ? 'jpeg' : s
 }
 function imgParseRatio(s: string | null): number | null {
   if (!s) return null
@@ -577,8 +629,8 @@ function imgResolveTierKey(type: ImgApiType, body: any): string {
 }
 function imgLookupPrice(model: string, type: ImgApiType, body: any, prices: ImgPrice[]): { usd: number; tier: string; note: string; inputUsd: number } | null {
   if (!model || !prices.length) return null
-  // nano 2.1 的模型名带前缀 / 改大小写时，价格行仍按官方 id 匹配
-  const key = imgIsNanoBanana21(model) ? IMG_NANO_BANANA_21 : model
+  // nano 2.1 带前缀时仍按官方 id。gpt-image 先认模型框原文，没有再去掉前缀和日期。
+  const key = imgIsNanoBanana21(model) ? IMG_NANO_BANANA_21 : imgPickPriceModel(model, prices.map(p => p.model))
   const rows = prices.filter(p => p.model === key)
   if (!rows.length) return null
   const tierKey = imgResolveTierKey(type, body)
@@ -604,16 +656,25 @@ function imgBuildPlan(type: ImgApiType, model: string, prompt: string, params: I
       if (params.quality && params.quality !== 'auto') fields.quality = params.quality
       if (params.output_format) fields.output_format = params.output_format
       if (params.background) fields.background = params.background
+      if (params.complexity) fields.complexity = params.complexity
       const images: string[] = []
       for (let i = 1; i <= refCount; i++) images.push(`__REF_${i}_BLOB__`)
-      return { kind: 'multipart', endpoint: '/v1/images/edits', method: 'POST', headers: { Authorization: '{{APIKEY}}' }, multipart: { fields, imagesField: 'image[]', images } }
+      return { kind: 'multipart', endpoint: '/v1/images/edits', method: 'POST', headers: { Authorization: '{{APIKEY}}' }, multipart: { fields, imagesField: 'image[]', images, ...(params.markup ? { markup: true } : {}) } }
     }
     const body: any = { model, prompt, n: parseInt(params.n) || 1 }
     if (params.size && params.size !== 'auto') body.size = params.size
     if (params.quality && params.quality !== 'auto') body.quality = params.quality
     if (params.output_format) body.output_format = params.output_format
     if (params.background) body.background = params.background
-    return { kind: 'json', endpoint: '/v1/images/generations', method: 'POST', headers: { Authorization: '{{APIKEY}}', 'Content-Type': 'application/json' }, body }
+    if (params.complexity) body.complexity = params.complexity
+    if (params.frame_count != null) body.frame_count = params.frame_count
+    if (params.frame_duration_ms != null) body.frame_duration_ms = params.frame_duration_ms
+    if (params.svg) body.svg = params.svg
+    return {
+      kind: 'json', endpoint: '/v1/images/generations', method: 'POST',
+      headers: { Authorization: '{{APIKEY}}', 'Content-Type': 'application/json' }, body,
+      ...(params.complexityDefault ? { complexityDefault: true } : {}),
+    }
   }
   if (type === 'grok') {
     const body: any = { model, prompt }
@@ -722,10 +783,15 @@ function imgBuildPlan(type: ImgApiType, model: string, prompt: string, params: I
 
 function imgPlanToPreview(plan: ImgPlan): string {
   if (plan.kind === 'json') return JSON.stringify(plan.body, null, 2)
+  // _markup 不是文本字段。预览改过之后只认这份 JSON：为 true 才在发送时附透明 PNG。
+  const markup = !!plan.multipart?.markup
   return JSON.stringify({
-    _note: 'multipart/form-data — 除下方字段外，还会附加参考图到 image[] 字段',
+    _note: markup
+      ? 'multipart/form-data — 除下方字段外，还会附加参考图到 image[]，以及一张同尺寸透明 PNG 到 markup（_markup 为 true 才附）'
+      : 'multipart/form-data — 除下方字段外，还会附加参考图到 image[] 字段',
     _fields: plan.multipart?.fields,
     _images: plan.multipart?.images,
+    ...(markup ? { _markup: true } : {}),
   }, null, 2)
 }
 
@@ -738,6 +804,7 @@ function imgParseEditedPreview(plan: ImgPlan, text: string): ImgPlan {
       fields: parsed._fields || {},
       imagesField: plan.multipart!.imagesField,
       images: parsed._images || plan.multipart!.images,
+      ...(parsed._markup === true ? { markup: true } : {}),
     }
   }
   return np
@@ -791,6 +858,20 @@ function imgSetResolutionTierTarget(targets: Record<string, any>, value: string 
   targets.resolutionTierLabelReq = imgResolutionTierLabel(value, base)
 }
 
+/** data URI 里 base64 段还原成字节。GIF 帧数要从图像块数，不能靠画布。 */
+function imgDataUriBytes(dataUri: string): Uint8Array | null {
+  const comma = dataUri.indexOf(',')
+  if (comma < 0) return null
+  try {
+    const bin = atob(dataUri.slice(comma + 1).replace(/\s/g, ''))
+    const out = new Uint8Array(bin.length)
+    for (let i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i) & 255
+    return out
+  } catch {
+    return null
+  }
+}
+
 function imgDeriveTargets(type: ImgApiType, plan: ImgPlan): Record<string, any> {
   const t: Record<string, any> = {}
   const body = plan.kind === 'json' ? plan.body : (plan.multipart?.fields) || {}
@@ -802,8 +883,18 @@ function imgDeriveTargets(type: ImgApiType, plan: ImgPlan): Record<string, any> 
   if (type === 'openai') {
     if (typeof body.quality === 'string' && body.quality) t.qualityReq = body.quality
     if (typeof body.background === 'string' && body.background) t.bgReq = body.background
+    if (typeof body.complexity === 'string' && body.complexity) t.complexityReq = body.complexity
+    else if (plan.complexityDefault) t.complexityDefault = true
+    // 只核正整数。时长不在这里比对：浏览器画布只露出第一帧，帧数改从 GIF 图像块数。
+    if (typeof body.frame_count === 'number' && Number.isInteger(body.frame_count) && body.frame_count > 0) t.frameCountReq = body.frame_count
     // 枚举外的 quality，或 gpt-image-2 带 xhigh / max：只认 4xx 拒绝
     if (imgGptQualityRejected(String(body.model || ''), body.quality)) { t.strictReject = true; t.rejectCheck = 'quality' }
+    // SVG 是矢量文档，没有可核对的栅格宽高
+    if (String(body.output_format || '').toLowerCase() === 'svg') {
+      t.svg = true
+      delete t.wReq
+      delete t.hReq
+    }
   }
   if (type === 'grok') { imgSetResolutionTierTarget(t, body.resolution); t.ratioReq = (body.aspect_ratio && body.aspect_ratio !== 'auto') ? body.aspect_ratio : null }
   if (type === 'gemini') {
@@ -883,6 +974,11 @@ async function imgExecutePlan(plan: ImgPlan, channel: { baseUrl: string; apiKey:
       const resp = await fetch(dataUri)
       const blob = await resp.blob()
       fd.append(plan.multipart!.imagesField, blob, 'ref' + (++idx) + '.png')
+    }
+    if (plan.multipart!.markup) {
+      const dataUri = imgSynthMarkup(plan.markupSide || imgSquareSize(plan.multipart!.fields.size))
+      const markupResp = await fetch(dataUri)
+      fd.append('markup', await markupResp.blob(), 'markup.png')
     }
     delete headers['Content-Type']
     delete headers['content-type']
@@ -1011,8 +1107,26 @@ class ImgSynthUnsupportedError extends Error {
 const IMG_SYNTH_COLORS = ['#e23b3b', '#2f6fed', '#1f9d55', '#f0b429', '#7c3aed']
 const IMG_SYNTH_SIZE = 256
 // 底色 + 白圆 + 序号：比纯色块多一点内容，模型有东西可看，也方便肉眼分辨是第几张
-function imgDrawSynth(ctx: CanvasRenderingContext2D | OffscreenCanvasRenderingContext2D, index: number) {
-  const n = IMG_SYNTH_SIZE
+function imgSquareSize(size: unknown, fallback = IMG_SYNTH_SIZE): number {
+  const m = /^(\d+)x(\d+)$/i.exec(String(size || ''))
+  if (m && m[1] === m[2]) return Number(m[1])
+  return fallback
+}
+
+/** markup 须与首图同尺寸，并且含透明像素。只在一角涂一块不透明色。 */
+function imgSynthMarkup(size: number): string {
+  const canvas = document.createElement('canvas')
+  canvas.width = size
+  canvas.height = size
+  const ctx = canvas.getContext('2d')
+  if (!ctx) throw new Error('无法创建画布')
+  ctx.clearRect(0, 0, size, size)
+  ctx.fillStyle = 'rgba(226, 59, 59, 0.95)'
+  ctx.fillRect(Math.round(size * 0.62), Math.round(size * 0.12), Math.round(size * 0.22), Math.round(size * 0.22))
+  return canvas.toDataURL('image/png')
+}
+
+function imgDrawSynth(ctx: CanvasRenderingContext2D | OffscreenCanvasRenderingContext2D, index: number, n = IMG_SYNTH_SIZE) {
   ctx.fillStyle = IMG_SYNTH_COLORS[index % IMG_SYNTH_COLORS.length]
   ctx.fillRect(0, 0, n, n)
   ctx.fillStyle = '#ffffff'
@@ -1025,20 +1139,20 @@ function imgDrawSynth(ctx: CanvasRenderingContext2D | OffscreenCanvasRenderingCo
   ctx.textBaseline = 'middle'
   ctx.fillText(String(index + 1), n / 2, n / 2 + 4)
 }
-async function imgSynthRef(mime: ImgSynthRefs['mime'], index: number): Promise<ImgRef> {
+async function imgSynthRef(mime: ImgSynthRefs['mime'], index: number, size = IMG_SYNTH_SIZE): Promise<ImgRef> {
   const canvas = document.createElement('canvas')
-  canvas.width = IMG_SYNTH_SIZE
-  canvas.height = IMG_SYNTH_SIZE
+  canvas.width = size
+  canvas.height = size
   const ctx = canvas.getContext('2d')
   if (!ctx) throw new Error('无法创建画布')
-  imgDrawSynth(ctx, index)
+  imgDrawSynth(ctx, index, size)
   let dataUri = canvas.toDataURL(mime)
   if (/^data:([^;,]+)/.exec(dataUri)?.[1] !== mime) {
     // Safari 的 toDataURL 不认 webp，会静默回退成 png；convertToBlob 同样可能回退，所以按 blob 类型再核一次
     try {
-      const oc = new OffscreenCanvas(IMG_SYNTH_SIZE, IMG_SYNTH_SIZE)
+      const oc = new OffscreenCanvas(size, size)
       const octx = oc.getContext('2d')
-      if (octx) imgDrawSynth(octx, index)
+      if (octx) imgDrawSynth(octx, index, size)
       const blob = await oc.convertToBlob({ type: mime })
       if (blob.type === mime) dataUri = (await imgBlobToDataURI(blob)) ?? dataUri
     } catch { /* 走下面的抛错 */ }
@@ -1089,6 +1203,8 @@ function imgBuildChecks(rec: ImgRecord): ImgCheck[] {
     const tag = rec.images.length > 1 ? `图${i + 1} ` : ''
     if (t.wReq && t.hReq) {
       c.push({ name: tag + '精确尺寸', target: `${t.wReq}×${t.hReq}`, actual: `${im.w}×${im.h}`, pass: im.w === t.wReq && im.h === t.hReq })
+    } else if (t.svg) {
+      c.push({ name: tag + '尺寸', target: '矢量，不核对像素', actual: im.w > 0 && im.h > 0 ? `${im.w}×${im.h}` : '无栅格尺寸', pass: true, info: true })
     } else if (t.resolutionTierBaseReq) {
       const tier = imgCheckResolutionTier(t.resolutionTierBaseReq, im.w, im.h)
       const signedDev = `${tier.devPct > 0 ? '+' : ''}${tier.devPct}%`
@@ -1108,7 +1224,7 @@ function imgBuildChecks(rec: ImgRecord): ImgCheck[] {
         : { name: tag + '宽高比', target: t.ratioReq, actual: '未能读取图片尺寸', pass: false })
     }
     if (t._of) {
-      const norm = (f: string) => f === 'jpg' ? 'jpeg' : f
+      const norm = (f: string) => imgFormatToken(f)
       // 格式以文件头字节为准；响应标签与字节不一致时一并写出
       const shown = im.formatLabel && norm(im.formatLabel) !== norm(im.format) ? `${im.format}（标签 ${im.formatLabel}）` : im.format
       c.push({ name: tag + '输出格式', target: t._of, actual: shown, pass: norm(im.format) === norm(t._of) })
@@ -1177,7 +1293,12 @@ function imgMakeSentPreview(plan: ImgPlan): string {
     return o
   }
   if (plan.kind === 'json') return JSON.stringify(truncate(plan.body), null, 2)
-  return JSON.stringify({ _multipart: true, fields: truncate(plan.multipart!.fields), images: `[${plan.multipart!.images.length} 张参考图 blob]` }, null, 2)
+  return JSON.stringify({
+    _multipart: true,
+    fields: truncate(plan.multipart!.fields),
+    images: `[${plan.multipart!.images.length} 张参考图 blob]`,
+    ...(plan.multipart!.markup ? { markup: '[透明 PNG blob]' } : {}),
+  }, null, 2)
 }
 
 // ─── 导出：HTML 报告 / 图片（DOM 截图模式，参考 LlmBatchTool.tsx 的 html2canvas 套路）─
@@ -1879,10 +2000,11 @@ function ImgApiTestTool() {
     const m = model.trim() || IMG_PLACEHOLDER_MODEL[apiType]
     if (!m.trim()) { toastShow('请填写模型编码'); return }
     let refs = refImagesRef.current
-    if (c.synthRefs) {
+    if (c.synthRefs && !c.params.markup) {
       try {
         const made: ImgRef[] = []
-        for (let i = 0; i < c.synthRefs.count; i++) made.push(await imgSynthRef(c.synthRefs.mime, i))
+        const side = c.synthRefs.size || IMG_SYNTH_SIZE
+        for (let i = 0; i < c.synthRefs.count; i++) made.push(await imgSynthRef(c.synthRefs.mime, i, side))
         refs = made
       } catch (e: any) {
         if (e instanceof ImgSynthUnsupportedError) {
@@ -1898,7 +2020,7 @@ function ImgApiTestTool() {
         setCases([...casesRef.current])
         return
       }
-    } else if (c.needRef && refs.length === 0) { toastShow('该用例需要参考图'); return }
+    } else if (!c.synthRefs && c.needRef && refs.length === 0) { toastShow('该用例需要参考图'); return }
     const apiKey = await imgDecryptApiKey(ch.apiKeyEnc)
     if (!apiKey) { toastShow('渠道 API Key 无效，请重新编辑保存'); return }
 
@@ -1918,6 +2040,28 @@ function ImgApiTestTool() {
       catch (e: any) {
         c.status = 'error'
         c.result = emptyRecord(c, ch.name, m, '请求体 JSON 无法解析：' + (e?.message || e))
+        setCases([...casesRef.current])
+        return
+      }
+    }
+    // markup 的透明层按最终请求的 size 画。首图也得用这个尺寸，不能沿用改预览之前的用例参数。
+    if (c.synthRefs && c.params.markup) {
+      try {
+        const made: ImgRef[] = []
+        const side = imgSquareSize(plan.multipart?.fields?.size ?? c.params.size)
+        plan.markupSide = side
+        for (let i = 0; i < c.synthRefs.count; i++) made.push(await imgSynthRef(c.synthRefs.mime, i, side))
+        refs = made
+      } catch (e: any) {
+        if (e instanceof ImgSynthUnsupportedError) {
+          c.status = 'idle'
+          c.result = null
+          setCases([...casesRef.current])
+          toastShow(`「${c.name}」${e.message}`)
+          return
+        }
+        c.status = 'error'
+        c.result = emptyRecord(c, ch.name, m, e?.message || String(e))
         setCases([...casesRef.current])
         return
       }
@@ -1997,15 +2141,26 @@ function ImgApiTestTool() {
             if (!dim.w || !dim.h) dim = { w: decoded.w, h: decoded.h }
           }
           const uriFormat = imgDetectUriFormat(dataUri)
-          const labelFmt = (uriFormat !== 'unknown' ? uriFormat : imgDetectResponseFormat(im.mimeType, im.url)).replace('jpg', 'jpeg')
-          const sniffed = dataUri ? sniffImageMime(dataUri)?.slice(6) : undefined
-          const format = sniffed || (uriFormat === 'unknown' ? labelFmt : uriFormat)
+          const labelFmt = imgFormatToken(uriFormat !== 'unknown' ? uriFormat : imgDetectResponseFormat(im.mimeType, im.url))
+          const sniffedMime = dataUri ? sniffImageMime(dataUri) : null
+          const sniffed = sniffedMime ? imgFormatToken(sniffedMime) : undefined
+          // SVG 只认文件头。请求上的 image/svg+xml 是我们自己盖的，认不出时不能拿它顶上。
+          const format = targets.svg
+            ? (sniffed || '无法识别')
+            : (sniffed || (uriFormat === 'unknown' ? labelFmt : imgFormatToken(uriFormat)))
+          // 历史落库会丢掉 dataUri。请求了 frame_count 时先把帧数记在图上，旧记录没有这个字段。
+          let gifFrames: number | null | undefined
+          if (typeof targets.frameCountReq === 'number') {
+            const bytes = dataUri ? imgDataUriBytes(dataUri) : null
+            gifFrames = bytes ? imgCountGifFrames(bytes) : null
+          }
           imgs.push({
             dataUri, thumb, url: im.url || null, w: dim.w, h: dim.h,
             format,
             ...(sniffed && labelFmt !== 'unknown' && labelFmt !== format ? { formatLabel: labelFmt } : {}),
             carrier: im.carrier,
             ...(alphaRatio != null ? { alphaRatio } : {}),
+            ...(gifFrames !== undefined ? { gifFrames } : {}),
           })
         }
         rec.images = imgs

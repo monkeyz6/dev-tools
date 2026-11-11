@@ -26,7 +26,7 @@ export function imgClassify(r: ImgRecord): 'pass' | 'fail' | 'error' {
 }
 
 /** 校验项 → 能力。多图记录里校验项名带「图N 」前缀，先剥掉再归类 */
-const IMG_CAPABILITY_ORDER = ['request', 'size', 'tier', 'ratio', 'n', 'quality', 'outputFormat', 'background', 'responseFormat', 'echo', 'usage', 'structure', 'tokens', 'fingerprint', 'search', 'multiTurn'] as const
+const IMG_CAPABILITY_ORDER = ['request', 'size', 'tier', 'ratio', 'n', 'quality', 'complexity', 'outputFormat', 'gifFrames', 'background', 'responseFormat', 'echo', 'usage', 'structure', 'tokens', 'fingerprint', 'search', 'multiTurn'] as const
 const IMG_CAPABILITY_LABEL: Record<string, string> = {
   request: '接口连通',
   size: '精确像素尺寸',
@@ -34,10 +34,12 @@ const IMG_CAPABILITY_LABEL: Record<string, string> = {
   ratio: '宽高比 aspect_ratio',
   n: '多图 n 参数',
   quality: 'quality 档位',
+  complexity: 'complexity 规划',
   background: '透明背景 background',
   echo: '参数回显',
   usage: '用量字段 usage',
   outputFormat: 'output_format 输出格式',
+  gifFrames: 'GIF 帧数 frame_count',
   responseFormat: '返回载体',
   structure: '响应结构与模型回显',
   tokens: '用量 token 对账',
@@ -54,10 +56,12 @@ function imgCapabilityKey(rawName: string): string | null {
   if (name === '宽高比') return 'ratio'
   if (name === '返回张数 (n)') return 'n'
   if (name === 'quality' || name === 'quality 回显') return 'quality'
+  if (name === 'complexity 回显') return 'complexity'
   if (name === '透明背景') return 'background'
   if (name.startsWith('参数回显')) return 'echo'
   if (name === '用量字段') return 'usage'
   if (name === '输出格式') return 'outputFormat'
+  if (name === 'GIF 帧数') return 'gifFrames'
   if (name === 'response_format' || name === '返回载体') return 'responseFormat'
   if (name === '响应结构' || name === '模型回显') return 'structure'
   if (name === '图片输出 token') return 'tokens'

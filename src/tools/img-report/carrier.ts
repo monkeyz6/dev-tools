@@ -74,15 +74,72 @@ function imageMime(mime: string | null): boolean {
   return !!mime && /^image\//i.test(mime)
 }
 
-// mime 声明不可信时看 base64 文件头：PNG / JPEG / GIF / WebP。
+function stripSvgPreamble(s: string): string {
+  let rest = s.trimStart()
+  for (let i = 0; i < 4; i++) {
+    if (rest.startsWith('<!--')) {
+      const end = rest.indexOf('-->')
+      if (end < 0) return rest
+      rest = rest.slice(end + 3).trimStart()
+      continue
+    }
+    if (/^<!DOCTYPE\s/i.test(rest)) {
+      const end = rest.indexOf('>')
+      if (end < 0) return rest
+      rest = rest.slice(end + 1).trimStart()
+      continue
+    }
+    break
+  }
+  return rest
+}
+
+function sniffSvg(head: string): boolean {
+  let s = head
+  if (s.charCodeAt(0) === 0xef && s.charCodeAt(1) === 0xbb && s.charCodeAt(2) === 0xbf) s = s.slice(3)
+  s = stripSvgPreamble(s.trimStart())
+  if (/^<svg[\s>/]/i.test(s)) return true
+  if (!/^<\?xml/i.test(s)) return false
+  const after = stripSvgPreamble(s.replace(/^<\?xml[^>]*\?>/i, '').trimStart())
+  return /^<svg[\s>/]/i.test(after)
+}
+
+// 栅格魔数只看这么多个 base64 字符。SVG 的序言可以更长，没认出时再读下面这一段，不扫整张图。
+const SNIFF_RASTER_ALPHABET = 240
+const SNIFF_SVG_ALPHABET = 8192
+
+function b64AlphabetPrefix(raw: string, limit: number): string {
+  const header = /^data:[^,]*,/i.exec(raw)
+  const start = header ? header[0].length : 0
+  const chars: string[] = []
+  const end = Math.min(raw.length, start + limit * 2)
+  for (let i = start; i < end && chars.length < limit; i++) {
+    const c = raw.charCodeAt(i)
+    const ok = (c >= 48 && c <= 57) || (c >= 65 && c <= 90) || (c >= 97 && c <= 122) || c === 43 || c === 47
+    if (ok) chars.push(raw[i])
+  }
+  return chars.join('')
+}
+
+function decodeB64Prefix(alphabet: string): string | null {
+  const n = alphabet.length - (alphabet.length % 4)
+  if (n <= 0) return ''
+  try { return atob(alphabet.slice(0, n)) } catch { return null }
+}
+
+// mime 声明不可信时看 base64 文件头：PNG / JPEG / GIF / WebP / SVG。
 export function sniffImageMime(raw: string): string | null {
-  const b64 = raw.replace(/^data:[^,]*,/i, '').slice(0, 24).replace(/[^A-Za-z0-9+/]/g, '')
-  let head = ''
-  try { head = atob(b64.slice(0, b64.length - (b64.length % 4))) } catch { return null }
+  const shortAlpha = b64AlphabetPrefix(raw, SNIFF_RASTER_ALPHABET)
+  const head = decodeB64Prefix(shortAlpha)
+  if (head == null) return null
   if (head.startsWith('\x89PNG')) return 'image/png'
   if (head.startsWith('\xFF\xD8\xFF')) return 'image/jpeg'
   if (head.startsWith('GIF8')) return 'image/gif'
   if (head.startsWith('RIFF') && head.slice(8, 12) === 'WEBP') return 'image/webp'
+  if (sniffSvg(head)) return 'image/svg+xml'
+  if (shortAlpha.length < SNIFF_RASTER_ALPHABET) return null
+  const longHead = decodeB64Prefix(b64AlphabetPrefix(raw, SNIFF_SVG_ALPHABET))
+  if (longHead && sniffSvg(longHead)) return 'image/svg+xml'
   return null
 }
 

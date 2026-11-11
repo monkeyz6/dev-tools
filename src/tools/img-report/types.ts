@@ -64,6 +64,8 @@ export interface ImgRecImage {
   c2pa?: ImgC2paResult
   /** 请求了 background=transparent 时才采样：64×64 下 alpha<250 的像素占比 */
   alphaRatio?: number
+  /** 请求了 frame_count 时，从 GIF 图像块数出来。读不出为 null。旧记录没有。 */
+  gifFrames?: number | null
 }
 
 /** nano 模型在 Interactions 与 generateContent 之间的选择。旧记录没有该字段。 */
@@ -95,6 +97,8 @@ export interface ImgOpenAiEcho {
   size: string | null
   output_format: string | null
   background: string | null
+  /** 2.6 的规划档。旧记录没有这个字段。 */
+  complexity?: string | null
   usage: { input_tokens: number | null; output_tokens: number | null } | null
 }
 
